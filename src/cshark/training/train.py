@@ -5,10 +5,10 @@ import torch
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-import pytorch_lightning as pl
-import pytorch_lightning.callbacks as callbacks
-from pytorch_lightning.callbacks.base import Callback
-from pytorch_lightning.loggers import WandbLogger
+import lightning as pl
+import lightning.pytorch.callbacks as callbacks
+from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.loggers.wandb import WandbLogger
 
 from skimage.transform import resize
 
@@ -33,26 +33,26 @@ class VizCallback(Callback):
         self.starts = [int(s.split(':')[1]) for s in self.loci]
         #self.chr_names = ['chr1', 'chr2', 'chr3', 'chr3', 'chr10', 'chr15', 'chr12', 'chr20']
         #self.starts = [66000000, 500000, 145500000, 122700000, 59100000, 89300000, 47000000]
-        self.seq = "corigami_data/data/hg19/dna_sequence"
+        self.seq = "cshark_data/data/hg19/dna_sequence"
         # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE167200
-        self.ctcf = {celltype: f"corigami_data/data/hg19/{celltype}/genomic_features/ctcf.bw" for celltype in celltypes}
+        self.ctcf = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/ctcf.bw" for celltype in celltypes}
         self.atac = {celltype: None for celltype in celltypes}  # for if we are not using ATAC
-        #self.atac = {celltype: f"corigami_data/data/hg19/{celltype}/genomic_features/atac.bw" for celltype in celltypes}
+        #self.atac = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/atac.bw" for celltype in celltypes}
         # /mnt/rstor/genetics/JinLab/fxj45/WWW/ssz20/bigwig
-        self.h3k27ac = {celltype: f"corigami_data/data/hg19/{celltype}/genomic_features/h3k27ac.bw" for celltype in celltypes}
-        self.h3k4me3 = {celltype: f"corigami_data/data/hg19/{celltype}/genomic_features/h3k4me3.bw" for celltype in celltypes}
+        self.h3k27ac = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k27ac.bw" for celltype in celltypes}
+        self.h3k4me3 = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k4me3.bw" for celltype in celltypes}
         # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM733679
-        self.h3k36me3 = {celltype: f"corigami_data/data/hg19/{celltype}/genomic_features/h3k36me3.bw" for celltype in celltypes}
+        self.h3k36me3 = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k36me3.bw" for celltype in celltypes}
         # from here: /mnt/rstor/genetics/JinLab/fxj45/WWW/xww/bigwig
-        self.h3k4me1 = {celltype: f"corigami_data/data/hg19/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
-        self.h3k27me3 = {celltype: f"corigami_data/data/hg19/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
+        self.h3k4me1 = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
+        self.h3k27me3 = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
 
     def on_train_start(self, trainer, pl_module):
         print("Saving ground truth Hi-C example loci for reference")
         for celltype in self.celltypes:
             for chr_name, start in zip(self.chr_names, self.starts):
                 locus = f"{chr_name}:{start}"
-                hic = data_feature.HiCFeature(path = f'corigami_data/data/hg19/{celltype}/hic_matrix/{chr_name}.npz')
+                hic = data_feature.HiCFeature(path = f'cshark_data/data/hg19/{celltype}/hic_matrix/{chr_name}.npz')
                 mat = hic.get(start)
                 mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True)
                 os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
@@ -191,7 +191,7 @@ def init_training(args):
     # Assign seed
     pl.seed_everything(args.run_seed, workers=True)
     pl_module = TrainModule(args)
-    wandb_logger = WandbLogger(project='c.origami')
+    wandb_logger = WandbLogger(project='c.shark')
     wandb_logger.watch(pl_module.model)
     pl_trainer = pl.Trainer(strategy='ddp',
                             accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=args.trainer_num_gpu,
@@ -206,7 +206,7 @@ def init_training(args):
     trainloader = pl_module.get_dataloader(args, 'train')
     valloader = pl_module.get_dataloader(args, 'val')
     testloader = pl_module.get_dataloader(args, 'test')
-    pl_trainer.fit(pl_module, trainloader, valloader)
+    pl_trainer.fit(pl_module, train_dataloaders=trainloader, val_dataloaders=valloader)
 
 class TrainModule(pl.LightningModule):
     
@@ -233,15 +233,17 @@ class TrainModule(pl.LightningModule):
         loss = criterion(outputs, mat)
 
         metrics = {'train_step_loss': loss}
-        self.log_dict(metrics, batch_size = inputs.shape[0], prog_bar=True)
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         ret_metrics = self._shared_eval_step(batch, batch_idx)
+        self.log('val_loss', ret_metrics, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         return ret_metrics
 
     def test_step(self, batch, batch_idx):
         ret_metrics = self._shared_eval_step(batch, batch_idx)
+        self.log('test_loss', ret_metrics, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         return ret_metrics
 
     def _shared_eval_step(self, batch, batch_idx):
@@ -250,20 +252,6 @@ class TrainModule(pl.LightningModule):
         criterion = torch.nn.MSELoss()
         loss = criterion(outputs, mat)
         return loss
-
-    # Collect epoch statistics
-    def training_epoch_end(self, step_outputs):
-        step_outputs = [out['loss'] for out in step_outputs]
-        ret_metrics = self._shared_epoch_end(step_outputs)
-        metrics = {'train_loss' : ret_metrics['loss']
-                  }
-        self.log_dict(metrics, prog_bar=True)
-
-    def validation_epoch_end(self, step_outputs):
-        ret_metrics = self._shared_epoch_end(step_outputs)
-        metrics = {'val_loss' : ret_metrics['loss']
-                  }
-        self.log_dict(metrics, prog_bar=True)
 
     def _shared_epoch_end(self, step_outputs):
         loss = torch.tensor(step_outputs).mean()

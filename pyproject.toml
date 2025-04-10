@@ -22,9 +22,10 @@ requires-python = ">=3.9"
 
 [project.optional-dependencies]
 training = [
-    'pytorch-lightning==1.5.8',
-    'lightning-bolts==0.5.0',
+    'lightning',
+    'lightning-bolts',
     'scikit-image>=0.19.3',
+    'wandb'
 ]
 
 [project.urls]

@@ -1,0 +1,1 @@
+python3 src/cshark/training/train.py --data-root cshark_data/data --celltypes hESC_WT_50pct --assembly hg19 --num-gpu 1 --batch-size 2 --num-workers 8
