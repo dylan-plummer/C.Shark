@@ -1,0 +1,39 @@
+[project]
+name = 'cshark'
+version = '0.0.1'
+description = 'C.Shark: Functional insulator (FIN) analysis through deep learning of 3D genome structure, epigenome, transcriptome, and DNA sequence'
+readme = 'README.md'
+keywords = ['deep learning', 'chromatin', 'Hi-C', 'multimodal', 'epigenetics']
+authors = [{ name = 'Dylan Plummer', email = 'dmp131@case.edu' }]
+maintainers = [{ name = 'Dylan Plummer', email = 'dmp131@case.edu' }]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    'torch>=1.12.0',
+    'pandas>=1.3.0',
+    'matplotlib>=3.3.2',
+    'omegaconf>=2.1.1',
+    'tqdm>=4.64.0',
+    'pybigwig==0.3.18',
+]
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+training = [
+    'pytorch-lightning==1.5.8',
+    'lightning-bolts==0.5.0',
+    'scikit-image>=0.19.3',
+]
+
+[project.urls]
+Homepage = 'https://github.com/dylan-plummer/C.Shark'
+Repository = 'https://github.com/dylan-plummer/C.Shark'
+
+[project.scripts]
+cshark-ko = 'corigami.inference.ctcf:main'
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
