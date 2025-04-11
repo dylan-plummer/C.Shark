@@ -20,39 +20,40 @@ import cshark.data.data_feature as data_feature
 
 
 class VizCallback(Callback):
-    def __init__(self, celltypes=['gm12878'], out_dir='deeploop_viz'):
+    def __init__(self, celltypes=['gm12878'], assembly='hg19', out_dir='deeploop_viz'):
         self.out_dir = out_dir
         os.makedirs(self.out_dir, exist_ok=True)
         self.celltypes = celltypes
+        self.assembly = assembly
         self.image_scale = 256  # size of each heatmap (fixed by model)
-        self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000', 'chr3:186170000', 
+        self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000',
                      'chr11:1500000', 'chr2:162000000',
                      #'chr5:93910000', 'chr5:97000000', 'chr5:87000000', 'chr7:137000000', 'chr8:4990000', 'chr9:90930000', 'chr12:93240000', 'chr18:55160000', 'chrX:11680000',
-                     'chr10:122700000', 'chr15:59100000', 'chr12:89300000', 'chr20:47000000']
+                     'chr10:122700000', 'chr15:59100000', 'chr12:89300000']
         self.chr_names = [s.split(':')[0] for s in self.loci]
         self.starts = [int(s.split(':')[1]) for s in self.loci]
         #self.chr_names = ['chr1', 'chr2', 'chr3', 'chr3', 'chr10', 'chr15', 'chr12', 'chr20']
         #self.starts = [66000000, 500000, 145500000, 122700000, 59100000, 89300000, 47000000]
-        self.seq = "cshark_data/data/hg19/dna_sequence"
+        self.seq = f"cshark_data/data/{self.assembly}/dna_sequence"
         # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE167200
-        self.ctcf = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/ctcf.bw" for celltype in celltypes}
+        self.ctcf = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/ctcf.bw" for celltype in celltypes}
         self.atac = {celltype: None for celltype in celltypes}  # for if we are not using ATAC
         #self.atac = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/atac.bw" for celltype in celltypes}
         # /mnt/rstor/genetics/JinLab/fxj45/WWW/ssz20/bigwig
-        self.h3k27ac = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k27ac.bw" for celltype in celltypes}
-        self.h3k4me3 = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k4me3.bw" for celltype in celltypes}
+        self.h3k27ac = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k27ac.bw" for celltype in celltypes}
+        self.h3k4me3 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k4me3.bw" for celltype in celltypes}
         # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM733679
-        self.h3k36me3 = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k36me3.bw" for celltype in celltypes}
+        self.h3k36me3 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k36me3.bw" for celltype in celltypes}
         # from here: /mnt/rstor/genetics/JinLab/fxj45/WWW/xww/bigwig
-        self.h3k4me1 = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
-        self.h3k27me3 = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
+        self.h3k4me1 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
+        self.h3k27me3 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
 
     def on_train_start(self, trainer, pl_module):
         print("Saving ground truth Hi-C example loci for reference")
         for celltype in self.celltypes:
             for chr_name, start in zip(self.chr_names, self.starts):
                 locus = f"{chr_name}:{start}"
-                hic = data_feature.HiCFeature(path = f'cshark_data/data/hg19/{celltype}/hic_matrix/{chr_name}.npz')
+                hic = data_feature.HiCFeature(path = f'cshark_data/data/{self.assembly}/{celltype}/hic_matrix/{chr_name}.npz')
                 mat = hic.get(start)
                 mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True)
                 os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
@@ -72,12 +73,14 @@ class VizCallback(Callback):
                     os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
                     pred_1d_tracks = []
                     for i, feature in enumerate(pl_module.hparams.output_features):
-                        bw = data_feature.GenomicFeature(path = f'cshark_data/data/hg19/{celltype}/genomic_features/{feature}.bw', norm=None)
+                        bw = data_feature.GenomicFeature(path = f'cshark_data/data/{self.assembly}/{celltype}/genomic_features/{feature}.bw', norm=None)
                         pred_1d = bw.get(chr_name, start, start + pl_module.window)
                         pred_1d = resize(pred_1d, (pl_module.hparams.target_1d_size,), anti_aliasing=True)
                         pred_1d_tracks.append(pred_1d)
                     # visualize 1D tracks as shaded plots
                     fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(15, 4))
+                    if len(pred_1d_tracks) == 1:
+                        axs = [axs]
                     colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
                     for i, pred_1d in enumerate(pred_1d_tracks):
                         track_name = pl_module.hparams.output_features[i]
@@ -100,7 +103,8 @@ class VizCallback(Callback):
             for chr_name, start in zip(self.chr_names, self.starts):
                 try:
                     locus = f"{chr_name}:{start}"
-                    other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
+                    #other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
+                    other_paths = [self.h3k27me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
                         start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths)
                     inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
@@ -127,6 +131,8 @@ class VizCallback(Callback):
                         os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
                         # visualize 1D tracks as shaded plots
                         fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(15, 4))
+                        if len(pred_1d_tracks) == 1:
+                            axs = [axs]
                         colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
                         for i, pred_1d in enumerate(pred_1d_tracks):
                             track_name = pl_module.hparams.output_features[i]
@@ -257,7 +263,8 @@ def init_training(args):
                             accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=args.trainer_num_gpu,
                             gradient_clip_val=1,
                             logger = wandb_logger,
-                            callbacks = [VizCallback(celltypes=args.dataset_celltypes),
+                            callbacks = [VizCallback(celltypes=args.dataset_celltypes,  
+                                                     assembly=args.dataset_assembly),
                                          early_stop_callback,
                                          checkpoint_callback,
                                          lr_monitor],
