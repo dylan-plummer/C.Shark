@@ -1,6 +1,8 @@
 deeploop_viz/
 cshark_data/
 wandb/
+outputs/
+tmp/
 
 
 # Byte-compiled / optimized / DLL files

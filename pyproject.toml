@@ -17,6 +17,10 @@ dependencies = [
     'omegaconf>=2.1.1',
     'tqdm>=4.64.0',
     'pybigwig==0.3.18',
+    'cooler',
+    'seaborn',
+    'matplotlib',
+    'pyGenomeTracks'
 ]
 requires-python = ">=3.9"
 

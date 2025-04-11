@@ -5,6 +5,7 @@ conda activate cshark
 conda install conda-forge::gcc
 conda install conda-forge::gxx
 conda install nvidia::cuda-toolkit
+conda install conda-forge::sqlite conda-forge:libsqlite
 conda install -c bioconda bedtools
 
 # install uv and never touch pip again :)
