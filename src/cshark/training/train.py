@@ -67,19 +67,47 @@ class VizCallback(Callback):
                 except Exception as e:
                     print(e)
 
+                # plot the ground truth 1D tracks
+                if pl_module.hparams.output_features is not None:
+                    os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
+                    pred_1d_tracks = []
+                    for i, feature in enumerate(pl_module.hparams.output_features):
+                        bw = data_feature.GenomicFeature(path = f'cshark_data/data/hg19/{celltype}/genomic_features/{feature}.bw', norm=None)
+                        pred_1d = bw.get(chr_name, start, start + pl_module.window)
+                        pred_1d = resize(pred_1d, (pl_module.hparams.target_1d_size,), anti_aliasing=True)
+                        pred_1d_tracks.append(pred_1d)
+                    # visualize 1D tracks as shaded plots
+                    fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(15, 4))
+                    colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
+                    for i, pred_1d in enumerate(pred_1d_tracks):
+                        track_name = pl_module.hparams.output_features[i]
+                        axs[i].plot(pred_1d, color=colors[i % len(colors)])
+                        axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
+                        axs[i].set_title(track_name)
+                        axs[i].set_xticks([])
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_ground_truth.png"))
+                    plt.close()
+                    try:
+                        wandb.log({locus + '_experimental_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_ground_truth.png"))})
+                    except Exception as e:
+                        print(e)
+
+
     def on_validation_epoch_end(self, trainer, pl_module):
         print("Evaluating is starting")
         for celltype in self.celltypes:
             for chr_name, start in zip(self.chr_names, self.starts):
                 try:
                     locus = f"{chr_name}:{start}"
-                    #other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
-                    other_paths = None
+                    other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
                         start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths)
                     inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
                     pl_module.model.eval()
-                    pred = pl_module.model(inputs)[0].detach().cpu().numpy()
+                    outputs = pl_module.model(inputs)
+                    pred = outputs.get('hic')[0].detach().cpu().numpy()
+                    print('pred shape:', pred.shape)
                     pred = (pred + pred.T) * 0.5
                     os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
                     plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'prediction', celltype, 
@@ -92,6 +120,31 @@ class VizCallback(Callback):
                         wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
                     except Exception as e:
                         print(e)
+
+                    pred_1d_tracks = outputs.get('1d')[0].permute(1, 0).detach().cpu().numpy()
+                    print(pred_1d_tracks.shape)
+                    if pred_1d_tracks is not None:
+                        os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
+                        # visualize 1D tracks as shaded plots
+                        fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(15, 4))
+                        colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
+                        for i, pred_1d in enumerate(pred_1d_tracks):
+                            track_name = pl_module.hparams.output_features[i]
+                            pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
+                            axs[i].plot(pred_1d, color=colors[i % len(colors)])
+                            axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
+                            axs[i].set_title(track_name)
+                            axs[i].set_xticks([])
+                        
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))
+                        plt.close()
+
+                        try:
+                            wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
+                        except Exception as e:
+                            print(e)
+                            
                 except Exception as e:
                     print(e)
 
@@ -124,7 +177,7 @@ def init_parser():
                         help='Cell types to train on')
 
   # Model parameters
-  parser.add_argument('--model-type', dest='model_type', default='ConvTransModel',
+  parser.add_argument('--model-type', dest='model_type', default='MultiTaskConvTransModel',
                         help='CNN with Transformer')
   parser.add_argument('--checkpoint', dest='model_path', default=None,
                             help='start from a pretrained checkpoint')
@@ -154,15 +207,22 @@ def init_parser():
                         type=int,
                         help='Dataloader workers')
   
-  # add flags for CTCF, ATAC, and other genomic features
-  parser.add_argument('--ctcf', dest='dataset_ctcf', default=True,
-                            action='store_true',
-                            help='Use CTCF')
-  parser.add_argument('--atac', dest='dataset_atac', default=False,
-                            action='store_true',
-                            help='Use ATAC')
-  parser.add_argument('--other-feats', dest='dataset_other_feats', default=None,
-                            help='Other genomic features to use')
+  # add args for CTCF, ATAC, and other genomic features as either inputs, outputs, or both
+  parser.add_argument('--input-features', dest='input_features', nargs='+',
+                            default=['ctcf', 'atac'],
+                            help='Input features to use')
+  parser.add_argument('--target-features', dest='output_features', nargs='+',
+                            default=None,
+                            help='Target features to use')
+  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=2048,
+                      help='Size of output 1d track (2048 --> 1kb resolution)')
+  parser.add_argument('--latent-dim', dest='model_latent_dim', type=int, default=256,
+                      help='Latent dimension size (mid_hidden)')
+  parser.add_argument('--lr', dest='optimizer_lr', type=float, default=2e-4, help='Learning rate')
+  parser.add_argument('--loss-weight-hic', dest='training_loss_weight_hic', type=float, default=1.0,
+                      help='Weight for Hi-C loss term')
+  parser.add_argument('--loss-weight-1d', dest='training_loss_weight_1d', type=float, default=1.0,
+                      help='Weight for 1D track loss term')
 
 
   args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
@@ -212,50 +272,114 @@ class TrainModule(pl.LightningModule):
     
     def __init__(self, args):
         super().__init__()
+        self.save_hyperparameters(args)
         self.model = self.get_model(args)
         self.args = args
-        self.save_hyperparameters()
+        self.criterion = torch.nn.MSELoss() # Common loss function
+        self.window = 2097152 # 2Mb window size
+
+    def get_model(self, args):
+        model_name =  args.model_type
+        ModelClass = getattr(corigami_models, model_name)
+        num_input_features = 0
+        num_input_features = len(self.hparams.input_features)
+
+        num_target_tracks = 0
+        if self.hparams.output_features is not None:
+            num_target_tracks = len(self.hparams.output_features)
+
+        # Instantiate the model
+        model = ModelClass(
+            num_genomic_features=num_input_features, # Input features
+            num_target_tracks=num_target_tracks,    # Target 1D tracks
+            mid_hidden=self.hparams.model_latent_dim,
+            predict_hic=True,
+            predict_1d=(num_target_tracks > 0),
+            target_1d_length=args.target_1d_size
+            # Add other necessary model args from hparams if they exist
+        )
+        if args.model_path is not None:
+            checkpoint = torch.load(args.model_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+            model_weights = checkpoint['state_dict']
+
+            # Edit keys
+            for key in list(model_weights):
+                model_weights[key.replace('model.', '')] = model_weights.pop(key)
+            model.load_state_dict(model_weights)
+        return model
 
     def forward(self, x):
         return self.model(x)
 
     def proc_batch(self, batch):
-        seq, features, mat, start, end, chr_name, chr_idx = batch
+        seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx = batch
         features = torch.cat([feat.unsqueeze(2) for feat in features], dim = 2)
         inputs = torch.cat([seq, features], dim = 2)
         mat = mat.float()
-        return inputs, mat
+        if target_1d_tracks is not None:
+            target_1d_tracks = torch.stack(target_1d_tracks, dim = 2)
+        target_1d_tracks = target_1d_tracks.float() if target_1d_tracks is not None else None
+        return inputs, mat, target_1d_tracks
     
     def training_step(self, batch, batch_idx):
-        inputs, mat = self.proc_batch(batch)
+        total_loss = 0.0
+        inputs, mat, target_1d_tracks = self.proc_batch(batch)
         outputs = self(inputs)
-        criterion = torch.nn.MSELoss()
-        loss = criterion(outputs, mat)
 
-        metrics = {'train_step_loss': loss}
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        return loss
+        pred_hic = outputs.get('hic')
+        loss_hic = self.criterion(pred_hic, mat)
+        total_loss += loss_hic * self.hparams.training_loss_weight_hic
+
+        if target_1d_tracks is not None:
+            pred_1d = outputs.get('1d')
+            loss_1d = self.criterion(pred_1d, target_1d_tracks)
+            total_loss += loss_1d * self.hparams.training_loss_weight_1d
+            self.log('train_loss_1d', loss_1d, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_loss_hic', loss_hic, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        
+        return total_loss
 
     def validation_step(self, batch, batch_idx):
-        ret_metrics = self._shared_eval_step(batch, batch_idx)
-        self.log('val_loss', ret_metrics, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        return ret_metrics
+        total_loss = 0.0
+        inputs, mat, target_1d_tracks = self.proc_batch(batch)
+        outputs = self(inputs)
+
+        pred_hic = outputs.get('hic')
+        loss_hic = self.criterion(pred_hic, mat)
+        total_loss += loss_hic * self.hparams.training_loss_weight_hic
+
+        if target_1d_tracks is not None:
+            pred_1d = outputs.get('1d')
+            loss_1d = self.criterion(pred_1d, target_1d_tracks)
+            total_loss += loss_1d * self.hparams.training_loss_weight_1d
+            self.log('val_loss_1d', loss_1d, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        self.log('val_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_loss_hic', loss_hic, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        
+        return total_loss
 
     def test_step(self, batch, batch_idx):
-        ret_metrics = self._shared_eval_step(batch, batch_idx)
-        self.log('test_loss', ret_metrics, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        return ret_metrics
-
-    def _shared_eval_step(self, batch, batch_idx):
-        inputs, mat = self.proc_batch(batch)
+        total_loss = 0.0
+        inputs, mat, target_1d_tracks = self.proc_batch(batch)
         outputs = self(inputs)
-        criterion = torch.nn.MSELoss()
-        loss = criterion(outputs, mat)
-        return loss
 
-    def _shared_epoch_end(self, step_outputs):
-        loss = torch.tensor(step_outputs).mean()
-        return {'loss' : loss}
+        pred_hic = outputs.get('hic')
+        loss_hic = self.criterion(pred_hic, mat)
+        total_loss += loss_hic * self.hparams.training_loss_weight_hic
+
+        if target_1d_tracks is not None:
+            pred_1d = outputs.get('1d')
+            loss_1d = self.criterion(pred_1d, target_1d_tracks)
+            total_loss += loss_1d * self.hparams.training_loss_weight_1d
+            self.log('test_loss_1d', loss_1d, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        self.log('test_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log('test_loss_hic', loss_hic, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        
+        return total_loss
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), 
@@ -278,24 +402,21 @@ class TrainModule(pl.LightningModule):
     def get_dataset(self, args, mode, celltype):
 
         celltype_root = f'{args.dataset_data_root}/{args.dataset_assembly}/{celltype}'
-        genomic_features = {'ctcf' : {'file_name' : 'ctcf.bw',
-                                             'norm' : 'log' },
-                            # 'h3k27ac' : {'file_name' : 'h3k27ac.bw',
-                            #                  'norm' : 'log' },
-                            # 'h3k4me3' : {'file_name' : 'h3k4me3.bw',
-                            #                     'norm' : 'log' },
-                            # 'h3k36me3' : {'file_name' : 'h3k36me3.bw',
-                            #                     'norm' : 'log' },
-                            # 'h3k4me1': {'file_name' : 'h3k4me1.bw',
-                            #                     'norm' : 'log' },
-                            # 'h3k27me3': {'file_name' : 'h3k27me3.bw',
-                            #                     'norm' : 'log' },      
-                            # 'atac' : {'file_name' : 'atac.bw',
-                            #                  'norm' : 'log' }
-                            }
+        genomic_features = {}
+        for feature in args.input_features:
+            genomic_features[feature] = {'file_name' : f'{feature}.bw',
+                                         'norm' : 'log' }
+        target_features = {}
+        if args.output_features is not None:
+            for feature in args.output_features:
+                target_features[feature] = {'file_name' : f'{feature}.bw',
+                                            'norm' : 'log' }
         dataset = genome_dataset.GenomeDataset(celltype_root, 
                                 args.dataset_assembly,
-                                genomic_features, 
+                                input_feat_dicts = genomic_features, 
+                                target_feat_dicts = target_features,
+                                predict_hic = True,
+                                predict_1d = (args.output_features is not None),
                                 mode = mode,
                                 include_sequence = True,
                                 include_genomic_features = True)
@@ -338,21 +459,6 @@ class TrainModule(pl.LightningModule):
             persistent_workers=True
         )
         return dataloader
-
-    def get_model(self, args):
-        model_name =  args.model_type
-        num_genomic_features = 1
-        ModelClass = getattr(corigami_models, model_name)
-        model = ModelClass(num_genomic_features, mid_hidden = 256, use_cross_attn=False)
-        if args.model_path is not None:
-            checkpoint = torch.load(args.model_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
-            model_weights = checkpoint['state_dict']
-
-            # Edit keys
-            for key in list(model_weights):
-                model_weights[key.replace('model.', '')] = model_weights.pop(key)
-            model.load_state_dict(model_weights)
-        return model
 
 if __name__ == '__main__':
     main()

@@ -10,16 +10,26 @@ class GenomeDataset(Dataset):
     '''
     def __init__(self, celltype_root, 
                        genome_assembly,
-                       feat_dicts, 
+                       input_feat_dicts, 
+                       target_feat_dicts={}, # NEW: Dictionary for target features
                        mode = 'train', 
                        include_sequence = True,
                        include_genomic_features = True,
+                       predict_hic=True, # NEW: Control Hi-C loading/prediction
+                       predict_1d=False,  # NEW: Control 1D track loading/prediction
                        use_aug = True):
         self.data_root = celltype_root
         self.include_sequence = include_sequence
         self.include_genomic_features = include_genomic_features
+        self.predict_hic = predict_hic
+        self.predict_1d = predict_1d
+
         if not self.include_sequence: print('Not using sequence!')
         if not self.include_genomic_features: print('Not using genomic features!')
+        if not self.predict_hic: print('Not predicting Hi-C!')
+        if not self.predict_1d: print('Not predicting 1D Tracks!')
+        if not predict_hic and not predict_1d:
+             raise ValueError("Must predict at least Hi-C or 1D tracks.")
         self.use_aug = use_aug
 
         if mode != 'train': self.use_aug = False # Set augmentation
@@ -38,35 +48,53 @@ class GenomeDataset(Dataset):
             raise Exception(f'Unknown mode {mode}')
 
         # Load genomewide features
-        self.genomic_features = self.load_features(f'{celltype_root}/genomic_features', feat_dicts)
+        self.genomic_features = self.load_features(f'{celltype_root}/genomic_features', input_feat_dicts)
+
+        # Load target 1D track features
+        if self.predict_1d:
+             # Assume target features are also in genomic_features dir, or specify another path
+             self.target_1d_features = self.load_features(f'{celltype_root}/genomic_features', target_feat_dicts)
+             if not self.target_1d_features:
+                  raise ValueError("predict_1d is True, but no target features were loaded. Check target_feat_dicts.")
+        else:
+             self.target_1d_features = []
 
         # Load regions to be ignored
         root_data_dir = os.path.dirname(celltype_root)
         self.centrotelo_dict = self.proc_centrotelo(f'{root_data_dir}/centrotelo.bed')
         # Load chromsome_datasets as part of the dictionary
-        self.chr_data, self.lengths = self.load_chrs(self.chr_names, self.genomic_features)
+        self.chr_data, self.lengths = self.load_chrs(self.chr_names, self.genomic_features, self.target_1d_features)
         # Build chrmosome lookup table from the genome
         self.ranges = self.get_ranges(self.lengths)
 
     def __getitem__(self, idx):
         # Query for chromosome name and where in the chromosome
         chr_name, chr_idx = self.get_chr_idx(idx)
-        seq, features, mat, start, end = self.chr_data[chr_name][chr_idx]
-        if self.include_sequence:
-            if self.include_genomic_features: # Both
-                outputs = seq, features, mat, start, end, chr_name, chr_idx
-            else: # sequence only  
-                outputs = seq, mat, start, end, chr_name, chr_idx
-        else: 
-            if self.include_genomic_features: # features only
-                outputs = features, mat, start, end, chr_name, chr_idx
-            else: raise Exception('Must have at least one of the sequence or features')
-        return outputs
+        # Get data from the specific ChromosomeDataset
+        data_tuple = self.chr_data[chr_name][chr_idx]
+
+        # Unpack the tuple based on predict_hic and predict_1d flags
+        # Order: seq, features, [mat], [target_1d_tracks], start, end
+        seq, features, mat, target_1d_tracks, start, end = data_tuple
+
+        # Construct the output tuple, setting optional components to None if not included
+        outputs = [
+            seq if self.include_sequence else None,
+            features if self.include_genomic_features else None,
+            mat if self.predict_hic else None,
+            target_1d_tracks if self.predict_1d else None,
+            start,
+            end,
+            chr_name,
+            chr_idx
+        ]
+
+        return tuple(outputs)
 
     def __len__(self):
         return sum(self.lengths)
         
-    def load_chrs(self, chr_names, genomic_features):
+    def load_chrs(self, chr_names, genomic_features, target_features):
         '''
         Load chromosome data into a dictionary
         '''
@@ -75,7 +103,9 @@ class GenomeDataset(Dataset):
         lengths = []
         for chr_name in chr_names:
             omit_regions = self.centrotelo_dict[chr_name]
-            chr_data_dict[chr_name] = ChromosomeDataset(self.data_root, chr_name, omit_regions, genomic_features, self.use_aug)
+            chr_data_dict[chr_name] = ChromosomeDataset(self.data_root, chr_name, omit_regions, 
+                                                        genomic_features, target_features, predict_hic=True, predict_1d=self.predict_1d,
+                                                        use_aug=self.use_aug)
             lengths.append(len(chr_data_dict[chr_name]))
         print('Chromosome datasets loaded')
         return chr_data_dict, lengths
@@ -143,6 +173,3 @@ class GenomeDataset(Dataset):
             regions = sub_df.drop('chr', axis = 1).to_numpy()
             centrotelo_dict[chr_name] = regions
         return centrotelo_dict
-
-if __name__ == '__main__':
-    main()

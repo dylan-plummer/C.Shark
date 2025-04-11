@@ -188,9 +188,9 @@ class ResBlockDilated(nn.Module):
         out = self.relu(res_out + identity)
         return out
 
-class Decoder(nn.Module):
+class Decoder2D(nn.Module):
     def __init__(self, in_channel, hidden = 256, filter_size = 3, num_blocks = 5):
-        super(Decoder, self).__init__()
+        super(Decoder2D, self).__init__()
         self.filter_size = filter_size
 
         self.conv_start = nn.Sequential(
@@ -214,6 +214,88 @@ class Decoder(nn.Module):
             blocks.append(ResBlockDilated(self.filter_size, hidden = hidden, dil = dilation))
         res_blocks = nn.Sequential(*blocks)
         return res_blocks
+    
+# --- NEW: 1D Decoder ---
+class Decoder1D(nn.Module):
+    """
+    Decodes latent representation back to 1D tracks.
+    Uses Transposed Convolutions for upsampling.
+    """
+    def __init__(self, num_target_tracks, latent_dim=256, latent_length=None, target_length=2097152, num_upsample_blocks=7):
+        super(Decoder1D, self).__init__()
+        self.num_target_tracks = num_target_tracks
+        self.target_length = target_length
+        self.latent_dim = latent_dim # Channels in the latent space
+        # num_upsample_blocks should match the number of downsampling steps in the encoder
+        # Example: If Encoder reduces length by 2^13, we need 13 upsampling steps of factor 2.
+
+        # Define upsampling blocks
+        blocks = []
+        current_dim = latent_dim
+        # Hidden dimensions for upsampling layers (can be designed, e.g., decreasing)
+        # Simple approach: halve dimension at each step until a minimum?
+        # Let's use constant hidden dim for simplicity first
+        hidden_dim = 128 # Or relate it to latent_dim
+
+        # Initial Conv to potentially adjust channels before upsampling
+        blocks.append(nn.Sequential(
+            nn.Conv1d(latent_dim, hidden_dim, kernel_size=1),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU()
+        ))
+        current_dim = hidden_dim
+
+        # Upsampling using ConvTranspose1d
+        for i in range(num_upsample_blocks):
+             out_dim = hidden_dim # Keep hidden dim constant for now
+             blocks.append(nn.Sequential(
+                 # Stride=2 doubles the length
+                 # Kernel size affects overlap, padding affects output size alignment
+                 # Careful calculation needed for kernel/padding/output_padding
+                 # Kernel=4, Stride=2, Padding=1 generally works for doubling length
+                 nn.ConvTranspose1d(current_dim, out_dim, kernel_size=4, stride=2, padding=1),
+                 nn.BatchNorm1d(out_dim),
+                 nn.ReLU()
+             ))
+             current_dim = out_dim
+
+        self.upsample_blocks = nn.Sequential(*blocks)
+
+        # Final convolution to match the target number of tracks and potentially adjust final length slightly if needed
+        # Calculate expected length after upsampling
+        # Need latent_length if not None. Assume it's input_len / (2^num_upsample_blocks)
+        # expected_len = latent_length * (2**num_upsample_blocks) if latent_length else None
+        # This final layer adjusts channels. We might need a final conv/padding if length isn't exact.
+        self.final_conv = nn.Conv1d(current_dim, num_target_tracks, kernel_size=1)
+
+        # Optional: Add padding/cropping layer if upsampling doesn't hit target_length exactly
+        # self.final_adjust = nn.AdaptiveAvgPool1d(target_length) # Or padding
+
+    def forward(self, x):
+        # Input x shape: [batch, latent_dim, latent_length]
+        x = self.upsample_blocks(x)
+        # Output shape: [batch, hidden_dim, upsampled_length]
+        x = self.final_conv(x)
+        # Output shape: [batch, num_target_tracks, upsampled_length]
+
+        # Adjust length if needed (e.g., crop or pad)
+        current_length = x.shape[-1]
+        if current_length != self.target_length:
+            # Simple padding/cropping (center crop/pad if possible)
+            if current_length > self.target_length:
+                diff = current_length - self.target_length
+                start = diff // 2
+                x = x[..., start : start + self.target_length]
+            else:
+                diff = self.target_length - current_length
+                pad_start = diff // 2
+                pad_end = diff - pad_start
+                x = nn.functional.pad(x, (pad_start, pad_end))
+
+        # Output shape: [batch, num_target_tracks, target_length]
+        # change to [batch, target_length, num_target_tracks] if needed
+        x = x.permute(0, 2, 1)
+        return x
 
 class TransformerLayer(torch.nn.TransformerEncoderLayer):
     # Pre-LN structure
