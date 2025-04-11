@@ -14,7 +14,7 @@ from contextlib import suppress
 from cshark.data.data_feature import GenomicFeature, HiCFeature
 import cshark.inference.utils.inference_utils as infer
 from cshark.inference.utils import plot_utils, model_utils
-from cshark.inference.tracks_files import tracks, tracks_screen
+from cshark.inference.tracks_files import get_tracks, get_tracks_screen
 
 import argparse
 
@@ -160,11 +160,11 @@ def main():
 def single_deletion(output_path, outname, celltype, chr_name, start, deletion_starts, deletion_widths, model_path, seq_path, ctcf_path, atac_path, other_feats, 
                     ko_mode='zero', show_deletion_line = True, end_padding_type = 'zero', region=None, mid_hidden=256,
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
-                    compare_cooler=None, compare_name='KO'):
+                    compare_cooler=None, compare_name='KO', ctcf_log2=False):
     if not outname.endswith('_') and outname != '':
                 outname += '_'
     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
-            start, seq_path, ctcf_path, atac_path, other_feats, window = window)
+            start, seq_path, ctcf_path, atac_path, other_feats, window = window, ctcf_log2=ctcf_log2)
     num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
     if atac_region is None:
             num_genomic_features -= 1
@@ -376,7 +376,12 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         if mat[i, j] > ground_truth_cutoff and pixel_start_i > region_start and pixel_end_i < region_end and pixel_start_j > region_start and pixel_end_j < region_end:
                             f.write(f'{chr_name}\t{pixel_start_i}\t{pixel_end_i}\t{chr_name}\t{pixel_start_j}\t{pixel_end_j}\t{mat[i, j]}\n')
 
-
+    assembly = 'hg19'
+    if '/mm10/' in ctcf_path:
+        assembly = 'mm10'
+    elif '/hg38/' in ctcf_path:
+        assembly = 'hg38'
+    tracks = get_tracks(celltype, assembly)
     lines = tracks.split('\n')
     lines = [line + '\n' for line in lines]
     with open('tmp/tmp_tracks.ini', 'w') as f:
@@ -549,6 +554,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
         
         # with open('tracks_screen.ini', 'r') as f:
         #     lines = f.readlines()
+        tracks_screen = tracks.replace(dataset_name_token, celltype)
         lines = tracks_screen.split('\n')
         lines = [line + '\n' for line in lines]
         with open('tmp/tmp_tracks.ini', 'w') as f:
@@ -600,9 +606,9 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
 
         try:
             if region is not None:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 > /dev/null 2>&1"
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 "
             else:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {chr_name}:{screen_start}-{screen_start + window} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 > /dev/null 2>&1"
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {chr_name}:{screen_start}-{screen_start + window} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 "
             os.system(tracks_cmd)
         except Exception as e:
             print(e)
@@ -792,10 +798,12 @@ def ctcf_ko(start, end, seq, ctcf, atac, window = 2097152, ko_mode='zero'):
         return seq[:window], ctcf[:window], atac[:window]
     
 def loop_recovery_roc(mat_true, mat_pred, true_cutoff=0.5, n_points=100):
-    mat_true_sparse = (mat_true - np.min(mat_true)) / (np.max(mat_true) - np.min(mat_true))
-    mat_pred_sparse = (mat_pred - np.min(mat_pred)) / (np.max(mat_pred) - np.min(mat_pred))
-    mat_true_sparse = coo_matrix(mat_true_sparse + 0.001)
-    mat_pred_sparse = coo_matrix(mat_pred_sparse + 0.001)
+    mat_true_sparse = mat_true 
+    mat_pred_sparse = np.exp(mat_pred) - 1
+    mat_true_sparse = mat_true_sparse / np.max(mat_true_sparse)
+    mat_pred_sparse = mat_pred_sparse / np.max(mat_pred_sparse)
+    mat_true_sparse = coo_matrix(mat_true_sparse)
+    mat_pred_sparse = coo_matrix(mat_pred_sparse)
     pixels_true = pd.DataFrame()
     pixels_true['a1'] = mat_true_sparse.row
     pixels_true['a2'] = mat_true_sparse.col
@@ -805,7 +813,7 @@ def loop_recovery_roc(mat_true, mat_pred, true_cutoff=0.5, n_points=100):
     pixels_pred['a2'] = mat_pred_sparse.col
     pixels_pred['v'] = mat_pred_sparse.data
 
-    #true_cutoff = np.quantile(pixels_true['v'], 0.98)
+    true_cutoff = np.quantile(pixels_true['v'], 0.99)
 
     significant_pixels = pixels_true[pixels_true['v'] > true_cutoff]
     significant_pixels = significant_pixels[['a1', 'a2']]

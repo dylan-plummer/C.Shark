@@ -75,6 +75,8 @@ class GenomicFeatureSingleThread(Feature):
         feature = np.nan_to_num(feature, 0) # Important! replace nan with 0
         if self.norm == 'log':
             feature = np.log(feature + 1)
+        elif self.norm == 'log2':
+            feature = np.log2(feature + 1)
         elif self.norm is None:
             feature = feature
         else:
