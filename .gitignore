@@ -3,6 +3,7 @@ cshark_data/
 wandb/
 outputs/
 tmp/
+checkpoints/
 
 
 # Byte-compiled / optimized / DLL files
