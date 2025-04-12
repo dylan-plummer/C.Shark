@@ -55,17 +55,11 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
 
         # 1D Decoder for Tracks
         if self.predict_1d:
-            # Calculate latent length based on target length and downsampling
-            # Note: This assumes target_1d_length is the original input length to encoder
-            latent_length = target_1d_length // encoder_downsample_factor
-            num_upsample_blocks = int(round(math.log2(encoder_downsample_factor))) # Should match encoder downsampling steps
-            print(f"  1D Decoder using latent dim={mid_hidden}, estimated latent length={latent_length}, target length={target_1d_length}, upsample blocks={num_upsample_blocks}")
+            print(f"1D Decoder using latent dim={mid_hidden}{target_1d_length}")
 
             self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks,
                                                latent_dim=mid_hidden,
-                                            #    latent_length=latent_length, # Pass if needed by decoder internally
-                                               target_length=self.target_1d_length,
-                                               num_upsample_blocks=num_upsample_blocks)
+                                               target_length=self.target_1d_length)
             # Output: [batch, num_target_tracks, target_1d_length]
 
     def forward(self, x):

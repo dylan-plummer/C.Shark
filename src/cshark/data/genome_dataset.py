@@ -17,12 +17,14 @@ class GenomeDataset(Dataset):
                        include_genomic_features = True,
                        predict_hic=True, # NEW: Control Hi-C loading/prediction
                        predict_1d=False,  # NEW: Control 1D track loading/prediction
+                       target_1d_size=512,
                        use_aug = True):
         self.data_root = celltype_root
         self.include_sequence = include_sequence
         self.include_genomic_features = include_genomic_features
         self.predict_hic = predict_hic
         self.predict_1d = predict_1d
+        self.target_1d_size = target_1d_size
 
         if not self.include_sequence: print('Not using sequence!')
         if not self.include_genomic_features: print('Not using genomic features!')
@@ -104,7 +106,8 @@ class GenomeDataset(Dataset):
         for chr_name in chr_names:
             omit_regions = self.centrotelo_dict[chr_name]
             chr_data_dict[chr_name] = ChromosomeDataset(self.data_root, chr_name, omit_regions, 
-                                                        genomic_features, target_features, predict_hic=True, predict_1d=self.predict_1d,
+                                                        genomic_features, target_features, predict_hic=True, 
+                                                        predict_1d=self.predict_1d, target_1d_size=self.target_1d_size,
                                                         use_aug=self.use_aug)
             lengths.append(len(chr_data_dict[chr_name]))
         print('Chromosome datasets loaded')

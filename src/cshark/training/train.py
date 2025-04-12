@@ -28,12 +28,9 @@ class VizCallback(Callback):
         self.image_scale = 256  # size of each heatmap (fixed by model)
         self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000',
                      'chr11:1500000', 'chr2:162000000',
-                     #'chr5:93910000', 'chr5:97000000', 'chr5:87000000', 'chr7:137000000', 'chr8:4990000', 'chr9:90930000', 'chr12:93240000', 'chr18:55160000', 'chrX:11680000',
                      'chr10:122700000', 'chr15:59100000', 'chr12:89300000']
         self.chr_names = [s.split(':')[0] for s in self.loci]
         self.starts = [int(s.split(':')[1]) for s in self.loci]
-        #self.chr_names = ['chr1', 'chr2', 'chr3', 'chr3', 'chr10', 'chr15', 'chr12', 'chr20']
-        #self.starts = [66000000, 500000, 145500000, 122700000, 59100000, 89300000, 47000000]
         self.seq = f"cshark_data/data/{self.assembly}/dna_sequence"
         # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE167200
         self.ctcf = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/ctcf.bw" for celltype in celltypes}
@@ -55,7 +52,7 @@ class VizCallback(Callback):
                 locus = f"{chr_name}:{start}"
                 hic = data_feature.HiCFeature(path = f'cshark_data/data/{self.assembly}/{celltype}/hic_matrix/{chr_name}.npz')
                 mat = hic.get(start)
-                mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True)
+                mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
                 os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
                 plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), mat, 'ground_truth', celltype, 
                                     chr_name, start)
@@ -75,7 +72,9 @@ class VizCallback(Callback):
                     for i, feature in enumerate(pl_module.hparams.output_features):
                         bw = data_feature.GenomicFeature(path = f'cshark_data/data/{self.assembly}/{celltype}/genomic_features/{feature}.bw', norm=None)
                         pred_1d = bw.get(chr_name, start, start + pl_module.window)
-                        pred_1d = resize(pred_1d, (pl_module.hparams.target_1d_size,), anti_aliasing=True)
+                        #pred_1d = resize(pred_1d, (pl_module.hparams.target_1d_size,), anti_aliasing=True, preserve_range=True)
+                        bin_size = int(len(pred_1d) / pl_module.hparams.target_1d_size)
+                        pred_1d = pred_1d.reshape(-1, bin_size).mean(axis=1)
                         pred_1d_tracks.append(pred_1d)
                     # visualize 1D tracks as shaded plots
                     fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(15, 4))
@@ -103,8 +102,8 @@ class VizCallback(Callback):
             for chr_name, start in zip(self.chr_names, self.starts):
                 try:
                     locus = f"{chr_name}:{start}"
-                    #other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
-                    other_paths = [self.h3k27me3[celltype]]
+                    other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
+                    #other_paths = [self.h3k27me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
                         start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths)
                     inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
@@ -220,8 +219,8 @@ def init_parser():
   parser.add_argument('--target-features', dest='output_features', nargs='+',
                             default=None,
                             help='Target features to use')
-  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=2048,
-                      help='Size of output 1d track (2048 --> 1kb resolution)')
+  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=256,
+                      help='Size of output 1d track')
   parser.add_argument('--latent-dim', dest='model_latent_dim', type=int, default=256,
                       help='Latent dimension size (mid_hidden)')
   parser.add_argument('--lr', dest='optimizer_lr', type=float, default=2e-4, help='Learning rate')
@@ -273,7 +272,60 @@ def init_training(args):
     trainloader = pl_module.get_dataloader(args, 'train')
     valloader = pl_module.get_dataloader(args, 'val')
     testloader = pl_module.get_dataloader(args, 'test')
+
+    for test_batch_i in range(1):
+        # load a batch and visualize it for debugging
+        batch = next(iter(trainloader))
+        inputs, mat, target_1d_tracks = pl_module.proc_batch(batch)
+        print('inputs shape:', inputs.shape) # (batch, window, 5 + num_genomic_features)
+        print('mat shape:', mat.shape)  # (batch, image_scale, image_scale)
+        print('target_1d_tracks shape:', target_1d_tracks.shape if target_1d_tracks is not None else None)
+        
+        # visualize the input genomic features
+        genomic_features = inputs[:, :, 5:]
+        genomic_features = genomic_features[0].detach().cpu().numpy() 
+        #genomic_features = resize(genomic_features, (pl_module.hparams.target_1d_size,), anti_aliasing=True, preserve_range=True)
+        
+        fig, axs = plt.subplots(genomic_features.shape[1], 1, figsize=(15, 4))  
+        if genomic_features.shape[1] == 1:
+            axs = [axs]
+        colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
+        for i in range(genomic_features.shape[1]):
+            track = np.exp(genomic_features[:, i]) - 1  # inverse log transformation
+            bin_size = int(len(track) / pl_module.hparams.target_1d_size)
+            track = track.reshape(-1, bin_size).mean(axis=1)
+            axs[i].plot(track, color=colors[i % len(colors)])
+            axs[i].fill_between(range(len(track)), track, color=colors[i % len(colors)], alpha=0.5)
+        plt.savefig(f'input_genomic_features.png_{test_batch_i}.png')
+        plt.close()
+
+        # visualize the target Hi-C matrix
+        mat = mat[0].detach().cpu().numpy()
+        mat = resize(mat, (pl_module.hparams.target_1d_size, pl_module.hparams.target_1d_size), anti_aliasing=True, preserve_range=True)
+        plt.imshow(mat, cmap='Reds', interpolation='none')
+        plt.colorbar()
+        plt.title('Target Hi-C Matrix')
+        plt.savefig(f'target_hic_matrix.png_{test_batch_i}.png')
+        plt.close()
+
+        # visualize the target 1D tracks
+        if target_1d_tracks is not None:
+            target_1d_tracks = target_1d_tracks[0].detach().cpu().numpy()
+            #target_1d_tracks = resize(target_1d_tracks, (pl_module.hparams.target_1d_size,), anti_aliasing=True, preserve_range=True)
+            fig, axs = plt.subplots(target_1d_tracks.shape[1], 1, figsize=(15, 4))
+            if target_1d_tracks.shape[1] == 1:
+                axs = [axs]
+            for i in range(target_1d_tracks.shape[1]):
+                track = np.exp(target_1d_tracks[:, i]) - 1  # inverse log transformation
+                axs[i].plot(track, color=colors[i % len(colors)])
+                axs[i].fill_between(range(len(target_1d_tracks)), track, color=colors[i % len(colors)], alpha=0.5)
+            plt.title('Target 1D Tracks')
+            plt.savefig(f'target_1d_tracks.png_{test_batch_i}.png')
+            plt.close()
+
     pl_trainer.fit(pl_module, train_dataloaders=trainloader, val_dataloaders=valloader)
+
+    
 
 class TrainModule(pl.LightningModule):
     
@@ -424,6 +476,7 @@ class TrainModule(pl.LightningModule):
                                 target_feat_dicts = target_features,
                                 predict_hic = True,
                                 predict_1d = (args.output_features is not None),
+                                target_1d_size = args.target_1d_size,
                                 mode = mode,
                                 include_sequence = True,
                                 include_genomic_features = True)

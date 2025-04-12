@@ -24,10 +24,11 @@ class ChromosomeDataset(Dataset):
     '''
     def __init__(self, celltype_root, chr_name, omit_regions, 
                  feature_list, target_track_list,
-                 predict_hic=True, predict_1d=False, use_aug = True):
+                 predict_hic=True, predict_1d=False, target_1d_size=512,
+                 use_aug = True):
         self.use_aug = use_aug
         self.res = 10000 # 10kb resolution
-        self.target_1d_len = 2048  # 1kb track resolution
+        self.target_1d_len = target_1d_size
         self.bins = 209.7152 # 209.7152 bins 2097152 bp
         self.image_scale = 256 # IMPORTANT, scale 210 to 256
         self.sample_bins = 500
@@ -35,6 +36,7 @@ class ChromosomeDataset(Dataset):
         self.chr_name = chr_name
         self.predict_hic = predict_hic
         self.predict_1d = predict_1d
+        self.target_1d_len = target_1d_size
 
         print(f'Loading chromosome {chr_name}...')
         print(f'Predicting Hi-C: {self.predict_hic}, Predicting 1D Tracks: {self.predict_1d}')
@@ -133,16 +135,23 @@ class ChromosomeDataset(Dataset):
         features = [item.get(self.chr_name, start, end) for item in self.genomic_features]
         # Hi-C matrix processing
         mat = self.mat.get(start)
-        mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True)
+        mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
         mat = np.log(mat + 1)
         # Target 1D track processing
+        loaded_paths = [item.path for item in self.genomic_features]
         target_1d_tracks_out = []
         if self.predict_1d:
              # Target 1D tracks also correspond to the input window [start, end]
-             target_1d_tracks = [item.get(self.chr_name, start, end) for item in self.target_tracks]
+             target_1d_tracks = []  # re-use already loaded tracks
+             for item in self.target_tracks:
+                if item.path in loaded_paths:
+                    target_1d_tracks.append(features[loaded_paths.index(item.path)])
+                else:
+                    target_1d_tracks.append(item.get(self.chr_name, start, end))
              # Ensure target tracks have the expected length (padding if necessary)
              for track in target_1d_tracks:
-                  resized_track = np.float32(resize(track, (self.target_1d_len,), anti_aliasing=True))
+                  bin_size = int(len(track) / self.target_1d_len)
+                  resized_track = track.reshape(-1, bin_size).mean(axis=1)
                   target_1d_tracks_out.append(resized_track)
         return seq, features, mat, target_1d_tracks_out
 
