@@ -4,9 +4,7 @@ ko_mode=knockout  # either zero, mean, or knockout
 
 
 # heatmap region: chr11:9,733,614-10,791,870， FIN region: chr11:10,422,643-10,438,132
-# first do a screen of the whole region
 python src/cshark/inference/ctcf.py --celltype hESC_WT_50pct \
-                 --outname ctcf_screen \
                  --chr chr11 \
                  --model $checkpoint \
                  --latent_size 256 \
