@@ -6,6 +6,7 @@ import torch
 import cooler 
 import seaborn as sns
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from skimage.transform import resize
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.stats import pearsonr, spearmanr
@@ -38,11 +39,13 @@ def main():
     parser.add_argument('--chr', dest='chr_name', 
                         help='Chromosome for prediction', required=True)
     parser.add_argument('--start', dest='start', type=int,
-                        help='Starting point for prediction (width is 2097152 bp which is the input window size)', required=True)
+                        help='Starting point for prediction (width is 2097152 bp which is the input window size)', required=False)
     parser.add_argument('--model', dest='model_path', 
                         help='Path to the model checkpoint', required=True)
     parser.add_argument('--latent_size', dest='mid_hidden', type=int, default=256,
                                 help='', required=True)
+    parser.add_argument('--out-file', dest='out_file', 
+                        help='Path to the output file if doing full chromosome prediction', required=False)
     parser.add_argument('--seq', dest='seq_path', 
                         help='Path to the folder where the sequence .fa.gz files are stored', required=True)
     parser.add_argument('--ctcf', dest='ctcf_path', 
@@ -128,20 +131,14 @@ def main():
             other_feats = [args.h3k4me3]
 
     # ensure the user has provided either --del-start and --del-width or --screen-start, --screen-end, --perturb-width, --step-size
-    if args.deletion_start is None and args.deletion_width is None: 
-        if args.screen_start is None or args.screen_end is None:
-            parser.error('Either --del-start and --del-width or --screen-start, --screen-end, --perturb-width, --step-size must be provided.')
-        else:
-            screening(args.output_path, args.outname, args.celltype, args.chr_name, args.screen_start, 
-              args.screen_end, args.perturb_width, args.step_size, 
-              args.model_path,
-              args.seq_path, args.ctcf_path, args.atac_path, other_feats, ko_mode=args.ko_mode,
-              region = args.region, n_top_sites=args.n_top_sites, plot_diff=args.plot_diff,
-              min_val=args.min_val_pred, max_val=args.max_val_pred, load_screen=args.load_screen)
-    else:
-        if args.screen_start is not None or args.screen_end is not None:
-            parser.error('Either --del-start and --del-width or --screen-start, --screen-end, --perturb-width, --step-size must be provided.')
-        else:
+    if args.screen_start is not None and args.screen_end is not None:
+        screening(args.output_path, args.outname, args.celltype, args.chr_name, args.screen_start, 
+            args.screen_end, args.perturb_width, args.step_size, 
+            args.model_path,
+            args.seq_path, args.ctcf_path, args.atac_path, other_feats, ko_mode=args.ko_mode,
+            region = args.region, n_top_sites=args.n_top_sites, plot_diff=args.plot_diff,
+            min_val=args.min_val_pred, max_val=args.max_val_pred, load_screen=args.load_screen)
+    elif args.deletion_start is not None and args.deletion_width is not None:
             single_deletion(args.output_path, args.outname, args.celltype, args.chr_name, args.start, 
                     args.deletion_start, args.deletion_width, 
                     args.model_path,
@@ -152,6 +149,75 @@ def main():
                     mid_hidden=args.mid_hidden, min_val_true=args.min_val_true, max_val_true=args.max_val_true,
                     min_val_pred=args.min_val_pred, max_val_pred=args.max_val_pred, plot_diff=args.plot_diff,
                     compare_cooler=args.compare_cooler, compare_name=args.compare_name)
+    else:  # full chromosome prediction
+        # use the step-size arg to do predictions for the whole chromosome
+        # load one of the bigwigs to get the chromosome length
+        bw = GenomicFeature(args.ctcf_path, 'bw')
+        chr_name = args.chr_name
+        seq_path = args.seq_path
+        ctcf_path = args.ctcf_path
+        atac_path = args.atac_path
+        model_path = args.model_path
+        mid_hidden = args.mid_hidden
+        ko_mode = args.ko_mode
+        chr_length = bw.length(chr_name)
+        print(f'Chromosome length: {chr_length}')
+        step_size = int(window / 2)
+        starts = np.arange(0, chr_length - window, step_size)
+        ends = starts + window
+        res = {'a1': [], 'a2': [], 'WT': [], 'KO': []}
+        bins = []
+        for start, end in tqdm(zip(starts, ends), desc='Predicting', total=len(starts)):
+            #print(f'Start: {start}, End: {end}')
+            seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
+                    start, seq_path, ctcf_path, atac_path, other_feats, window = window)
+            num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
+            if atac_region is None:
+                num_genomic_features -= 1
+            pred_before = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mid_hidden=mid_hidden)
+            seq_region, ctcf_region, atac_region = deletion_with_padding(start, 
+                start, window, seq_region, ctcf_region, 
+                atac_region, 'zero', ko_mode=ko_mode)
+            pred = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mid_hidden=mid_hidden)
+            write_tmp_cooler(pred, chr_name, start)
+            write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool')
+            # load coolers to populate res dict
+            pred_cooler = cooler.Cooler('tmp/tmp.cool')
+            pred_before_cooler = cooler.Cooler('tmp/tmp_before.cool')
+            wt_pixels = pred_before_cooler.pixels()[:]
+            ko_pixels = pred_cooler.pixels()[:]
+            wt_pixels = wt_pixels.rename(columns={'count': 'WT'})
+            ko_pixels = ko_pixels.rename(columns={'count': 'KO'})
+            # merge the two cooler files with WT and KO keys
+            pixels = wt_pixels.merge(ko_pixels, how='outer')
+            res['a1'].extend(pixels['bin1_id'].tolist())
+            res['a2'].extend(pixels['bin2_id'].tolist())
+            res['WT'].extend(pixels['WT'].tolist())
+            res['KO'].extend(pixels['KO'].tolist())
+            bins.append(pred_before_cooler.bins()[:])
+
+        # convert the res dict to a dataframe
+        res_df = pd.DataFrame(res).groupby(['a1', 'a2']).mean().reset_index()
+        # undo the log transformation
+        res_df['WT'] = np.exp(res_df['WT']) - 1  
+        res_df['KO'] = np.exp(res_df['KO']) - 1
+        res_df['a1'] = 'A_' + res_df['a1'].astype(str)
+        res_df['a2'] = 'A_' + res_df['a2'].astype(str)
+        print(res_df)
+        # convert the bins list to a dataframe
+        bins_df = pd.concat(bins, ignore_index=True).drop_duplicates().reset_index(drop=True)
+        bins_df['bin_id'] = 'A_' + bins_df.index.astype(str)
+        print(bins_df) 
+        # make sure outfile directory exists
+        os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
+        # make sure outfile ends with .tsv
+        if not args.out_file.endswith('.tsv'):
+            args.out_file += '.tsv'
+        # output the dataframe to a bed file
+        res_df.to_csv(args.out_file, sep='\t', header=True, index=False)
+        bins_df.to_csv(args.out_file.replace('.tsv', '_bins.tsv'), sep='\t', header=False, index=False)
+
+
     
     
 

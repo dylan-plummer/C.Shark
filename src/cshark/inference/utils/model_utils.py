@@ -17,7 +17,7 @@ def get_model(model_name, mid_hidden, num_genomic_features=2, record_attn=False,
     return model
 
 def load_checkpoint(model, model_path):
-    print('Loading weights')
+    #print('Loading weights')
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 

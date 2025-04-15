@@ -22,20 +22,35 @@ class ChromosomeDataset(Dataset):
             as ``root/DNA/chr1/DNA`` for DNA as an example.
         omit_regions (list of tuples): start and end of excluded regions
     '''
-    def __init__(self, celltype_root, chr_name, omit_regions, feature_list, use_aug = True):
+    def __init__(self, celltype_root, chr_name, omit_regions, 
+                 feature_list, target_track_list,
+                 predict_hic=True, predict_1d=False, target_1d_size=512,
+                 use_aug = True):
         self.use_aug = use_aug
         self.res = 10000 # 10kb resolution
+        self.target_1d_len = target_1d_size
         self.bins = 209.7152 # 209.7152 bins 2097152 bp
         self.image_scale = 256 # IMPORTANT, scale 210 to 256
         self.sample_bins = 500
         self.stride = 50 # bins
         self.chr_name = chr_name
+        self.predict_hic = predict_hic
+        self.predict_1d = predict_1d
+        self.target_1d_len = target_1d_size
 
         print(f'Loading chromosome {chr_name}...')
+        print(f'Predicting Hi-C: {self.predict_hic}, Predicting 1D Tracks: {self.predict_1d}')
 
         self.seq = data_feature.SequenceFeature(path = f'{celltype_root}/../dna_sequence/{chr_name}.fa.gz')
         self.genomic_features = feature_list
         self.mat = data_feature.HiCFeature(path = f'{celltype_root}/hic_matrix/{chr_name}.npz')
+
+        if self.predict_1d:
+            self.target_tracks = target_track_list # Target 1D features
+            if not self.target_tracks:
+                 raise ValueError("predict_1d is True, but target_track_list is empty.")
+        else:
+            self.target_tracks = []
 
         self.omit_regions = omit_regions
         self.check_length() # Check data length
@@ -52,17 +67,20 @@ class ChromosomeDataset(Dataset):
             start, end = self.shift_aug(target_size, start, end)
         else:
             start, end = self.shift_fix(target_size, start, end)
-        seq, features, mat = self.get_data_at_interval(start, end)
+
+        seq, features, mat, target_1d_tracks = self.get_data_at_interval(start, end)
 
         if self.use_aug:
             # Extra on sequence
             seq = self.gaussian_noise(seq, 0.1)
             # Genomic features
             features = [self.gaussian_noise(item, 0.1) for item in features]
+            if self.predict_1d:
+                target_1d_tracks = [self.gaussian_noise(item, 0.1) for item in target_1d_tracks]
             # Reverse complement all data
-            seq, features, mat = self.reverse(seq, features, mat)
+            seq, features, mat, target_1d_tracks = self.reverse(seq, features, mat, target_1d_tracks)
 
-        return seq, features, mat, start, end
+        return seq, features, mat, target_1d_tracks, start, end
 
     def __len__(self):
         return len(self.intervals)
@@ -72,7 +90,7 @@ class ChromosomeDataset(Dataset):
         outputs = inputs + noise
         return outputs
 
-    def reverse(self, seq, features, mat, chance = 0.5):
+    def reverse(self, seq, features, mat, target_1d_tracks, chance = 0.5):
         '''
         Reverse sequence and matrix
         '''
@@ -80,6 +98,7 @@ class ChromosomeDataset(Dataset):
         if r_bool < chance:
             seq_r = np.flip(seq, 0).copy() # n x 5 shape
             features_r = [np.flip(item, 0).copy() for item in features] # n
+            target_1d_tracks_r = [np.flip(item, 0).copy() for item in target_1d_tracks] # n
             mat_r = np.flip(mat, [0, 1]).copy() # n x n
 
             # Complementary sequence
@@ -88,7 +107,8 @@ class ChromosomeDataset(Dataset):
             seq_r = seq
             features_r = features
             mat_r = mat
-        return seq_r, features_r, mat_r
+            target_1d_tracks_r = target_1d_tracks
+        return seq_r, features_r, mat_r, target_1d_tracks_r
 
     def complement(self, seq, chance = 0.5):
         '''
@@ -115,9 +135,25 @@ class ChromosomeDataset(Dataset):
         features = [item.get(self.chr_name, start, end) for item in self.genomic_features]
         # Hi-C matrix processing
         mat = self.mat.get(start)
-        mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True)
+        mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
         mat = np.log(mat + 1)
-        return seq, features, mat
+        # Target 1D track processing
+        loaded_paths = [item.path for item in self.genomic_features]
+        target_1d_tracks_out = []
+        if self.predict_1d:
+             # Target 1D tracks also correspond to the input window [start, end]
+             target_1d_tracks = []  # re-use already loaded tracks
+             for item in self.target_tracks:
+                if item.path in loaded_paths:
+                    target_1d_tracks.append(features[loaded_paths.index(item.path)])
+                else:
+                    target_1d_tracks.append(item.get(self.chr_name, start, end))
+             # Ensure target tracks have the expected length (padding if necessary)
+             for track in target_1d_tracks:
+                  bin_size = int(len(track) / self.target_1d_len)
+                  resized_track = track.reshape(-1, bin_size).mean(axis=1)
+                  target_1d_tracks_out.append(resized_track)
+        return seq, features, mat, target_1d_tracks_out
 
     def get_active_intervals(self):
         '''
@@ -161,8 +197,15 @@ class ChromosomeDataset(Dataset):
         return start + offset , start + offset + target_size
 
     def check_length(self):
-        assert len(self.seq.seq) == self.genomic_features[0].length(self.chr_name), f'Sequence {len(self.seq)} and First feature {self.genomic_features[0].length(self.chr_name)} have different length.' 
-        assert abs(len(self.seq) / self.res -  len(self.mat)) < 2, f'Sequence {len(self.seq) / self.res} and Hi-C {len(self.mat)} have different length.' 
+        # Check sequence vs first *input* feature
+        if self.genomic_features:
+             assert len(self.seq.seq) == self.genomic_features[0].length(self.chr_name), f'Sequence {len(self.seq)} and First feature {self.genomic_features[0].length(self.chr_name)} have different length.'
+        # Check sequence vs first *target* 1D track (if applicable)
+        if self.predict_1d and self.target_tracks:
+             assert len(self.seq.seq) == self.target_tracks[0].length(self.chr_name), f'Sequence {len(self.seq)} and First target track {self.target_tracks[0].length(self.chr_name)} have different length.'
+        # Check Hi-C length consistency (if applicable)
+        if self.predict_hic and self.mat:
+             assert abs(len(self.seq) / self.res -  len(self.mat)) < 2, f'Sequence {len(self.seq) / self.res} and Hi-C {len(self.mat)} have different length.' 
 
 def get_feature_list(root_dir, feat_dicts):
     '''
@@ -193,6 +236,3 @@ def proc_centrotelo(bed_dir):
         regions = sub_df.drop('chr', axis = 1).to_numpy()
         centrotelo_dict[chr_name] = regions
     return centrotelo_dict
-
-if __name__ == '__main__':
-    main()

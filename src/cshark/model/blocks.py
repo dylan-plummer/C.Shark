@@ -188,9 +188,31 @@ class ResBlockDilated(nn.Module):
         out = self.relu(res_out + identity)
         return out
 
-class Decoder(nn.Module):
+
+class ResBlockDilated1D(nn.Module):
+    def __init__(self, size, hidden = 64, stride = 1, dil = 2):
+        super(ResBlockDilated1D, self).__init__()
+        pad_len = dil 
+        self.res = nn.Sequential(
+                        nn.Conv1d(hidden, hidden, size, padding = pad_len, 
+                            dilation = dil),
+                        nn.BatchNorm1d(hidden),
+                        nn.ReLU(),
+                        nn.Conv1d(hidden, hidden, size, padding = pad_len,
+                            dilation = dil),
+                        nn.BatchNorm1d(hidden),
+                        )
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        identity = x 
+        res_out = self.res(x)
+        out = self.relu(res_out + identity)
+        return out
+
+class Decoder2D(nn.Module):
     def __init__(self, in_channel, hidden = 256, filter_size = 3, num_blocks = 5):
-        super(Decoder, self).__init__()
+        super(Decoder2D, self).__init__()
         self.filter_size = filter_size
 
         self.conv_start = nn.Sequential(
@@ -214,6 +236,46 @@ class Decoder(nn.Module):
             blocks.append(ResBlockDilated(self.filter_size, hidden = hidden, dil = dilation))
         res_blocks = nn.Sequential(*blocks)
         return res_blocks
+    
+# --- NEW: 1D Decoder ---
+class Decoder1D(nn.Module):
+    """
+    Decodes latent representation back to 1D tracks.
+    Uses Transposed Convolutions for upsampling.
+    """
+    def __init__(self, num_target_tracks, latent_dim=256, filter_size=3, num_blocks=5, 
+                 target_length=2097152, num_upsample_blocks=7):
+        super(Decoder1D, self).__init__()
+        self.num_target_tracks = num_target_tracks
+        self.target_length = target_length
+        self.latent_dim = latent_dim # Channels in the latent space
+        self.filter_size = filter_size
+        self.num_blocks = num_blocks
+        # num_upsample_blocks should match the number of downsampling steps in the encoder
+        # Example: If Encoder reduces length by 2^13, we need 13 upsampling steps of factor 2.
+
+        self.conv_start = nn.Sequential(
+            nn.Conv1d(latent_dim, latent_dim, kernel_size=1),
+            nn.BatchNorm1d(latent_dim),
+            nn.ReLU(),
+        )
+        self.res_blocks = self.get_res_blocks(num_blocks, latent_dim)
+        self.conv_end = nn.Conv1d(latent_dim, num_target_tracks, kernel_size=1)
+
+    def get_res_blocks(self, n, hidden):
+        blocks = []
+        for i in range(n):
+            dilation = 2 ** (i + 1)
+            blocks.append(ResBlockDilated1D(self.filter_size, hidden = hidden, dil = dilation))
+        res_blocks = nn.Sequential(*blocks)
+        return res_blocks
+
+    def forward(self, x):
+        x = self.conv_start(x)
+        x = self.res_blocks(x)
+        out = self.conv_end(x)
+        out = out.permute(0, 2, 1)
+        return out
 
 class TransformerLayer(torch.nn.TransformerEncoderLayer):
     # Pre-LN structure
@@ -312,6 +374,3 @@ class AttnModule(nn.Module):
 
     def inference(self, x):
         return self.module(x)
-
-if __name__ == '__main__':
-    main()
