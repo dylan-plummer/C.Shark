@@ -29,7 +29,7 @@ class HiCFeature(Feature):
         return hic_mat
 
     def load_hic(self, path):
-        print(f'Reading Hi-C: {path}')
+        #print(f'Reading Hi-C: {path}')
         return dict(np.load(path))
 
     def diag_to_mat(self, ori_load, start, end):
@@ -65,7 +65,7 @@ class GenomicFeatureSingleThread(Feature):
         self.path = path
         self.load(path)
         self.norm = norm
-        print(f'Feature path: {path} \n Normalization status: {norm}')
+        #print(f'Feature path: {path} \n Normalization status: {norm}')
 
     def load(self, path):
         self.feature = self.read_feature(path)
@@ -100,7 +100,7 @@ class GenomicFeature(GenomicFeatureSingleThread):
     def __init__(self, path, norm):
         self.path = path
         self.norm = norm
-        print(f'Feature path: {path} \n Normalization status: {norm}')
+        #print(f'Feature path: {path} \n Normalization status: {norm}')
 
     def load(self, path):
         raise Exception('Left blank')
@@ -138,7 +138,7 @@ class SequenceFeature(Feature):
         Returns:
             array: A numpy char array that contains DNA for a chromosome
         '''
-        print(f'Reading sequence: {dna_dir}')
+        #print(f'Reading sequence: {dna_dir}')
         with gzip.open(dna_dir, 'r') as f:
             seq = f.read().decode("utf-8")
         seq = seq[seq.find('\n'):]

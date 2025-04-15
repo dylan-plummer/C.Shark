@@ -153,7 +153,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
 class ConvModel(nn.Module):
     def __init__(self, num_genomic_features, mid_hidden = 256):
         super(ConvModel, self).__init__()
-        print('Initializing ConvModel')
+        #print('Initializing ConvModel')
         self.encoder = blocks.EncoderSplit(num_genomic_features, output_size = mid_hidden, num_blocks = 12)
         self.decoder = blocks.Decoder2D(mid_hidden * 2)
 
@@ -187,7 +187,7 @@ class ConvTransModel(ConvModel):
     
     def __init__(self, num_genomic_features, mid_hidden = 256, record_attn = False, use_cross_attn = False):
         super(ConvTransModel, self).__init__(num_genomic_features)
-        print('Initializing ConvTransModel')
+        #print('Initializing ConvTransModel')
         if use_cross_attn:
             self.encoder = blocks.EncoderCrossAttn(num_genomic_features, output_size = mid_hidden, num_blocks = 12)
         else:
