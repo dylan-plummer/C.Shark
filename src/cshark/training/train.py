@@ -44,6 +44,7 @@ class VizCallback(Callback):
         # from here: /mnt/rstor/genetics/JinLab/fxj45/WWW/xww/bigwig
         self.h3k4me1 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
         self.h3k27me3 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
+        self.rad21 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/rad21.bw" for celltype in celltypes}
 
     def on_train_start(self, trainer, pl_module):
         print("Saving ground truth Hi-C example loci for reference")
@@ -77,7 +78,7 @@ class VizCallback(Callback):
                         pred_1d = pred_1d.reshape(-1, bin_size).mean(axis=1)
                         pred_1d_tracks.append(pred_1d)
                     # visualize 1D tracks as shaded plots
-                    fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(15, 4))
+                    fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(10, len(pred_1d_tracks) * 2))
                     if len(pred_1d_tracks) == 1:
                         axs = [axs]
                     colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
@@ -102,7 +103,21 @@ class VizCallback(Callback):
             for chr_name, start in zip(self.chr_names, self.starts):
                 try:
                     locus = f"{chr_name}:{start}"
-                    other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
+                    #other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
+                    other_paths = []
+                    for feature in pl_module.hparams.input_features:
+                        if feature == 'h3k27ac':
+                            other_paths.append(self.h3k27ac[celltype])
+                        elif feature == 'h3k4me3':
+                            other_paths.append(self.h3k4me3[celltype])
+                        elif feature == 'h3k36me3':
+                            other_paths.append(self.h3k36me3[celltype])
+                        elif feature == 'h3k4me1':
+                            other_paths.append(self.h3k4me1[celltype])
+                        elif feature == 'h3k27me3':
+                            other_paths.append(self.h3k27me3[celltype])
+                        elif feature == 'rad21':
+                            other_paths.append(self.rad21[celltype])
                     #other_paths = [self.h3k27me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
                         start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths)
@@ -129,7 +144,7 @@ class VizCallback(Callback):
                     if pred_1d_tracks is not None:
                         os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
                         # visualize 1D tracks as shaded plots
-                        fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(15, 4))
+                        fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(10, len(pred_1d_tracks) * 2))
                         if len(pred_1d_tracks) == 1:
                             axs = [axs]
                         colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
