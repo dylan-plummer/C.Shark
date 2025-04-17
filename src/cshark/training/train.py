@@ -347,10 +347,12 @@ class TrainModule(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
         self.save_hyperparameters(args)
+        self.predict_1d = self.hparams.output_features is not None
         self.model = self.get_model(args)
         self.args = args
         self.criterion = torch.nn.MSELoss() # Common loss function
         self.window = 2097152 # 2Mb window size
+        
 
     def get_model(self, args):
         model_name =  args.model_type
@@ -359,7 +361,7 @@ class TrainModule(pl.LightningModule):
         num_input_features = len(self.hparams.input_features)
 
         num_target_tracks = 0
-        if self.hparams.output_features is not None:
+        if self.predict_1d:
             num_target_tracks = len(self.hparams.output_features)
 
         # Instantiate the model
@@ -368,7 +370,7 @@ class TrainModule(pl.LightningModule):
             num_target_tracks=num_target_tracks,    # Target 1D tracks
             mid_hidden=self.hparams.model_latent_dim,
             predict_hic=True,
-            predict_1d=(num_target_tracks > 0),
+            predict_1d=self.predict_1d,
             target_1d_length=args.target_1d_size
             # Add other necessary model args from hparams if they exist
         )
@@ -386,7 +388,11 @@ class TrainModule(pl.LightningModule):
         return self.model(x)
 
     def proc_batch(self, batch):
-        seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx = batch
+        target_1d_tracks = None
+        if self.predict_1d:
+            seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx = batch
+        else:
+            seq, features, mat, start, end, chr_name, chr_idx = batch
         features = torch.cat([feat.unsqueeze(2) for feat in features], dim = 2)
         inputs = torch.cat([seq, features], dim = 2)
         mat = mat.float()

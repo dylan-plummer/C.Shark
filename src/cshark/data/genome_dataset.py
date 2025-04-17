@@ -80,16 +80,28 @@ class GenomeDataset(Dataset):
         seq, features, mat, target_1d_tracks, start, end = data_tuple
 
         # Construct the output tuple, setting optional components to None if not included
-        outputs = [
-            seq if self.include_sequence else None,
-            features if self.include_genomic_features else None,
-            mat if self.predict_hic else None,
-            target_1d_tracks if self.predict_1d else None,
-            start,
-            end,
-            chr_name,
-            chr_idx
-        ]
+        if self.predict_1d:
+            outputs = [
+                seq if self.include_sequence else None,
+                features if self.include_genomic_features else None,
+                mat if self.predict_hic else None,
+                target_1d_tracks if self.predict_1d else None,
+                start,
+                end,
+                chr_name,
+                chr_idx
+            ]
+        else:
+            outputs = [
+                seq if self.include_sequence else None,
+                features if self.include_genomic_features else None,
+                mat if self.predict_hic else None,
+                start,
+                end,
+                chr_name,
+                chr_idx
+            ]
+        
 
         return tuple(outputs)
 
