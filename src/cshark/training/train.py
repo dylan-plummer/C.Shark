@@ -20,9 +20,10 @@ import cshark.data.data_feature as data_feature
 
 
 class VizCallback(Callback):
-    def __init__(self, celltypes=['gm12878'], assembly='hg19', out_dir='deeploop_viz'):
+    def __init__(self, data_root='cshark_data/data', celltypes=['gm12878'], assembly='hg19', out_dir='deeploop_viz'):
         self.out_dir = out_dir
         os.makedirs(self.out_dir, exist_ok=True)
+        self.data_root = data_root
         self.celltypes = celltypes
         self.assembly = assembly
         self.image_scale = 256  # size of each heatmap (fixed by model)
@@ -31,27 +32,27 @@ class VizCallback(Callback):
                      'chr10:122700000', 'chr15:59100000', 'chr12:89300000']
         self.chr_names = [s.split(':')[0] for s in self.loci]
         self.starts = [int(s.split(':')[1]) for s in self.loci]
-        self.seq = f"cshark_data/data/{self.assembly}/dna_sequence"
+        self.seq = f"{self.data_root}/{self.assembly}/dna_sequence"
         # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE167200
-        self.ctcf = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/ctcf.bw" for celltype in celltypes}
-        self.atac = {celltype: None for celltype in celltypes}  # for if we are not using ATAC
-        #self.atac = {celltype: f"cshark_data/data/hg19/{celltype}/genomic_features/atac.bw" for celltype in celltypes}
+        self.ctcf = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/ctcf.bw" for celltype in celltypes}
+        #self.atac = {celltype: None for celltype in celltypes}  # for if we are not using ATAC
+        self.atac = {celltype: f"{self.data_root}/hg19/{celltype}/genomic_features/atac.bw" for celltype in celltypes}
         # /mnt/rstor/genetics/JinLab/fxj45/WWW/ssz20/bigwig
-        self.h3k27ac = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k27ac.bw" for celltype in celltypes}
-        self.h3k4me3 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k4me3.bw" for celltype in celltypes}
+        self.h3k27ac = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k27ac.bw" for celltype in celltypes}
+        self.h3k4me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k4me3.bw" for celltype in celltypes}
         # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM733679
-        self.h3k36me3 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k36me3.bw" for celltype in celltypes}
+        self.h3k36me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k36me3.bw" for celltype in celltypes}
         # from here: /mnt/rstor/genetics/JinLab/fxj45/WWW/xww/bigwig
-        self.h3k4me1 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
-        self.h3k27me3 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
-        self.rad21 = {celltype: f"cshark_data/data/{self.assembly}/{celltype}/genomic_features/rad21.bw" for celltype in celltypes}
+        self.h3k4me1 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
+        self.h3k27me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
+        self.rad21 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/rad21.bw" for celltype in celltypes}
 
     def on_train_start(self, trainer, pl_module):
         print("Saving ground truth Hi-C example loci for reference")
         for celltype in self.celltypes:
             for chr_name, start in zip(self.chr_names, self.starts):
                 locus = f"{chr_name}:{start}"
-                hic = data_feature.HiCFeature(path = f'cshark_data/data/{self.assembly}/{celltype}/hic_matrix/{chr_name}.npz')
+                hic = data_feature.HiCFeature(path = f'{self.data_root}/{self.assembly}/{celltype}/hic_matrix/{chr_name}.npz')
                 mat = hic.get(start)
                 mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
                 os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
@@ -62,7 +63,8 @@ class VizCallback(Callback):
                 new_plot_path = os.path.join(self.out_dir, locus, celltype, f"ground_truth.png")
                 try:
                     os.rename(tmp_plot_path, new_plot_path)
-                    wandb.log({locus + '_experimental_' + celltype: wandb.Image(new_plot_path)})
+                    if pl_module.hparams.use_wandb:
+                        wandb.log({locus + '_experimental_' + celltype: wandb.Image(new_plot_path)})
                 except Exception as e:
                     print(e)
 
@@ -71,7 +73,7 @@ class VizCallback(Callback):
                     os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
                     pred_1d_tracks = []
                     for i, feature in enumerate(pl_module.hparams.output_features):
-                        bw = data_feature.GenomicFeature(path = f'cshark_data/data/{self.assembly}/{celltype}/genomic_features/{feature}.bw', norm=None)
+                        bw = data_feature.GenomicFeature(path = f'{self.data_root}/{self.assembly}/{celltype}/genomic_features/{feature}.bw', norm=None)
                         pred_1d = bw.get(chr_name, start, start + pl_module.window)
                         #pred_1d = resize(pred_1d, (pl_module.hparams.target_1d_size,), anti_aliasing=True, preserve_range=True)
                         bin_size = int(len(pred_1d) / pl_module.hparams.target_1d_size)
@@ -92,7 +94,8 @@ class VizCallback(Callback):
                     plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_ground_truth.png"))
                     plt.close()
                     try:
-                        wandb.log({locus + '_experimental_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_ground_truth.png"))})
+                        if pl_module.hparams.use_wandb:
+                            wandb.log({locus + '_experimental_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_ground_truth.png"))})
                     except Exception as e:
                         print(e)
 
@@ -135,7 +138,8 @@ class VizCallback(Callback):
                     new_plot_path = os.path.join(self.out_dir, locus, celltype, f"{pl_module.current_epoch}.png")
                     try:
                         os.rename(tmp_plot_path, new_plot_path)
-                        wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
+                        if pl_module.hparams.use_wandb:
+                            wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
                     except Exception as e:
                         print(e)
 
@@ -161,7 +165,8 @@ class VizCallback(Callback):
                         plt.close()
 
                         try:
-                            wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
+                            if pl_module.hparams.use_wandb:
+                                wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
                         except Exception as e:
                             print(e)
                             
@@ -172,10 +177,11 @@ class VizCallback(Callback):
 def main():
     args = init_parser()
     init_training(args)
-    wandb.init(project='', entity='',
-               config=args.__dict__)
-    #wandb.watch(model, log_freq=2000)
-    config = wandb.config
+    if args.use_wandb:
+        wandb.init(project='', entity='',
+                config=args.__dict__)
+        #wandb.watch(model, log_freq=2000)
+        config = wandb.config
 
 def init_parser():
   parser = argparse.ArgumentParser(description='C.Origami Training Module.')
@@ -215,6 +221,9 @@ def init_parser():
   parser.add_argument('--num-gpu', dest='trainer_num_gpu', default=4,
                         type=int,
                         help='Number of GPUs to use')
+  parser.add_argument('--use-wandb', dest='use_wandb',
+                        action='store_true',
+                        help='Track project on wandb')
 
   # Dataloader Parameters
   parser.add_argument('--batch-size', dest='dataloader_batch_size', default=4, 
@@ -271,13 +280,15 @@ def init_training(args):
     # Assign seed
     pl.seed_everything(args.run_seed, workers=True)
     pl_module = TrainModule(args)
-    wandb_logger = WandbLogger(project='c.shark')
-    wandb_logger.watch(pl_module.model)
+    if args.use_wandb:
+        wandb_logger = WandbLogger(project='c.shark')
+        wandb_logger.watch(pl_module.model)
     pl_trainer = pl.Trainer(strategy='ddp',
                             accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=args.trainer_num_gpu,
                             gradient_clip_val=1,
-                            logger = wandb_logger,
-                            callbacks = [VizCallback(celltypes=args.dataset_celltypes,  
+                            logger = wandb_logger if args.use_wandb else None,
+                            callbacks = [VizCallback(data_root=args.dataset_data_root,
+                                                     celltypes=args.dataset_celltypes,  
                                                      assembly=args.dataset_assembly),
                                          early_stop_callback,
                                          checkpoint_callback,
