@@ -30,10 +30,10 @@ def preprocess_default(seq, ctcf, atac, other=None):
     return inputs
 
 ## Load data ##
-def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=None, window = 2097152):
+def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=None, window = 2097152, ctcf_log2=False):
     ''' Single loading method for one region '''
     end = start + window
-    seq, ctcf, atac = load_data_default(chr_name, seq_path, ctcf_path, atac_path)
+    seq, ctcf, atac = load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=ctcf_log2)
     other_regions = None
     if other_paths is not None:
         other_feats = []
@@ -45,10 +45,10 @@ def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=Non
     return seq_region, ctcf_region, atac_region, other_regions
 
 
-def load_data_default(chr_name, seq_path, ctcf_path, atac_path):
+def load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=False):
     seq_chr_path = os.path.join(seq_path, f'{chr_name}.fa.gz')
     seq = SequenceFeature(path = seq_chr_path)
-    ctcf = GenomicFeature(path = ctcf_path, norm = 'log')
+    ctcf = GenomicFeature(path = ctcf_path, norm = 'log' if not ctcf_log2 else 'log2')
     atac = None
     if atac_path is not None:
         atac = GenomicFeature(path = atac_path, norm = 'log')

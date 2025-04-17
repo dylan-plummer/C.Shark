@@ -16,7 +16,7 @@ dependencies = [
     'matplotlib>=3.3.2',
     'omegaconf>=2.1.1',
     'tqdm>=4.64.0',
-    'pybigwig==0.3.18',
+    'pybigwig>=0.3.24',
     'cooler',
     'seaborn',
     'matplotlib',
