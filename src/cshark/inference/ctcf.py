@@ -446,10 +446,10 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write(f'{chr_name}\t{pixel_start_i}\t{pixel_end_i}\t{chr_name}\t{pixel_start_j}\t{pixel_end_j}\t{mat[i, j]}\n')
 
     assembly = 'hg19'
-     if '/mm10/' in ctcf_path:
-         assembly = 'mm10'
-     elif '/hg38/' in ctcf_path:
-         assembly = 'hg38'
+    if '/mm10/' in ctcf_path:
+        assembly = 'mm10'
+    elif '/hg38/' in ctcf_path:
+        assembly = 'hg38'
     # data root is path before /<assembly>
     # e.g. cshark_data/data/mm10/ -> cshark_data/data
     assembly_idx = ctcf_path.index(f'/{assembly}/')
@@ -637,7 +637,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
         assembly_idx = ctcf_path.index(f'/{assembly}/')
         data_root = ctcf_path[:assembly_idx]
         tracks = get_tracks(data_root, celltype, assembly)
-        tracks_screen = tracks.replace(dataset_name_token, celltype)
+        tracks_screen = tracks
         lines = tracks_screen.split('\n')
         lines = [line + '\n' for line in lines]
         with open('tmp/tmp_tracks.ini', 'w') as f:
