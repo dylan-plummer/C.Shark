@@ -326,15 +326,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, var_pos, al
         region = region if region is not None else f"{chr_name}:{start}-{start + window}"
         
         if plot_diff:
-            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks_diff.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13"
+            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks_diff.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 > /dev/null 2>&1"
             os.system(tracks_cmd)
         else: 
             if plot_ground_truth:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_true_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13"
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_true_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 > /dev/null 2>&1"
                 os.system(tracks_cmd)
-            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_pred_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13"
+            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_pred_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 > /dev/null 2>&1"
             os.system(tracks_cmd)
-            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13"
+            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 > /dev/null 2>&1"
             os.system(tracks_cmd)
 
         
@@ -382,7 +382,7 @@ def deletion_with_padding(start, var_pos, alt_bp, seq_region, ctcf_region, atac_
     ''' Delete all signals at a specfied location with corresponding padding at the end '''
     seq_region, ctcf_region, atac_region = seq_perturb(var_pos - start - 1, 
             alt_bp, 
-            seq_region, ctcf_region, atac_region, alt_bp)
+            seq_region, ctcf_region, atac_region)
     return seq_region, ctcf_region, atac_region
 
 def write_tmp_cooler(pred, chr_name, start, res=8192, window=2097152, out_file='tmp/tmp.cool'):
@@ -408,13 +408,10 @@ def write_tmp_cooler(pred, chr_name, start, res=8192, window=2097152, out_file='
     cooler.create_cooler(out_file, bins, pixels, dtypes={'count': np.float32})
 
 
-def seq_perturb(start, end, seq, ctcf, atac, alt, window = 2097152):
+def seq_perturb(start, alt, seq, ctcf, atac, window = 2097152):
     """
     Simulate DNA sequence variants
     """
-    print(f'Start: {start}, End: {end}')
-    print(f'Seq: {seq}')
-    print(alt)
     # replace sequence based on en_dict
     new_entry = np.zeros(5)
     alt_idx = en_dict[alt.lower()]
@@ -422,7 +419,7 @@ def seq_perturb(start, end, seq, ctcf, atac, alt, window = 2097152):
     ref_entry = seq[start, :]
     ref = ref_entry.argmax()
     ref_base = list(en_dict.keys())[list(en_dict.values()).index(ref)]
-    print(f'Reference base: {ref_base.upper()}')
+    print(f'Pos: {start}, Alt: {alt}, Ref: {ref_base.upper()}')
     if ref == alt_idx:
         print('No change')
     # display surrounding +/- 10bp
@@ -437,7 +434,7 @@ def seq_perturb(start, end, seq, ctcf, atac, alt, window = 2097152):
         if i == start:
             ref_bases.append('*')
     ref_bases = ''.join(ref_bases).upper()
-    print(f'Surrounding bases: {ref_bases}')
+    print(f'{ref_bases}')
     seq[start, :] = new_entry
     if atac is None:
         return seq[:window], ctcf[:window], atac

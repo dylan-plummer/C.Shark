@@ -201,9 +201,9 @@ def main():
 
         # convert the res dict to a dataframe
         res_df = pd.DataFrame(res).groupby(['a1', 'a2']).mean().reset_index()
-        # undo the log transformation
-        res_df['WT'] = np.exp(res_df['WT']) - 1  
-        res_df['KO'] = np.exp(res_df['KO']) - 1
+        # undo the log transformation (unless already done in inference_utils)
+        # res_df['WT'] = np.exp(res_df['WT']) - 1  
+        # res_df['KO'] = np.exp(res_df['KO']) - 1
         res_df['a1'] = 'A_' + res_df['a1'].astype(str)
         res_df['a2'] = 'A_' + res_df['a2'].astype(str)
         print(res_df)
@@ -408,7 +408,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
     # write a links file (chr1 start1 end1 chr2 start2 end2 score) for each pixel in the baseline and the deletion
     baseline_cutoff = np.quantile(pred_before, 0.99)
-    cutoff = np.quantile(pred, 0.99)    
+    cutoff = np.quantile(pred, 0.99)  
+    diff_cutoff = np.quantile(np.abs(diff), 0.99)  
     if plot_ground_truth:
          ground_truth_cutoff = np.quantile(mat, 0.99)
     region_start = int(region.split(':')[1].split('-')[0]) if region is not None else start
@@ -423,6 +424,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 pixel_end_j = j * res + start + res
                 if pred_before[i, j] > baseline_cutoff and pixel_start_i > region_start and pixel_end_i < region_end and pixel_start_j > region_start and pixel_end_j < region_end:
                     f.write(f'{chr_name}\t{pixel_start_i}\t{pixel_end_i}\t{chr_name}\t{pixel_start_j}\t{pixel_end_j}\t{pred_before[i, j]}\n')
+    # write diff arcs
+    with open('tmp/arcs_diff.bed', 'w') as f:
+        for i in range(diff.shape[0]):
+            for j in range(diff.shape[1]):
+                pixel_start_i = i * res + start
+                pixel_end_i = i * res + start + res
+                pixel_start_j = j * res + start
+                pixel_end_j = j * res + start + res
+                if abs(diff[i, j]) > diff_cutoff and pixel_start_i > region_start and pixel_end_i < region_end and pixel_start_j > region_start and pixel_end_j < region_end:
+                    f.write(f'{chr_name}\t{pixel_start_i}\t{pixel_end_i}\t{chr_name}\t{pixel_start_j}\t{pixel_end_j}\t{diff[i, j]}\n')
     # write pred KO arcs
     with open('tmp/arcs_ko.bed', 'w') as f:
          for i in range(pred.shape[0]):
@@ -522,6 +533,18 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         lines = [line + '\n' for line in lines]
         with open('tmp/tmp_tracks_diff.ini', 'w') as f:
                 for line in lines:
+                    if 'arcs.bed' in line:
+                        line = line.replace('arcs.bed', 'arcs_diff.bed')
+                        f.write(line)
+                        f.write('line_width = 1\n')
+                        f.write('color = bwr\n')
+                        f.write('alpha = 0.5\n')
+                        f.write('height = 3\n')
+                        f.write('file_type = links\n')
+                        f.write('links_type = arcs\n')
+                        f.write('orientation = inverted\n')
+                        break  # arcs always at bottom
+
                     if '[Genes]' in line:
                         # add the ground truth hic matrix
                         f.write('[Diff]\n')
@@ -689,9 +712,9 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
 
         try:
             if region is not None:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 "
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {region} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 > /dev/null 2>&1"
             else:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {chr_name}:{screen_start}-{screen_start + window} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 "
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {chr_name}:{screen_start}-{screen_start + window} --fontSize 15 --plotWidth 17 --trackLabelFraction 0.13 > /dev/null 2>&1"
             os.system(tracks_cmd)
         except Exception as e:
             print(e)
@@ -881,8 +904,7 @@ def ctcf_ko(start, end, seq, ctcf, atac, window = 2097152, ko_mode='zero'):
         return seq[:window], ctcf[:window], atac[:window]
     
 def loop_recovery_roc(mat_true, mat_pred, true_cutoff=0.5, n_points=100):
-    mat_true_sparse = mat_true 
-    mat_pred_sparse = np.exp(mat_pred) - 1
+    mat_true_sparse = mat_true
     mat_true_sparse = mat_true_sparse / np.max(mat_true_sparse)
     mat_pred_sparse = mat_pred_sparse / np.max(mat_pred_sparse)
     mat_true_sparse = coo_matrix(mat_true_sparse)
