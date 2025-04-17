@@ -15,7 +15,7 @@ from contextlib import suppress
 from cshark.data.data_feature import GenomicFeature, HiCFeature
 import cshark.inference.utils.inference_utils as infer
 from cshark.inference.utils import plot_utils, model_utils
-from cshark.inference.tracks_files import tracks, tracks_screen
+from cshark.inference.tracks_files import get_tracks
 
 import argparse
 
@@ -43,7 +43,7 @@ def main():
     parser.add_argument('--model', dest='model_path', 
                         help='Path to the model checkpoint', required=True)
     parser.add_argument('--latent_size', dest='mid_hidden', type=int, default=256,
-                                help='', required=True)
+                                help='', required=False)
     parser.add_argument('--out-file', dest='out_file', 
                         help='Path to the output file if doing full chromosome prediction', required=False)
     parser.add_argument('--seq', dest='seq_path', 
@@ -101,6 +101,9 @@ def main():
     parser.add_argument('--load-screen', dest='load_screen', 
                         action = 'store_true',
                         help='load the screen results from a saved bedgraph')
+
+    parser.add_argument('--n-overlap-pred', dest='n_overlap_preds', type=int, default=2,
+                        help='Number of predictions for each pixel (controls step size of sliding window)', required=False)
     
     # plotting related params
     parser.add_argument('--min-val-true', dest='min_val_true', type=float, default=0.5,
@@ -162,7 +165,7 @@ def main():
         ko_mode = args.ko_mode
         chr_length = bw.length(chr_name)
         print(f'Chromosome length: {chr_length}')
-        step_size = int(window / 2)
+        step_size = int(window / args.n_overlap_preds)
         starts = np.arange(0, chr_length - window, step_size)
         ends = starts + window
         res = {'a1': [], 'a2': [], 'WT': [], 'KO': []}
@@ -443,6 +446,17 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write(f'{chr_name}\t{pixel_start_i}\t{pixel_end_i}\t{chr_name}\t{pixel_start_j}\t{pixel_end_j}\t{mat[i, j]}\n')
 
 
+    assembly = 'hg19'
+     if '/mm10/' in ctcf_path:
+         assembly = 'mm10'
+     elif '/hg38/' in ctcf_path:
+         assembly = 'hg38'
+    # data root is path before /<assembly>
+    # e.g. cshark_data/data/mm10/ -> cshark_data/data
+    assembly_idx = ctcf_path.index(f'/{assembly}/')
+    data_root = ctcf_path[:assembly_idx]
+    tracks = get_tracks(data_root, celltype, assembly)
+
     lines = tracks.split('\n')
     lines = [line + '\n' for line in lines]
     with open('tmp/tmp_tracks.ini', 'w') as f:
@@ -615,6 +629,17 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
         
         # with open('tracks_screen.ini', 'r') as f:
         #     lines = f.readlines()
+        assembly = 'hg19'
+        if '/mm10/' in ctcf_path:
+            assembly = 'mm10'
+        elif '/hg38/' in ctcf_path:
+            assembly = 'hg38'
+        # data root is path before /<assembly>
+        # e.g. cshark_data/data/mm10/ -> cshark_data/data
+        assembly_idx = ctcf_path.index(f'/{assembly}/')
+        data_root = ctcf_path[:assembly_idx]
+        tracks = get_tracks(data_root, celltype, assembly)
+        tracks_screen = tracks.replace(dataset_name_token, celltype)
         lines = tracks_screen.split('\n')
         lines = [line + '\n' for line in lines]
         with open('tmp/tmp_tracks.ini', 'w') as f:
