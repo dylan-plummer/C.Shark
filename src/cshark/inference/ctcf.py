@@ -212,6 +212,16 @@ def main():
         bins_df = pd.concat(bins, ignore_index=True).drop_duplicates().reset_index(drop=True)
         bins_df['bin_id'] = 'A_' + bins_df.index.astype(str)
         print(bins_df) 
+        chr_map = bins_df.set_index('bin_id')['chrom'].to_dict()
+        start_map = bins_df.set_index('bin_id')['start'].to_dict()
+        end_map = bins_df.set_index('bin_id')['end'].to_dict()
+        res_df['chrom1'] = res_df['a1'].map(chr_map)
+        res_df['chrom2'] = res_df['a2'].map(chr_map)
+        res_df['start1'] = res_df['a1'].map(start_map)
+        res_df['start2'] = res_df['a2'].map(start_map)
+        res_df['end1'] = res_df['a1'].map(end_map)
+        res_df['end2'] = res_df['a2'].map(end_map)
+        res_df = res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO']]
         # make sure outfile directory exists
         os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
         # make sure outfile ends with .tsv
