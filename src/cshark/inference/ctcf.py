@@ -14,6 +14,7 @@ from contextlib import suppress
 
 from cshark.data.data_feature import GenomicFeature, HiCFeature
 import cshark.inference.utils.inference_utils as infer
+from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_ctcf_ko, knockout_peaks
 from cshark.inference.utils import plot_utils, model_utils
 from cshark.inference.tracks_files import get_tracks
 
@@ -398,6 +399,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
     diff = pred - pred_before
     write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool')
+    write_tmp_ctcf_ko(ctcf_path, chr_name, start, deletion_start, deletion_width, ko_mode='knockout')
 
     # open tracks.ini file and add two vertical lines for the deletion, write in a new tmp tracks file
     # must first create bed file for deletion
@@ -482,6 +484,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     f.write(f'max_value = {max_val_pred}\n')
                 f.write('colormap = Reds\n')
                 f.write('file_type = hic_matrix_square\n\n')
+            if '[h3k27ac]' in line:
+                f.write('[CTCF KO]\n')
+                f.write('file = tmp/ctcf_ko.bw\n')
+                f.write('height = 2\n')
+                f.write('color = #ff0000\n')
+                f.write('title = CTCF KO\n')
+                f.write('min_value = 0\n')
+                f.write('max_value = 50\n')
+                f.write('number_of_bins = 512\n\n')
+
             f.write(line)
              
         # now add the deletion line
@@ -777,103 +789,6 @@ def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctc
             deletion_start - start + deletion_width, 
             seq_region, ctcf_region, atac_region, ko_mode=ko_mode)
     return seq_region, ctcf_region, atac_region
-
-def write_tmp_cooler(pred, chr_name, start, res=8192, window=2097152, out_file='tmp/tmp.cool'):
-    bins = pd.DataFrame()
-    #bin_range = np.linspace(start, start + window - res, pred.shape[0])
-    bin_range = np.arange(0, start + window + res, res)
-    bins['start'] = bin_range
-    bins['start'] = bins['start'].astype(int)
-    bins['end'] = bins['start'] + res
-    bins['end'] = bins['end'].astype(int)
-    bins['chrom'] = chr_name
-    # offset start bin 
-    start_offset = int(start / res)
-
-    pixels = pd.DataFrame()
-    sparse_mat = coo_matrix(np.triu(pred), dtype=np.float32)
-    pixels['bin1_id'] = sparse_mat.row + start_offset
-    pixels['bin2_id'] = sparse_mat.col + start_offset
-    pixels['count'] = sparse_mat.data 
-
-    pixels.to_csv(out_file + '.csv')
-
-    cooler.create_cooler(out_file, bins, pixels, dtypes={'count': np.float32})
-
-
-def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor=1.0):
-    """
-    Simulates knockout of peaks in a signal array by replacing peak regions with background values.
-    
-    Args:
-        signal_array (numpy.ndarray): 1D array containing signal values.
-        threshold (float): Minimum signal value to be considered part of a peak.
-        min_peak_width (int): Minimum width for a region to be called a peak.
-        padding_factor (float): Fraction of peak width to use for background calculation.
-            
-    Returns:
-        numpy.ndarray: Copy of input array with peaks knocked out (replaced with background).
-    """
-    # Create a copy of the input array to modify
-    result = np.copy(signal_array)
-    array_length = len(signal_array)
-    
-    # Find regions above threshold
-    above_threshold = signal_array >= threshold
-    
-    # Track peak regions
-    in_peak = False
-    peak_start = None
-    peaks = []  # Will store (start, end) tuples
-    
-    # Find peaks
-    for i in range(array_length):
-        if above_threshold[i]:
-            if not in_peak:
-                # Start of a new peak
-                peak_start = i
-                in_peak = True
-        else:
-            if in_peak:
-                # End of current peak
-                peak_end = i
-                if peak_end - peak_start >= min_peak_width:
-                    peaks.append((peak_start, peak_end))
-                in_peak = False
-    
-    # Handle case where array ends during a peak
-    if in_peak and array_length - peak_start >= min_peak_width:
-        peaks.append((peak_start, array_length))
-    
-    # Process each peak
-    for peak_start, peak_end in peaks:
-        peak_width = peak_end - peak_start
-        
-        # Calculate padding for background, but don't exceed array bounds
-        padding = min(int(peak_width * padding_factor), 5)
-        
-        # Calculate regions before and after peak for background
-        pre_start = max(0, peak_start - padding)
-        pre_end = peak_start
-        
-        post_start = peak_end
-        post_end = min(array_length, peak_end + padding)
-        
-        # Calculate mean of surrounding regions as background
-        pre_values = signal_array[pre_start:pre_end]
-        post_values = signal_array[post_start:post_end]
-        
-        # Handle empty regions
-        pre_mean = np.mean(pre_values) if len(pre_values) > 0 else 0.0
-        post_mean = np.mean(post_values) if len(post_values) > 0 else 0.0
-        
-        # Calculate background value as average of pre and post regions
-        background_val = (pre_mean + post_mean) / 2.0
-        
-        # Replace peak with background value
-        result[peak_start:peak_end] = background_val
-    
-    return result
 
 
 def ctcf_ko(start, end, seq, ctcf, atac, window = 2097152, ko_mode='zero'):
