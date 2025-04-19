@@ -243,7 +243,7 @@ def init_parser():
   parser.add_argument('--target-features', dest='output_features', nargs='+',
                             default=None,
                             help='Target features to use')
-  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=256,
+  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=2048,
                       help='Size of output 1d track')
   parser.add_argument('--latent-dim', dest='model_latent_dim', type=int, default=256,
                       help='Latent dimension size (mid_hidden)')

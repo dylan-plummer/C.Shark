@@ -243,8 +243,8 @@ class Decoder1D(nn.Module):
     Decodes latent representation back to 1D tracks.
     Uses Transposed Convolutions for upsampling.
     """
-    def __init__(self, num_target_tracks, latent_dim=256, filter_size=3, num_blocks=5, 
-                 target_length=2097152, num_upsample_blocks=7):
+    def __init__(self, num_target_tracks, latent_dim=256, filter_size=3, num_blocks=7, 
+                 target_length=2097152, num_upsample_blocks=3):
         super(Decoder1D, self).__init__()
         self.num_target_tracks = num_target_tracks
         self.target_length = target_length
@@ -259,6 +259,16 @@ class Decoder1D(nn.Module):
             nn.BatchNorm1d(latent_dim),
             nn.ReLU(),
         )
+        self.upsample_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.ConvTranspose1d(latent_dim, latent_dim, kernel_size=2, stride=2),
+                nn.BatchNorm1d(latent_dim),
+                nn.ReLU(),
+                nn.Conv1d(latent_dim, latent_dim, kernel_size=filter_size, padding='same'),
+                nn.BatchNorm1d(latent_dim),
+                nn.ReLU(),
+            ) for _ in range(num_upsample_blocks)
+        ])
         self.res_blocks = self.get_res_blocks(num_blocks, latent_dim)
         self.conv_end = nn.Conv1d(latent_dim, num_target_tracks, kernel_size=1)
 
@@ -272,6 +282,8 @@ class Decoder1D(nn.Module):
 
     def forward(self, x):
         x = self.conv_start(x)
+        for block in self.upsample_blocks:
+            x = block(x)
         x = self.res_blocks(x)
         out = self.conv_end(x)
         out = out.permute(0, 2, 1)
