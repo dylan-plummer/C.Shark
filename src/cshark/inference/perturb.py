@@ -640,6 +640,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         break  # arcs always at bottom
 
                     if '[Genes]' in line:
+                        if 'ctcf' in ko_data:
+                            f.write('[CTCF KO]\n')
+                            f.write('file = tmp/ctcf_ko.bw\n')
+                            f.write('height = 2\n')
+                            f.write('color = #ff0000\n')
+                            f.write('title = CTCF KO\n')
+                            f.write('min_value = 0\n')
+                            ctcf_ko_max = get_axis_range_from_bigwig(ctcf_path, chr_name, start)
+                            f.write(f'max_value = {ctcf_ko_max}\n')
+                            f.write('number_of_bins = 512\n\n')
                         for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
                             if track_name == 'ctcf':
                                 continue
@@ -650,6 +660,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write(f'title = {track_name}\n')
                             f.write('min_value = 0\n')
                             f.write('number_of_bins = 512\n\n')
+                            if track_name in ko_data:
+                                f.write(f'[{track_name} KO]\n')
+                                f.write(f'file = tmp/{track_name}_ko.bw\n')
+                                f.write('height = 2\n')
+                                f.write(f'color = {colors[track_i]}\n')
+                                f.write(f'title = {track_name} KO\n')
+                                f.write('min_value = 0\n')
+                                track_ko_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                                f.write(f'max_value = {track_ko_max}\n')
+                                f.write('number_of_bins = 512\n\n')
                         # add the ground truth hic matrix
                         f.write('[Diff]\n')
                         f.write('file = tmp/tmp_diff.cool\n')
