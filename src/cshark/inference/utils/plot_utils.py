@@ -171,7 +171,7 @@ class MatrixPlot:
 
     def preprocess_image(self, image):
         #image[image < 0] = 0
-        print(np.min(image), np.max(image))
+        #print(np.min(image), np.max(image))
         return image
 
     def plot(self, vmin = 0, vmax = 5):

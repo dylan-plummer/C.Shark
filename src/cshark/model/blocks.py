@@ -251,8 +251,6 @@ class Decoder1D(nn.Module):
         self.latent_dim = latent_dim # Channels in the latent space
         self.filter_size = filter_size
         self.num_blocks = num_blocks
-        # num_upsample_blocks should match the number of downsampling steps in the encoder
-        # Example: If Encoder reduces length by 2^13, we need 13 upsampling steps of factor 2.
 
         self.conv_start = nn.Sequential(
             nn.Conv1d(latent_dim, latent_dim, kernel_size=1),

@@ -23,11 +23,11 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         if predict_1d and num_target_tracks <= 0:
             raise ValueError("If predict_1d is True, num_target_tracks must be > 0.")
 
-        print(f'Initializing MultiTaskConvTransModel:')
-        print(f'  Predicting Hi-C: {predict_hic}')
-        print(f'  Predicting 1D Tracks: {predict_1d}')
-        if predict_1d:
-            print(f'  Number of target 1D tracks: {num_target_tracks}')
+        # print(f'Initializing MultiTaskConvTransModel:')
+        # print(f'  Predicting Hi-C: {predict_hic}')
+        # print(f'  Predicting 1D Tracks: {predict_1d}')
+        # if predict_1d:
+        #     print(f'  Number of target 1D tracks: {num_target_tracks}')
 
         self.predict_hic = predict_hic
         self.predict_1d = predict_1d
@@ -55,7 +55,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
 
         # 1D Decoder for Tracks
         if self.predict_1d:
-            print(f"1D Decoder using latent dim={mid_hidden}{target_1d_length}")
+            #print(f"1D Decoder using latent dim={mid_hidden}{target_1d_length}")
 
             self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks,
                                                latent_dim=mid_hidden,
@@ -121,6 +121,8 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
             pred_1d = self.decoder_1d(latent_final)
             # Shape: [batch, num_target_tracks, target_1d_length]
             outputs['1d'] = pred_1d
+        else:
+            outputs['1d'] = None # No 1D prediction if not configured
 
         if self.record_attn:
             outputs['attn_weights'] = attn_weights # Add weights to output dict if recorded

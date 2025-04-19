@@ -110,7 +110,14 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor
     return result
 
 
-def write_tmp_ctcf_ko(ctcf_path, chr_name, start, deletion_start, deletion_width, ko_mode='zero', window=2097152):
+def get_axis_range_from_bigwig(bigwig_path, chr_name, start, window=2097152):
+    bw = pyBigWig.open(bigwig_path)
+    values = np.array(bw.values(chr_name, start, start + window))
+    values = np.nan_to_num(values, nan = 0.0)
+    return np.max(values)
+
+
+def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_start, deletion_width, ko_mode='zero', window=2097152):
     """
     Write a temporary ctcf bigiwg file with the deletion region perturbed based on the ko_mode
     -Open ctcf_path using pyBigWig
@@ -122,7 +129,7 @@ def write_tmp_ctcf_ko(ctcf_path, chr_name, start, deletion_start, deletion_width
     -write the new ctcf to a temporary bigwig file in tmp folder
     -then modify the tmp/tmp_tracks.ini file writing to use this file in a new bigwig track (same for tmp_tracks_diff.ini)
     """
-    bw = pyBigWig.open(ctcf_path)
+    bw = pyBigWig.open(bigwig_path)
     values = np.array(bw.values(chr_name, start, start + window))
     values = np.nan_to_num(values, nan = 0.0)
     log_values = np.log(values + 1)
@@ -143,7 +150,7 @@ def write_tmp_ctcf_ko(ctcf_path, chr_name, start, deletion_start, deletion_width
     header_list =list(header)
     bw.close()
 
-    ctcf_ko_bw = pyBigWig.open('tmp/ctcf_ko.bw','w')
+    ctcf_ko_bw = pyBigWig.open(f'tmp/{track_name}_ko.bw','w')
     ctcf_ko_bw.addHeader(header_list)
     positions = list(range(start, start+window))
     values = list(ko_peaks)
@@ -233,8 +240,8 @@ def get_data_at_interval(chr_name, start, end, seq, ctcf, atac):
     return seq_region, ctcf_region, atac_region
 
 ## Load Model ##
-def prediction(seq_region, ctcf_region, atac_region, model_path, other_regions=None, record_attn=False, use_cross_attn=False, num_genomic_features=2, mid_hidden=256, undo_log=True):
-    model = load_default(model_path, record_attn=record_attn, num_genomic_features=num_genomic_features, use_cross_attn=use_cross_attn, mid_hidden=mid_hidden)
+def prediction(seq_region, ctcf_region, atac_region, model_path, other_regions=None, record_attn=False, num_genomic_features=2, mid_hidden=256, undo_log=True):
+    model = load_default(model_path, record_attn=record_attn, num_genomic_features=num_genomic_features, mid_hidden=mid_hidden)
     if other_regions is None:
         inputs = preprocess_default(seq_region, ctcf_region, atac_region)
     else:
@@ -250,9 +257,22 @@ def prediction(seq_region, ctcf_region, atac_region, model_path, other_regions=N
             pred = np.expm1(pred)
         return pred, attn, cross_attn
     else:
-        pred = model(inputs)[0].detach().cpu().numpy()
+        output = model(inputs)
+        if isinstance(output, dict):
+            pred = output['hic']
+            pred_1d = output['1d']
+            if pred_1d is not None:
+                pred_1d = pred_1d[0].detach().cpu().numpy()
+                if undo_log:
+                    pred_1d = np.expm1(pred_1d)
+            else:
+                pred_1d = None
+        else:
+            pred = output
+            pred_1d = None
+        pred = pred[0].detach().cpu().numpy()
         # symmetrize
         pred = (pred + pred.T) * 0.5
         if undo_log:
             pred = np.expm1(pred)
-        return pred
+        return {'hic': pred, '1d': pred_1d}
