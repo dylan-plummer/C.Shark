@@ -20,13 +20,16 @@ import cshark.data.data_feature as data_feature
 
 
 class VizCallback(Callback):
-    def __init__(self, data_root='cshark_data/data', celltypes=['gm12878'], assembly='hg19', out_dir='deeploop_viz'):
+    def __init__(self, data_root='cshark_data/data', celltypes=['gm12878'], assembly='hg19', 
+                 image_scale=256, resolution=10000,
+                 out_dir='deeploop_viz'):
         self.out_dir = out_dir
         os.makedirs(self.out_dir, exist_ok=True)
         self.data_root = data_root
         self.celltypes = celltypes
         self.assembly = assembly
-        self.image_scale = 256  # size of each heatmap (fixed by model)
+        self.image_scale = image_scale  # size of each heatmap (fixed by model)
+        self.resolution = resolution
         self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000',
                      'chr11:1500000', 'chr2:162000000',
                      'chr10:122700000', 'chr15:59100000', 'chr12:89300000']
@@ -53,11 +56,11 @@ class VizCallback(Callback):
             for chr_name, start in zip(self.chr_names, self.starts):
                 locus = f"{chr_name}:{start}"
                 hic = data_feature.HiCFeature(path = f'{self.data_root}/{self.assembly}/{celltype}/hic_matrix/{chr_name}.npz')
-                mat = hic.get(start)
+                mat = hic.get(start, res=self.resolution)
                 mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
                 os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
                 plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), mat, 'ground_truth', celltype, 
-                                    chr_name, start)
+                                    chr_name, start, res=self.resolution)
                 plot.plot()
                 tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'ground_truth', 'imgs', f"{chr_name}_{start}.png")
                 new_plot_path = os.path.join(self.out_dir, locus, celltype, f"ground_truth.png")
@@ -126,13 +129,14 @@ class VizCallback(Callback):
                         start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths)
                     inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
                     pl_module.model.eval()
+                    print('inputs shape:', inputs.shape)
                     outputs = pl_module.model(inputs)
                     pred = outputs.get('hic')[0].detach().cpu().numpy()
                     print('pred shape:', pred.shape)
                     pred = (pred + pred.T) * 0.5
                     os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
                     plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'prediction', celltype, 
-                                        chr_name, start)
+                                        chr_name, start, res=self.resolution)
                     plot.plot()
                     tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'prediction', 'imgs', f"{chr_name}_{start}.png")
                     new_plot_path = os.path.join(self.out_dir, locus, celltype, f"{pl_module.current_epoch}.png")
@@ -243,6 +247,10 @@ def init_parser():
   parser.add_argument('--target-features', dest='output_features', nargs='+',
                             default=None,
                             help='Target features to use')
+  parser.add_argument('--resolution', dest='resolution', type=int, default=10000,
+                      help='Resolution (bp) of output Hi-C matrix')
+  parser.add_argument('--matrix-size', dest='mat_size', type=int, default=256,
+                      help='Size of output Hi-C matrix')
   parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=2048,
                       help='Size of output 1d track')
   parser.add_argument('--latent-dim', dest='model_latent_dim', type=int, default=256,
@@ -289,7 +297,9 @@ def init_training(args):
                             logger = wandb_logger if args.use_wandb else None,
                             callbacks = [VizCallback(data_root=args.dataset_data_root,
                                                      celltypes=args.dataset_celltypes,  
-                                                     assembly=args.dataset_assembly),
+                                                     assembly=args.dataset_assembly,
+                                                     image_scale=args.mat_size,
+                                                     resolution=args.resolution,),
                                          early_stop_callback,
                                          checkpoint_callback,
                                          lr_monitor],
@@ -382,6 +392,7 @@ class TrainModule(pl.LightningModule):
             mid_hidden=self.hparams.model_latent_dim,
             predict_hic=True,
             predict_1d=self.predict_1d,
+            target_mat_size=args.mat_size,
             target_1d_length=args.target_1d_size
             # Add other necessary model args from hparams if they exist
         )
@@ -508,6 +519,8 @@ class TrainModule(pl.LightningModule):
                                 target_feat_dicts = target_features,
                                 predict_hic = True,
                                 predict_1d = (args.output_features is not None),
+                                target_res=args.resolution,
+                                target_mat_size = args.mat_size,
                                 target_1d_size = args.target_1d_size,
                                 mode = mode,
                                 include_sequence = True,

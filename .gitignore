@@ -4,6 +4,12 @@ wandb/
 outputs/
 tmp/
 checkpoints/
+examples/lightning_logs/
+examples/outputs/
+examples/outputs/deeploop_viz/
+examples/tmp/
+examples/checkpoints/
+examples/wandb/
 
 
 # Byte-compiled / optimized / DLL files

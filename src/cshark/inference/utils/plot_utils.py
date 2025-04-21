@@ -149,12 +149,13 @@ def draw_heatmap(matrix, color_scale, ax=None, min_val=1.001, return_image=False
 
 class MatrixPlot:
 
-    def __init__(self, output_path, image, prefix, celltype, chr_name, start_pos):
+    def __init__(self, output_path, image, prefix, celltype, chr_name, start_pos, res=10000):
         self.output_path = output_path,
         self.prefix = prefix
         self.celltype = celltype
         self.chr_name = chr_name
         self.start_pos = start_pos
+        self.scaling_ratio = 8192 if res == 10000 else 4096
 
         self.create_save_path(output_path, celltype, prefix)
         self.image = self.preprocess_image(image)
@@ -188,7 +189,7 @@ class MatrixPlot:
 
     def reformat_ticks(self, plt):
         # Rescale tick labels
-        current_ticks = np.arange(0, 250, 50) / 0.8192
+        current_ticks = np.arange(0, 250, 50) / (self.scaling_ratio / 10000)
         plt.xticks(current_ticks, self.rescale_coordinates(current_ticks, self.start_pos))
         plt.yticks(current_ticks, self.rescale_coordinates(current_ticks, self.start_pos))
         # Format labels
@@ -197,8 +198,7 @@ class MatrixPlot:
         self.save_data(plt)
 
     def rescale_coordinates(self, coords, zero_position):
-        scaling_ratio = 8192
-        replaced_coords = coords * scaling_ratio + zero_position
+        replaced_coords = coords * self.scaling_ratio + zero_position
         coords_mb = replaced_coords / 1000000
         str_list = [f'{item:.2f}' for item in coords_mb]
         return str_list

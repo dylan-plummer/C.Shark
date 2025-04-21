@@ -24,13 +24,16 @@ class ChromosomeDataset(Dataset):
     '''
     def __init__(self, celltype_root, chr_name, omit_regions, 
                  feature_list, target_track_list,
-                 predict_hic=True, predict_1d=False, target_1d_size=512,
+                 predict_hic=True, predict_1d=False, 
+                 target_res=10000,
+                 target_mat_size=256,
+                 target_1d_size=512,
                  use_aug = True):
         self.use_aug = use_aug
-        self.res = 10000 # 10kb resolution
+        self.res = target_res # 10kb resolution
         self.target_1d_len = target_1d_size
-        self.bins = 209.7152 # 209.7152 bins 2097152 bp
-        self.image_scale = 256 # IMPORTANT, scale 210 to 256
+        self.bins = 2097152 / self.res # 2M bins
+        self.image_scale = target_mat_size # IMPORTANT, scale output to image scale (e.g 210 to 256)
         self.sample_bins = 500
         self.stride = 50 # bins
         self.chr_name = chr_name
@@ -38,8 +41,9 @@ class ChromosomeDataset(Dataset):
         self.predict_1d = predict_1d
         self.target_1d_len = target_1d_size
 
-        print(f'Loading chromosome {chr_name}...')
-        print(f'Predicting Hi-C: {self.predict_hic}, Predicting 1D Tracks: {self.predict_1d}')
+        # print(f'Loading chromosome {chr_name}...')
+        # print(f'Predicting Hi-C: {self.predict_hic}, Predicting 1D Tracks: {self.predict_1d}')
+        # print(f'Using {self.res} resolution, {self.bins} bins, {self.image_scale} image scale')
 
         self.seq = data_feature.SequenceFeature(path = f'{celltype_root}/../dna_sequence/{chr_name}.fa.gz')
         self.genomic_features = feature_list
@@ -134,7 +138,7 @@ class ChromosomeDataset(Dataset):
         # Features processing
         features = [item.get(self.chr_name, start, end) for item in self.genomic_features]
         # Hi-C matrix processing
-        mat = self.mat.get(start)
+        mat = self.mat.get(start, res=self.res)
         mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
         mat = np.log(mat + 1)
         # Target 1D track processing

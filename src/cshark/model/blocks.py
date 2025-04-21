@@ -51,6 +51,7 @@ class Encoder(nn.Module):
         return out
 
     def get_res_blocks(self, n, his, hs):
+        # compute block num where we reach min_size at which point the stride is 1
         blocks = []
         for i, h, hi in zip(range(n), hs, his):
             blocks.append(ConvBlock(self.filter_size, hidden_in = hi, hidden = h))
@@ -58,7 +59,7 @@ class Encoder(nn.Module):
         return res_blocks
 
 class EncoderSplit(Encoder):
-    def __init__(self, num_epi, output_size = 256, filter_size = 5, num_blocks = 12):
+    def __init__(self, num_epi, hidden = 256, output_size = 256, filter_size = 5, num_blocks = 12):
         super(Encoder, self).__init__()
         self.filter_size = filter_size
         self.conv_start_seq = nn.Sequential(
@@ -77,10 +78,9 @@ class EncoderSplit(Encoder):
         hidden_ins_half = (np.array(hidden_ins) / 2).astype(int)
         self.res_blocks_seq = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
         self.res_blocks_epi = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
-        self.conv_end = nn.Conv1d(256, output_size, 1)
+        self.conv_end = nn.Conv1d(256, hidden, 1)
 
     def forward(self, x):
-
         seq = x[:, :5, :]
         epi = x[:, 5:, :]
         seq = self.res_blocks_seq(self.conv_start_seq(seq))

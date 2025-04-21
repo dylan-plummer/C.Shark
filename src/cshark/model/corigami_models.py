@@ -13,6 +13,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                  mid_hidden = 256,    # Latent dimension size
                  predict_hic = True,  # Whether to include the Hi-C prediction head
                  predict_1d = False,  # Whether to include the 1D prediction head
+                 target_mat_size = 256, # Expected size of the Hi-C map (e.g., 256x256)
                  target_1d_length = 2048, # Expected output length for 1D tracks
                  encoder_downsample_factor = 2**7, # Total downsampling from encoder (e.g., 13 blocks * stride 2)
                  record_attn = False):
@@ -34,11 +35,14 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         self.num_target_tracks = num_target_tracks
         self.record_attn = record_attn
         self.encoder_downsample_factor = encoder_downsample_factor
+        self.target_mat_size = target_mat_size
         self.target_1d_length = target_1d_length
+        self.num_blocks = 11 if target_mat_size == 512 else 12 # Number of blocks in the encoder
 
         # --- Encoder ---
         # Takes sequence (5) + genomic features
-        self.encoder = blocks.EncoderSplit(num_genomic_features, output_size = mid_hidden, num_blocks = 12)
+        self.encoder = blocks.EncoderSplit(num_genomic_features, hidden = mid_hidden, output_size = mid_hidden, 
+                                           num_blocks = self.num_blocks)
         # Output: [batch, mid_hidden, reduced_length]
 
         # --- Optional Transformer ---
@@ -98,6 +102,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
 
         # Permute back to [batch, mid_hidden, reduced_length] for decoders
         latent_final = self.move_feature_forward(latent_transformed)
+        #print(f"Final latent shape: {latent_final.shape}")
         # Shape: [batch, mid_hidden, reduced_length]
 
         # 4. Decode
