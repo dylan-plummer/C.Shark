@@ -110,11 +110,11 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor
     return result
 
 
-def get_axis_range_from_bigwig(bigwig_path, chr_name, start, window=2097152):
+def get_axis_range_from_bigwig(bigwig_path, chr_name, start, window=2097152, q=0.999):
     bw = pyBigWig.open(bigwig_path)
     values = np.array(bw.values(chr_name, start, start + window))
     values = np.nan_to_num(values, nan = 0.0)
-    return np.max(values)
+    return int(np.quantile(values, q=q))
 
 
 def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_start, deletion_width, ko_mode='zero', window=2097152):

@@ -6,15 +6,6 @@ def get_tracks(data_root, dataset_name_token, assembly):
 [x-axis]
 where = top
 
-[ctcf]
-file = {data_root}/{assembly}/{dataset_name_token}/genomic_features/ctcf.bw
-# height of the track in cm (optional value)
-height = 2
-color = #ff0000
-title = CTCF
-min_value = 1
-number_of_bins = 512
-
 [Genes]
 file = {data_root}/{assembly}/{assembly}_genes.gtf
 title = Genes

@@ -87,8 +87,6 @@ def main():
                         help='Starting point for screening.', required=False)
     parser.add_argument('--screen-end', dest='screen_end', type=int,
                         help='Ending point for screening.', required=False)
-    parser.add_argument('--perturb-width', dest='perturb_width', type=int, default=1000,
-                        help='Width of perturbation used for screening.', required=False)
     parser.add_argument('--step-size', dest='step_size', type=int, default=1000,
                         help='step size of perturbations in screening.', required=False)
     parser.add_argument('--n-top-sites', dest='n_top_sites', type=int, default=5,
@@ -140,7 +138,7 @@ def main():
     # ensure the user has provided either --del-start and --del-width or --screen-start, --screen-end, --perturb-width, --step-size
     if args.screen_start is not None and args.screen_end is not None:
         screening(args.output_path, args.outname, args.celltype, args.chr_name,
-                  args.screen_start, args.screen_end, args.perturb_width, args.step_size, 
+                  args.screen_start, args.screen_end, args.deletion_width, args.step_size, 
                     args.model_path,
                     args.seq_path, args.ctcf_path, args.atac_path, other_feats, 
                     ko_data=args.ko_data, ko_mode=args.ko_mode,
@@ -401,7 +399,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
     plot_ground_truth = False
     try:    
-            hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace('/ctcf.bw', '') + f'/{chr_name}.npz'
+            ctcf_filename = os.path.basename(ctcf_path).split('.')[0]
+            hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace(f'/{ctcf_filename}.bw', '') + f'/{chr_name}.npz'
             hic = HiCFeature(path = hic_path)
             mat = hic.get(start, window=int(window * 1.2))
             mat = resize(mat, (int(image_scale * 1.2), int(image_scale * 1.2)), anti_aliasing=True)
@@ -512,27 +511,17 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 line = line.replace('arcs.bed', 'arcs_ko.bed')
             
             if '[Genes]' in line:
-                if 'ctcf' in ko_data:
-                    f.write('[CTCF KO]\n')
-                    f.write('file = tmp/ctcf_ko.bw\n')
-                    f.write('height = 2\n')
-                    f.write('color = #ff0000\n')
-                    f.write('title = CTCF KO\n')
-                    f.write('min_value = 0\n')
-                    ctcf_ko_max = get_axis_range_from_bigwig(ctcf_path, chr_name, start)
-                    f.write(f'max_value = {ctcf_ko_max}\n')
-                    f.write('number_of_bins = 512\n\n')
-
                 # write additional tracks for each input track
                 for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
-                    if track_name == 'ctcf':
-                        continue
+                    track_name = os.path.basename(track_path).split('.')[0]
                     f.write(f'[{track_name}]\n')
                     f.write(f'file = {track_path}\n')
                     f.write('height = 2\n')
                     f.write(f'color = {colors[track_i]}\n')
                     f.write(f'title = {track_name}\n')
                     f.write('min_value = 0\n')
+                    track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                    f.write(f'max_value = {track_max}\n')
                     f.write('number_of_bins = 512\n\n')
                     if track_name in ko_data:
                         f.write(f'[{track_name} KO]\n')
@@ -541,8 +530,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write(f'color = {colors[track_i]}\n')
                         f.write(f'title = {track_name} KO\n')
                         f.write('min_value = 0\n')
-                        track_ko_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                        f.write(f'max_value = {track_ko_max}\n')
+                        f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
 
                 f.write('[KO pred]\n')
@@ -575,14 +563,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     if '[Genes]' in line:
                         # write additional tracks for each input track
                         for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
-                            if track_name == 'ctcf':
-                                continue
+                            track_name = os.path.basename(track_path).split('.')[0]
                             f.write(f'[{track_name}]\n')
                             f.write(f'file = {track_path}\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
                             f.write(f'title = {track_name}\n')
                             f.write('min_value = 0\n')
+                            track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                            f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
                         # add the ground truth hic matrix
                         f.write('[deeploop]\n')
@@ -602,14 +591,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 if '[Genes]' in line:
                     # write additional tracks for each input track
                     for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
-                        if track_name == 'ctcf':
-                            continue
+                        track_name = os.path.basename(track_path).split('.')[0]
                         f.write(f'[{track_name}]\n')
                         f.write(f'file = {track_path}\n')
                         f.write('height = 2\n')
                         f.write(f'color = {colors[track_i]}\n')
                         f.write(f'title = {track_name}\n')
                         f.write('min_value = 0\n')
+                        track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                        f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
                     # add the ground truth hic matrix
                     f.write('[WT pred]\n')
@@ -640,25 +630,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         break  # arcs always at bottom
 
                     if '[Genes]' in line:
-                        if 'ctcf' in ko_data:
-                            f.write('[CTCF KO]\n')
-                            f.write('file = tmp/ctcf_ko.bw\n')
-                            f.write('height = 2\n')
-                            f.write('color = #ff0000\n')
-                            f.write('title = CTCF KO\n')
-                            f.write('min_value = 0\n')
-                            ctcf_ko_max = get_axis_range_from_bigwig(ctcf_path, chr_name, start)
-                            f.write(f'max_value = {ctcf_ko_max}\n')
-                            f.write('number_of_bins = 512\n\n')
                         for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
-                            if track_name == 'ctcf':
-                                continue
+                            track_name = os.path.basename(track_path).split('.')[0]
                             f.write(f'[{track_name}]\n')
                             f.write(f'file = {track_path}\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
                             f.write(f'title = {track_name}\n')
                             f.write('min_value = 0\n')
+                            track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                            f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
                             if track_name in ko_data:
                                 f.write(f'[{track_name} KO]\n')
@@ -667,8 +648,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                 f.write(f'color = {colors[track_i]}\n')
                                 f.write(f'title = {track_name} KO\n')
                                 f.write('min_value = 0\n')
-                                track_ko_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                                f.write(f'max_value = {track_ko_max}\n')
+                                f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
                         # add the ground truth hic matrix
                         f.write('[Diff]\n')
@@ -704,10 +684,14 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 def screening(output_path, outname, celltype, chr_name, screen_start, screen_end, perturb_width, step_size, model_path, seq_path, ctcf_path, atac_path, other_paths, 
               ko_data=['ctcf'], ko_mode='zero', region=None, n_top_sites=5, plot_diff=False,
               min_val=0.1, max_val=None, 
+              min_val_diff=-0.5, max_val_diff=0.5,
               save_pred = False, save_deletion = True, save_diff = True, save_impact_score = True, save_bedgraph = True, plot_impact_score = True, plot_frames = False,
               load_screen=False):
     if not outname.endswith('_') and outname != '':
                 outname += '_'
+    if type(perturb_width) is list:
+        perturb_width = perturb_width[0]
+        
     # Store data and model in memory
     seq, ctcf, atac = infer.load_data_default(chr_name, seq_path, ctcf_path, atac_path)
     if other_paths is not None:
@@ -729,7 +713,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
         input_track_names.append('atac')
         input_track_paths.append(atac_path)
     if other_feats is not None:
-        for other_feat in other_feats:
+        for other_feat in other_paths:
             input_track_names.append(os.path.basename(other_feat).split('.')[0])
             input_track_paths.append(other_feat)
     # get indices of the input tracks for KO
@@ -925,7 +909,7 @@ def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctc
     if 'atac' in ko_data:
         channel_offset += 1
     for track_name, channel_idx in zip(ko_data, ko_channels):
-        print(f'Knocking out {track_name} at {deletion_start} with width {deletion_width}')
+        #print(f'Knocking out {track_name} at {deletion_start} with width {deletion_width}')
         if track_name == 'ctcf':
             ctcf_region = track_ko(deletion_start - start, 
                 deletion_start - start + deletion_width, 
