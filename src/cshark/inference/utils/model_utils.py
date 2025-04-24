@@ -15,28 +15,47 @@ def get_1d_track_names(model_path):
         return []
 
 def load_default(model_path, record_attn=False, 
-                 num_genomic_features=2, mid_hidden=256, 
+                 num_genomic_features=2, mat_size=256,
+                 mid_hidden=256, 
                  model_name='ConvTransModel'):
     try:  # old C.Origami checkpoint
-        model = get_model(model_name, mid_hidden, num_genomic_features=num_genomic_features, record_attn=record_attn)
+        model = get_model(model_name, mid_hidden, 
+                          num_genomic_features=num_genomic_features, 
+                          mat_size=mat_size, 
+                          record_attn=record_attn)
         load_checkpoint(model, model_path)
     except Exception as e:
         try:  # new C.Shark checkpoint (no 1D tracks)
-            model = get_model('MultiTaskConvTransModel', mid_hidden, num_genomic_features=num_genomic_features, record_attn=record_attn, num_target_tracks=0, predict_1d=False)
+            model = get_model('MultiTaskConvTransModel', mid_hidden, 
+                              num_genomic_features=num_genomic_features, 
+                              mat_size=mat_size,
+                              record_attn=record_attn, 
+                              num_target_tracks=0, 
+                              predict_1d=False)
             load_checkpoint(model, model_path)
         except Exception as e:  # new C.Shark checkpoint (with 1D tracks)
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             checkpoint = torch.load(model_path, map_location=device, weights_only=False)
             num_target_tracks = len(checkpoint['hyper_parameters']['output_features'])
-            model = get_model('MultiTaskConvTransModel', mid_hidden, num_genomic_features=num_genomic_features, record_attn=record_attn, num_target_tracks=num_target_tracks, predict_1d=True)
+            model = get_model('MultiTaskConvTransModel', mid_hidden, 
+                              num_genomic_features=num_genomic_features, 
+                              mat_size=mat_size,
+                              record_attn=record_attn, 
+                              num_target_tracks=num_target_tracks, 
+                              predict_1d=True)
             load_checkpoint(model, model_path)
     return model
 
-def get_model(model_name, mid_hidden, num_genomic_features=2, num_target_tracks=0, predict_1d=False,
+def get_model(model_name, mid_hidden, num_genomic_features=2, mat_size=256, num_target_tracks=0, predict_1d=False,
               record_attn=False):
     ModelClass = getattr(corigami_models, model_name)
     if model_name == 'MultiTaskConvTransModel':
-        model = ModelClass(num_genomic_features, num_target_tracks=num_target_tracks, mid_hidden=mid_hidden, predict_1d=predict_1d, record_attn=record_attn)
+        model = ModelClass(num_genomic_features, 
+                           num_target_tracks=num_target_tracks, 
+                           mid_hidden=mid_hidden, 
+                           predict_1d=predict_1d,
+                           target_mat_size=mat_size, 
+                           record_attn=record_attn)
     else:
         model = ModelClass(num_genomic_features, mid_hidden = mid_hidden, record_attn=record_attn)
     return model

@@ -33,6 +33,7 @@ class ParseKwargs(argparse.Action):
             getattr(namespace, self.dest)[key] = value
 
 def main():
+    global window, res, image_scale
     parser = argparse.ArgumentParser(description='C.Origami Editing Module.')
     
     # Output location
@@ -51,8 +52,13 @@ def main():
                         help='Starting point for prediction (width is 2097152 bp which is the input window size)', required=False)
     parser.add_argument('--model', dest='model_path', 
                         help='Path to the model checkpoint', required=True)
+    parser.add_argument('--resolution', dest='resolution', type=int, default=8192,
+                      help='Resolution (bp) of output Hi-C matrix')
+    parser.add_argument('--matrix-size', dest='mat_size', type=int, default=256,
+                      help='Size of output Hi-C matrix')
     parser.add_argument('--latent_size', dest='mid_hidden', type=int, default=256,
                                 help='', required=False)
+    
     parser.add_argument('--out-file', dest='out_file', 
                         help='Path to the output file if doing full chromosome prediction', required=False)
     parser.add_argument('--seq', dest='seq_path', 
@@ -134,6 +140,9 @@ def main():
         other_feats = None
     if type(args.ko_data) == str:
         args.ko_data = [args.ko_data]
+    
+    image_scale = args.mat_size
+    res = args.resolution
 
     # ensure the user has provided either --del-start and --del-width or --screen-start, --screen-end, --perturb-width, --step-size
     if args.screen_start is not None and args.screen_end is not None:
@@ -212,17 +221,17 @@ def main():
             num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
             if atac_region is None:
                 num_genomic_features -= 1
-            pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mid_hidden=mid_hidden)
+            pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
             pred_before = pred_before_output['hic']
             pred_before_1d = pred_before_output['1d']
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
                 start, window, seq_region, ctcf_region, 
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
-            pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mid_hidden=mid_hidden)
+            pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
             pred = pred_output['hic']
             pred_1d = pred_output['1d']
-            write_tmp_cooler(pred, chr_name, start)
-            write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool')
+            write_tmp_cooler(pred, chr_name, start, res=res)
+            write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool', res=res)
             # load coolers to populate res dict
             pred_cooler = cooler.Cooler('tmp/tmp.cool')
             pred_before_cooler = cooler.Cooler('tmp/tmp_before.cool')
@@ -328,7 +337,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     if atac_region is None:
             num_genomic_features -= 1
     # do baseline prediction for comparison
-    pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mid_hidden=mid_hidden)
+    pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
     pred_before = pred_before_output['hic']
     pred_before_1d = pred_before_output['1d']
 
@@ -366,7 +375,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             seq_region = seq_perturb(pos - start - 1, alt, seq_region)
 
     # Prediction
-    pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mid_hidden=mid_hidden)
+    pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
     pred = pred_output['hic']
     pred_1d = pred_output['1d']
 
@@ -414,13 +423,13 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             print('No ground truth found')
             mat = np.zeros_like(pred)
 
-    write_tmp_cooler(pred, chr_name, start)
-    write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool')
+    write_tmp_cooler(pred, chr_name, start, res=res)
+    write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool', res=res)
     if plot_ground_truth:
-        write_tmp_cooler(mat, chr_name, start, window=int(window * 1.3), out_file='tmp/tmp_true.cool')
+        write_tmp_cooler(mat, chr_name, start, window=int(window * 1.3), out_file='tmp/tmp_true.cool', res=res)
 
     diff = pred - pred_before
-    write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool')
+    write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool', res=res)
     if deletion_starts is not None and deletion_widths is not None:
         for ko in ko_data:
             if ko in input_track_names:
@@ -703,7 +712,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
     if atac is None:
             num_genomic_features -= 1
     print(f'Number of genomic features: {num_genomic_features}')
-    model = model_utils.load_default(model_path, num_genomic_features=num_genomic_features)
+    model = model_utils.load_default(model_path, num_genomic_features=num_genomic_features, mat_size=image_scale)
     input_track_names = []
     input_track_paths = []
     if ctcf_path is not None:
@@ -767,9 +776,9 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
         pred_start = int(w_start + perturb_width / 2 - 2097152 / 2)
         pred, pred_deletion, diff_map = predict_difference(chr_name, pred_start, int(w_start), perturb_width, model, seq, ctcf, atac, other_feats=other_feats, 
                                                            ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
-        write_tmp_cooler(pred, chr_name, pred_start, out_file=f'tmp/tmp.cool')
-        write_tmp_cooler(pred_deletion, chr_name, pred_start, out_file='tmp/tmp_deletion.cool')
-        write_tmp_cooler(diff_map, chr_name, pred_start, out_file='tmp/tmp_diff.cool')
+        write_tmp_cooler(pred, chr_name, pred_start, out_file=f'tmp/tmp.cool', res=res)
+        write_tmp_cooler(pred_deletion, chr_name, pred_start, out_file='tmp/tmp_deletion.cool', res=res)
+        write_tmp_cooler(diff_map, chr_name, pred_start, out_file='tmp/tmp_diff.cool', res=res)
 
         # must first create bed file for deletion
         with open('tmp/regions.bed', 'w') as f:
