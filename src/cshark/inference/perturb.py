@@ -10,7 +10,7 @@ from skimage.transform import resize
 
 from cshark.data.data_feature import GenomicFeature, HiCFeature
 import cshark.inference.utils.inference_utils as infer
-from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_chipseq_ko, knockout_peaks, get_axis_range_from_bigwig
+from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_chipseq_ko, knockout_peaks, get_axis_range_from_bigwig, chunk_shuffle
 from cshark.inference.utils import plot_utils, model_utils
 from cshark.inference.tracks_files import get_tracks
 
@@ -434,7 +434,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         for ko in ko_data:
             if ko in input_track_names:
                 ko_path = input_track_paths[input_track_names.index(ko)]
-                write_tmp_chipseq_ko(ko_path, ko, chr_name, start, deletion_start, deletion_width, ko_mode='knockout')
+                write_tmp_chipseq_ko(ko_path, ko, chr_name, start, deletion_start, deletion_width, ko_mode=ko_mode)
             else:
                 print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
         
@@ -945,6 +945,12 @@ def track_ko(start, end, track, window = 2097152, ko_mode='zero'):
         track[start:end] = mean
     elif ko_mode == 'knockout':
         track[start:end] = knockout_peaks(track[start:end])
+    elif ko_mode == 'shuffle':
+        #track[start:end] = knockout_peaks(track[start:end])
+        track[start:end] = chunk_shuffle(track[start:end])
+    elif ko_mode == 'knockout_shuffle':
+        track[start:end] = knockout_peaks(track[start:end])
+        track[start:end] = chunk_shuffle(track[start:end])
     else:
         raise ValueError('ko_mode must be either zero or mean')
     return track[:window]
