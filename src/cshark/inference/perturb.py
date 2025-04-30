@@ -10,7 +10,7 @@ from skimage.transform import resize
 
 from cshark.data.data_feature import GenomicFeature, HiCFeature
 import cshark.inference.utils.inference_utils as infer
-from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_chipseq_ko, knockout_peaks, get_axis_range_from_bigwig, chunk_shuffle
+from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_chipseq_ko, knockout_peaks, get_axis_range_from_bigwig, chunk_shuffle, write_tmp_pred_bigwig
 from cshark.inference.utils import plot_utils, model_utils
 from cshark.inference.tracks_files import get_tracks
 
@@ -65,6 +65,10 @@ def main():
                         help='Path to the folder where the sequence .fa.gz files are stored', required=True)
     parser.add_argument('--bigwigs', nargs='*', help='Paths to the bigwig files for genomic features', required=True,
                         action=ParseKwargs)
+    parser.add_argument('--plot-bigwigs', dest='plot_bigwigs', nargs='+', 
+                        help='Names of bigwig tracks to plot which are not inputs', required=False)
+    parser.add_argument('--plot-pred-bigwigs', dest='plot_pred_bigwigs', nargs='+', 
+                        help='Names of bigwig tracks to plot which are not inputs', required=False)
     parser.add_argument('--ko', dest='ko_data', type=str, nargs='+', default=[],
                         help='name of data modalities to knockout', required=False)
     parser.add_argument('--ko-mode', dest='ko_mode', type=str, default='zero',
@@ -162,10 +166,10 @@ def main():
                     args.model_path,
                     args.seq_path, args.ctcf_path, args.atac_path, other_feats, 
                     ko_data=args.ko_data, ko_mode=args.ko_mode,
-                    show_deletion_line = not args.hide_deletion_line,
-                    end_padding_type = args.end_padding_type, 
                     region = args.region,
-                    mid_hidden=args.mid_hidden, min_val_true=args.min_val_true, max_val_true=args.max_val_true,
+                    mid_hidden=args.mid_hidden, 
+                    plot_bigwigs=args.plot_bigwigs, plot_pred_bigwigs=args.plot_pred_bigwigs,
+                    min_val_true=args.min_val_true, max_val_true=args.max_val_true,
                     min_val_pred=args.min_val_pred, max_val_pred=args.max_val_pred, plot_diff=args.plot_diff,
                     min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff)
     else:  # full chromosome prediction
@@ -326,12 +330,17 @@ def main():
 def single_deletion(output_path, outname, celltype, chr_name, start, deletion_starts, deletion_widths, 
                     var_pos, alt_bp,
                     model_path, seq_path, ctcf_path, atac_path, other_feats, 
-                    ko_data=['ctcf'], ko_mode='zero', show_deletion_line = True, end_padding_type = 'zero', region=None, mid_hidden=256,
+                    ko_data=['ctcf'], ko_mode='zero', region=None, mid_hidden=256,
+                    plot_bigwigs=[], plot_pred_bigwigs=[],
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
                     min_val_diff=-0.5, max_val_diff=0.5,
                     ctcf_log2=False):
     if not outname.endswith('_') and outname != '':
                 outname += '_'
+    if plot_bigwigs is None:
+        plot_bigwigs = []
+    if plot_pred_bigwigs is None:
+        plot_pred_bigwigs = []
     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
             start, seq_path, ctcf_path, atac_path, other_feats, window = window, ctcf_log2=ctcf_log2)
     num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
@@ -354,6 +363,13 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         for other_feat in other_feats:
             input_track_names.append(os.path.basename(other_feat).split('.')[0])
             input_track_paths.append(other_feat)
+    
+    plot_track_names = []
+    plot_track_paths = []
+    for plot_track in plot_bigwigs:
+        if plot_track not in input_track_names:  # only plot additional tracks
+            plot_track_names.append(plot_track)
+            plot_track_paths.append(input_track_paths[0].replace(input_track_names[0], plot_track))
     # get indices of the input tracks for KO
     ko_channels = []
     for ko in ko_data:
@@ -406,6 +422,10 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         plt.tight_layout()
         plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{track_name}_log2fc.png'), dpi=300)
         plt.close(fig)
+
+        # write bigwig files for pred
+        write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred_before, track_name, chr_name, start, suffix='pred_WT')
+        write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred, track_name, chr_name, start, suffix='pred_KO')
 
     plot_ground_truth = False
     try:    
@@ -522,7 +542,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             
             if '[Genes]' in line:
                 # write additional tracks for each input track
-                for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
+                for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                     track_name = os.path.basename(track_path).split('.')[0]
                     f.write(f'[{track_name}]\n')
                     f.write(f'file = {track_path}\n')
@@ -539,6 +559,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write('height = 2\n')
                         f.write(f'color = {colors[track_i]}\n')
                         f.write(f'title = {track_name} KO\n')
+                        f.write('min_value = 0\n')
+                        f.write(f'max_value = {track_max}\n')
+                        f.write('number_of_bins = 512\n\n')
+                    if track_name in plot_pred_bigwigs:
+                        f.write(f'[{track_name} pred]\n')
+                        f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
+                        f.write('height = 2\n')
+                        f.write(f'color = {colors[track_i]}\n')
+                        f.write(f'title = {track_name} pred KO\n')
                         f.write('min_value = 0\n')
                         f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
@@ -572,7 +601,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         line = line.replace('arcs.bed', 'arcs_true.bed')
                     if '[Genes]' in line:
                         # write additional tracks for each input track
-                        for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
+                        for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                             track_name = os.path.basename(track_path).split('.')[0]
                             f.write(f'[{track_name}]\n')
                             f.write(f'file = {track_path}\n')
@@ -600,7 +629,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             for line in lines:
                 if '[Genes]' in line:
                     # write additional tracks for each input track
-                    for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
+                    for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                         track_name = os.path.basename(track_path).split('.')[0]
                         f.write(f'[{track_name}]\n')
                         f.write(f'file = {track_path}\n')
@@ -611,6 +640,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
                         f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
+                        if track_name in plot_pred_bigwigs:
+                            f.write(f'[{track_name} pred]\n')
+                            f.write(f'file = tmp/{track_name}_pred_WT.bw\n')
+                            f.write('height = 2\n')
+                            f.write(f'color = {colors[track_i]}\n')
+                            f.write(f'title = {track_name} pred WT\n')
+                            f.write('min_value = 0\n')
+                            f.write(f'max_value = {track_max}\n')
+                            f.write('number_of_bins = 512\n\n')
                     # add the ground truth hic matrix
                     f.write('[WT pred]\n')
                     f.write('file = tmp/tmp_before.cool\n')
@@ -640,7 +678,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         break  # arcs always at bottom
 
                     if '[Genes]' in line:
-                        for track_i, (track_name, track_path) in enumerate(zip(input_track_names, input_track_paths)):
+                        for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                             track_name = os.path.basename(track_path).split('.')[0]
                             f.write(f'[{track_name}]\n')
                             f.write(f'file = {track_path}\n')
@@ -660,6 +698,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                 f.write('min_value = 0\n')
                                 f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
+                            if track_name in plot_pred_bigwigs:
+                                f.write(f'[{track_name} pred]\n')
+                                f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
+                                f.write('height = 2\n')
+                                f.write(f'color = {colors[track_i]}\n')
+                                f.write(f'title = {track_name} pred KO\n')
+                                f.write('min_value = 0\n')
+                                f.write(f'max_value = {track_max}\n')
+                                f.write('number_of_bins = 512\n\n')
+                 
                         # add the ground truth hic matrix
                         f.write('[Diff]\n')
                         f.write('file = tmp/tmp_diff.cool\n')

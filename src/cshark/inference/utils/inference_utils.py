@@ -6,6 +6,7 @@ import torch
 import cooler 
 import pyBigWig
 from scipy.sparse import coo_matrix
+from skimage.transform import resize
 
 from cshark.data.data_feature import SequenceFeature, GenomicFeature
 from cshark.inference.utils.model_utils import load_default
@@ -126,6 +127,45 @@ def chunk_shuffle(arr, chunk_size=1000):
     chunks = np.array_split(arr, n_chunks)
     np.random.shuffle(chunks)
     return np.concatenate(chunks)
+
+def write_tmp_pred_bigwig(base_bigwig_path, pred_values, track_name, chr_name, start, suffix='pred', window=2097152):
+    bw = pyBigWig.open(base_bigwig_path)
+    values = np.array(bw.values(chr_name, start, start + window))
+    values = np.nan_to_num(values, nan = 0.0)
+    
+    header = bw.chroms().items()
+    header_list =list(header)
+    bw.close()
+
+    ctcf_ko_bw = pyBigWig.open(f'tmp/{track_name}_{suffix}.bw','w')
+    ctcf_ko_bw.addHeader(header_list)
+    positions = list(range(start, start+window))
+    # extend pred_values to the same length as positions by repeating values
+    pred_values = np.array(pred_values)
+    if len(pred_values) < len(positions):
+        pred_values = resize(pred_values, (len(positions),)).squeeze()
+    values = list(pred_values)
+    # merge intervals
+    merged_intervals = []
+    prev_pos = positions[0]
+    prev_val = values[0]
+
+    for i in range(1,len(positions)):
+        curr_val = values[i]
+        curr_pos = positions[i]
+        
+        if curr_val != prev_val :
+            merged_intervals.append((prev_pos, positions[i], prev_val))    
+            prev_pos = curr_pos
+            prev_val = curr_val
+
+    merged_intervals.append((prev_pos, positions[-1] + 1, prev_val))
+
+    for s,e,v in merged_intervals:
+         ctcf_ko_bw.addEntries([chr_name],[s],[e],[float(v)])
+
+
+    ctcf_ko_bw.close()
 
 
 def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_start, deletion_width, ko_mode='zero', window=2097152):
