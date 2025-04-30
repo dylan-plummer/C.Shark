@@ -341,6 +341,12 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         plot_bigwigs = []
     if plot_pred_bigwigs is None:
         plot_pred_bigwigs = []
+    ko_data_types = ko_data  # list of data types to knockout
+    tmp_ko_data = []
+    for ko_data_type in ko_data:
+        if ko_data_type not in tmp_ko_data:
+            tmp_ko_data.append(ko_data_type)
+    ko_data = tmp_ko_data  # remove duplicates for plotting etc
     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
             start, seq_path, ctcf_path, atac_path, other_feats, window = window, ctcf_log2=ctcf_log2)
     num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
@@ -380,10 +386,17 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
     # Delete inputs
     if deletion_starts is not None and deletion_widths is not None:
-        for deletion_start, deletion_width in zip(deletion_starts, deletion_widths):
+        for deletion_start, deletion_width, ko_data_type in zip(deletion_starts, deletion_widths, ko_data_types):
+            ko_channel = input_track_names.index(ko_data_type)
+            channel_offset = 0
+            if 'ctcf' in ko_data_types:
+                channel_offset += 1
+            if 'atac' in ko_data_types:
+                channel_offset += 1
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
                     deletion_start, deletion_width, seq_region, ctcf_region, 
-                    atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
+                    atac_region, other_regions, ko_data=[ko_data_type], ko_channels=[ko_channel], channel_offset=channel_offset,
+                    ko_mode=ko_mode)
     
     # perturb sequence if var_pos is not None
     if var_pos is not None and alt_bp is not None:
@@ -452,10 +465,14 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     diff = pred - pred_before
     write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool', res=res)
     if deletion_starts is not None and deletion_widths is not None:
-        for ko in ko_data:
-            if ko in input_track_names:
-                ko_path = input_track_paths[input_track_names.index(ko)]
-                write_tmp_chipseq_ko(ko_path, ko, chr_name, start, deletion_start, deletion_width, ko_mode=ko_mode)
+        one_perturb_already_done = {}
+        for deletion_start, deletion_width, ko_data_type in zip(deletion_starts, deletion_widths, ko_data_types):
+            if ko_data_type in input_track_names:
+                ko_path = input_track_paths[input_track_names.index(ko_data_type)]
+                if ko_data_type in one_perturb_already_done:
+                    ko_path = f'tmp/{ko_data_type}_ko.bw'
+                write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=ko_mode)
+                one_perturb_already_done[ko_data_type] = True
             else:
                 print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
         
@@ -589,6 +606,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         f.write('# bed file with regions to highlight\n')
         f.write('file = tmp/regions.bed\n')
         f.write('# type:\n')
+        f.write('alpha = 0.25\n')
         f.write('type = vhighlight\n')
     
     if plot_ground_truth:
@@ -959,9 +977,8 @@ def preprocess_deletion(chr_name, start, deletion_start, deletion_width, seq_reg
     return inputs
 
 def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
-                          other_regions=None, ko_data=['ctcf'], ko_channels=[0], ko_mode='zero'):
+                          other_regions=None, ko_data=['ctcf'], ko_channels=[0], channel_offset=0, ko_mode='zero'):
     ''' Delete all signals at a specfied location with corresponding padding at the end '''
-    channel_offset = 0
     if 'ctcf' in ko_data:
         channel_offset += 1
     if 'atac' in ko_data:
@@ -977,6 +994,9 @@ def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctc
                 deletion_start - start + deletion_width, 
                 atac_region, ko_mode=ko_mode)
         elif other_regions is not None:
+            print(other_regions)
+            print(channel_idx, channel_offset)
+            print(len(other_regions))
             original = other_regions[channel_idx - channel_offset].copy()
             other_regions[channel_idx - channel_offset] = track_ko(deletion_start - start,
                 deletion_start - start + deletion_width, 
