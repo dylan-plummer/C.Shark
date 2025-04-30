@@ -13,6 +13,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                  mid_hidden = 256,    # Latent dimension size
                  predict_hic = True,  # Whether to include the Hi-C prediction head
                  predict_1d = False,  # Whether to include the 1D prediction head
+                 diploid=False,
                  target_mat_size = 256, # Expected size of the Hi-C map (e.g., 256x256)
                  target_1d_length = 2048, # Expected output length for 1D tracks
                  encoder_downsample_factor = 2**7, # Total downsampling from encoder (e.g., 13 blocks * stride 2)
@@ -42,7 +43,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         # --- Encoder ---
         # Takes sequence (5) + genomic features
         self.encoder = blocks.EncoderSplit(num_genomic_features, hidden = mid_hidden, output_size = mid_hidden, 
-                                           num_blocks = self.num_blocks)
+                                           num_blocks = self.num_blocks, num_bases=10 if diploid else 5)
         # Output: [batch, mid_hidden, reduced_length]
 
         # --- Optional Transformer ---

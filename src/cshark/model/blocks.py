@@ -59,11 +59,12 @@ class Encoder(nn.Module):
         return res_blocks
 
 class EncoderSplit(Encoder):
-    def __init__(self, num_epi, hidden = 256, output_size = 256, filter_size = 5, num_blocks = 12):
+    def __init__(self, num_epi, hidden = 256, output_size = 256, filter_size = 5, num_blocks = 12, num_bases=5):
         super(Encoder, self).__init__()
         self.filter_size = filter_size
+        self.num_bases = num_bases
         self.conv_start_seq = nn.Sequential(
-                                    nn.Conv1d(5, 16, 3, 2, 1),
+                                    nn.Conv1d(num_bases, 16, 3, 2, 1),
                                     nn.BatchNorm1d(16),
                                     nn.ReLU(),
                                     )
@@ -81,8 +82,8 @@ class EncoderSplit(Encoder):
         self.conv_end = nn.Conv1d(256, hidden, 1)
 
     def forward(self, x):
-        seq = x[:, :5, :]
-        epi = x[:, 5:, :]
+        seq = x[:, :self.num_bases, :]
+        epi = x[:, self.num_bases:, :]
         seq = self.res_blocks_seq(self.conv_start_seq(seq))
         epi = self.res_blocks_epi(self.conv_start_epi(epi))
 

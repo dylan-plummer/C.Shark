@@ -222,7 +222,7 @@ def preprocess_default(seq, ctcf, atac, other=None):
     return inputs
 
 ## Load data ##
-def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=None, window = 2097152, ctcf_log2=False):
+def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=None, seq2_path=None, window = 2097152, ctcf_log2=False):
     ''' Single loading method for one region '''
     end = start + window
     seq, ctcf, atac = load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=ctcf_log2)
@@ -234,6 +234,12 @@ def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=Non
             other_feats.append(GenomicFeature(path = feat_path, norm = 'log'))
             other_regions.append(other_feats[-1].get(chr_name, start, end))
     seq_region, ctcf_region, atac_region = get_data_at_interval(chr_name, start, end, seq, ctcf, atac)
+    if seq2_path is not None:
+        seq_chr_path = os.path.join(seq2_path, f'{chr_name}.fa.gz')
+        seq2 = SequenceFeature(path = seq_chr_path)
+        seq2_region = seq2.get(start, end)
+        seq_region = np.concatenate((seq_region, seq2_region), axis=1)
+        print('seq2 shape:', seq2_region.shape)
     return seq_region, ctcf_region, atac_region, other_regions
 
 

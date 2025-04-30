@@ -46,8 +46,20 @@ class ChromosomeDataset(Dataset):
         # print(f'Predicting Hi-C: {self.predict_hic}, Predicting 1D Tracks: {self.predict_1d}')
         # print(f'Using {self.res} resolution, {self.bins} bins, {self.image_scale} image scale')
 
-        self.seq = data_feature.SequenceFeature(path = f'{celltype_root}/../dna_sequence/{chr_name}.fa.gz')
-        self.seq2 = data_feature.SequenceFeature(path = f'{celltype_root2}/../dna_sequence/{chr_name}.fa.gz') if celltype_root2 else None
+        # Get the parent directory of celltype_root
+        parent_dir = os.path.dirname(celltype_root)
+        dna_sequence_path = os.path.join(parent_dir, 'dna_sequence', f'{chr_name}.fa.gz')
+
+        self.seq = data_feature.SequenceFeature(path=dna_sequence_path)
+        print(dna_sequence_path)
+
+        if celltype_root2:
+            parent_dir2 = os.path.dirname(celltype_root2)
+            dna_sequence_path2 = os.path.join(parent_dir2, 'dna_sequence', f'{chr_name}.fa.gz')
+            print(dna_sequence_path2)
+            self.seq2 = data_feature.SequenceFeature(path=dna_sequence_path2)
+        else:
+            self.seq2 = None
         self.genomic_features = feature_list
         self.mat = data_feature.HiCFeature(path = f'{celltype_root}/hic_matrix/{chr_name}.npz')
 
@@ -75,6 +87,8 @@ class ChromosomeDataset(Dataset):
             start, end = self.shift_fix(target_size, start, end)
 
         seq, features, mat, target_1d_tracks = self.get_data_at_interval(start, end)
+        if self.seq2:
+            seq2 = self.seq2.get(start, end)
 
         if self.use_aug:
             # Extra on sequence
@@ -84,8 +98,16 @@ class ChromosomeDataset(Dataset):
             if self.predict_1d:
                 target_1d_tracks = [self.gaussian_noise(item, 0.1) for item in target_1d_tracks]
             # Reverse complement all data
-            seq, features, mat, target_1d_tracks = self.reverse(seq, features, mat, target_1d_tracks)
-
+            if self.seq2:
+                seq2 = self.gaussian_noise(seq2, 0.1)
+                chance = np.random.rand(1)
+                if chance < 0.5:
+                    seq, features, mat, target_1d_tracks = self.reverse(seq, features, mat, target_1d_tracks)
+                    seq2, features, mat, target_1d_tracks = self.reverse(seq2, features, mat, target_1d_tracks)
+            else:
+                seq, features, mat, target_1d_tracks = self.reverse(seq, features, mat, target_1d_tracks)
+        if self.seq2:
+            seq = np.concatenate([seq, seq2], axis = 1)
         return seq, features, mat, target_1d_tracks, start, end
 
     def __len__(self):
@@ -137,10 +159,7 @@ class ChromosomeDataset(Dataset):
         '''
         # Sequence processing
         seq = self.seq.get(start, end)
-        if self.seq2:
-            seq2 = self.seq2.get(start, end)
-            # concatenate seq and seq2 to create 2 channel seq for double stranded
-            seq = np.concatenate([seq, seq2], axis = 1)
+        
         # Features processing
         features = [item.get(self.chr_name, start, end) for item in self.genomic_features]
         # Hi-C matrix processing

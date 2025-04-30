@@ -20,7 +20,7 @@ import cshark.data.data_feature as data_feature
 
 
 class VizCallback(Callback):
-    def __init__(self, data_root='cshark_data/data', celltypes=['gm12878'], assembly='hg19', 
+    def __init__(self, data_root='cshark_data/data', celltypes=['gm12878'], assembly='hg19', assembly2=None,
                  image_scale=256, resolution=10000,
                  out_dir='deeploop_viz'):
         self.out_dir = out_dir
@@ -28,6 +28,7 @@ class VizCallback(Callback):
         self.data_root = data_root
         self.celltypes = celltypes
         self.assembly = assembly
+        self.assembly2 = assembly2
         self.image_scale = image_scale  # size of each heatmap (fixed by model)
         self.resolution = resolution
         self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000',
@@ -36,10 +37,11 @@ class VizCallback(Callback):
         self.chr_names = [s.split(':')[0] for s in self.loci]
         self.starts = [int(s.split(':')[1]) for s in self.loci]
         self.seq = f"{self.data_root}/{self.assembly}/dna_sequence"
+        self.seq2 = f"{self.data_root}/{assembly2}/dna_sequence" if assembly2 is not None else None
         # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE167200
         self.ctcf = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/ctcf.bw" for celltype in celltypes}
         #self.atac = {celltype: None for celltype in celltypes}  # for if we are not using ATAC
-        self.atac = {celltype: f"{self.data_root}/hg19/{celltype}/genomic_features/atac.bw" for celltype in celltypes}
+        self.atac = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/atac.bw" for celltype in celltypes}
         # /mnt/rstor/genetics/JinLab/fxj45/WWW/ssz20/bigwig
         self.h3k27ac = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k27ac.bw" for celltype in celltypes}
         self.h3k4me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k4me3.bw" for celltype in celltypes}
@@ -126,7 +128,7 @@ class VizCallback(Callback):
                             other_paths.append(self.rad21[celltype])
                     #other_paths = [self.h3k27me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
-                        start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths)
+                        start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2)
                     inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
                     pl_module.model.eval()
                     print('inputs shape:', inputs.shape)
@@ -301,7 +303,8 @@ def init_training(args):
                                                      celltypes=args.dataset_celltypes,  
                                                      assembly=args.dataset_assembly,
                                                      image_scale=args.mat_size,
-                                                     resolution=args.resolution,),
+                                                     resolution=args.resolution,
+                                                     assembly2=args.dataset_assembly2,),
                                          early_stop_callback,
                                          checkpoint_callback,
                                          lr_monitor],
@@ -393,6 +396,7 @@ class TrainModule(pl.LightningModule):
             num_target_tracks=num_target_tracks,    # Target 1D tracks
             mid_hidden=self.hparams.model_latent_dim,
             predict_hic=True,
+            diploid=args.dataset_assembly2 is not None,
             predict_1d=self.predict_1d,
             target_mat_size=args.mat_size,
             target_1d_length=args.target_1d_size
