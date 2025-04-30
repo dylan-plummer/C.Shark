@@ -202,6 +202,8 @@ def init_parser():
                         help='Root path of training data', required=True)
   parser.add_argument('--assembly', dest='dataset_assembly', default='hg19',
                         help='Genome assembly for training data')
+  parser.add_argument('--assembly2', dest='dataset_assembly2', default=None,
+                        help='Genome assembly for other assembly of double stranded training data')
   # list of celltypes
   parser.add_argument('--celltypes', dest='dataset_celltypes', default=['alpha', 'beta'], nargs='+',
                         help='Cell types to train on')
@@ -519,6 +521,7 @@ class TrainModule(pl.LightningModule):
                                 target_feat_dicts = target_features,
                                 predict_hic = True,
                                 predict_1d = (args.output_features is not None),
+                                genome_assembly2 = args.dataset_assembly2,
                                 target_res=args.resolution,
                                 target_mat_size = args.mat_size,
                                 target_1d_size = args.target_1d_size,

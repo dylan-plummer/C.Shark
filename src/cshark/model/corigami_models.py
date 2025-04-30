@@ -62,6 +62,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
             #print(f"1D Decoder using latent dim={mid_hidden}{target_1d_length}")
 
             self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks,
+                                               num_upsample_blocks=2 if target_mat_size == 512 else 3,
                                                latent_dim=mid_hidden,
                                                target_length=self.target_1d_length)
             # Output: [batch, num_target_tracks, target_1d_length]

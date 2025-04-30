@@ -25,6 +25,7 @@ class ChromosomeDataset(Dataset):
     def __init__(self, celltype_root, chr_name, omit_regions, 
                  feature_list, target_track_list,
                  predict_hic=True, predict_1d=False, 
+                 celltype_root2=None,
                  target_res=10000,
                  target_mat_size=256,
                  target_1d_size=512,
@@ -46,6 +47,7 @@ class ChromosomeDataset(Dataset):
         # print(f'Using {self.res} resolution, {self.bins} bins, {self.image_scale} image scale')
 
         self.seq = data_feature.SequenceFeature(path = f'{celltype_root}/../dna_sequence/{chr_name}.fa.gz')
+        self.seq2 = data_feature.SequenceFeature(path = f'{celltype_root2}/../dna_sequence/{chr_name}.fa.gz') if celltype_root2 else None
         self.genomic_features = feature_list
         self.mat = data_feature.HiCFeature(path = f'{celltype_root}/hic_matrix/{chr_name}.npz')
 
@@ -135,6 +137,10 @@ class ChromosomeDataset(Dataset):
         '''
         # Sequence processing
         seq = self.seq.get(start, end)
+        if self.seq2:
+            seq2 = self.seq2.get(start, end)
+            # concatenate seq and seq2 to create 2 channel seq for double stranded
+            seq = np.concatenate([seq, seq2], axis = 1)
         # Features processing
         features = [item.get(self.chr_name, start, end) for item in self.genomic_features]
         # Hi-C matrix processing
