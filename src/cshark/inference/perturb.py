@@ -106,6 +106,9 @@ def main():
     parser.add_argument('--plot-diff', dest='plot_diff', 
                         action = 'store_true',
                         help='plot the difference heatmap instead of comparisons')
+    parser.add_argument('--silent', dest='silent', 
+                        action = 'store_true',
+                        help='do not print out pyGenomeTracks logs')
     parser.add_argument('--load-screen', dest='load_screen', 
                         action = 'store_true',
                         help='load the screen results from a saved bedgraph')
@@ -174,7 +177,8 @@ def main():
                     plot_bigwigs=args.plot_bigwigs, plot_pred_bigwigs=args.plot_pred_bigwigs,
                     min_val_true=args.min_val_true, max_val_true=args.max_val_true,
                     min_val_pred=args.min_val_pred, max_val_pred=args.max_val_pred, plot_diff=args.plot_diff,
-                    min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff)
+                    min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff,
+                    silent=args.silent)
     else:  # full chromosome prediction
         # use the step-size arg to do predictions for the whole chromosome
         # load one of the bigwigs to get the chromosome length
@@ -340,7 +344,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     plot_bigwigs=[], plot_pred_bigwigs=[],
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
                     min_val_diff=-0.5, max_val_diff=0.5,
-                    ctcf_log2=False):
+                    ctcf_log2=False, silent=False):
     if not outname.endswith('_') and outname != '':
                 outname += '_'
     if plot_bigwigs is None:
@@ -412,7 +416,14 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     if var_pos is not None and alt_bp is not None:
         for pos, alt in zip(var_pos, alt_bp):
             print(f'Variant pos: {pos}, alt base: {alt}')
-            seq_region = seq_perturb(pos - start - 1, alt, seq_region)
+            if seq2_path is not None:  # split back into separate alleles then concat back together
+                seq1_region = seq_region[:, :seq_region.shape[1] // 2]
+                seq2_region = seq_region[:, seq_region.shape[1] // 2:]
+                seq1_region = seq_perturb(pos - start - 1, alt, seq1_region)
+                seq2_region = seq_perturb(pos - start - 1, alt, seq2_region)
+                seq_region = np.concatenate((seq1_region, seq2_region), axis=1)
+            else:
+                seq_region = seq_perturb(pos - start - 1, alt, seq_region)
 
     # Prediction
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
@@ -456,8 +467,18 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             ctcf_filename = os.path.basename(ctcf_path).split('.')[0]
             hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace(f'/{ctcf_filename}.bw', '') + f'/{chr_name}.npz'
             hic = HiCFeature(path = hic_path)
-            mat = hic.get(start, window=int(window * 1.2))
-            mat = resize(mat, (int(image_scale * 1.2), int(image_scale * 1.2)), anti_aliasing=True)
+            gt_ratio = 1.0
+            gt_res = res
+            if res == 8192:
+                gt_res = 10000
+                gt_ratio = gt_res / 8192
+            if res == 4096:
+                gt_res = 5000
+                gt_ratio = gt_res / 4096
+            mat = hic.get(start, window=int(window), res=gt_res)
+            print(f'Ground truth shape: {mat.shape}')
+            print(image_scale)
+            mat = resize(mat, (int(image_scale), int(image_scale)), anti_aliasing=True)
             mat += 0.01
             plot = plot_utils.MatrixPlot(output_path, mat, 'ground_truth', celltype, 
                                     chr_name, start)
@@ -471,7 +492,12 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     write_tmp_cooler(pred, chr_name, start, res=res)
     write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool', res=res)
     if plot_ground_truth:
-        write_tmp_cooler(mat, chr_name, start, window=int(window * 1.3), out_file='tmp/tmp_true.cool', res=res)
+        if res == 8192:
+            gt_res = 10000
+        elif res == 4096:
+            gt_res = 5000
+        print(f'Ground truth res: {gt_res}')
+        write_tmp_cooler(mat, chr_name, start, window=(int(window * 2)), out_file='tmp/tmp_true.cool', res=res)
 
     diff = pred - pred_before
     write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool', res=res)
@@ -753,14 +779,22 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         
         if plot_diff:
             tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks_diff.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
+            if silent:
+                tracks_cmd += ' > /dev/null 2>&1'
             os.system(tracks_cmd)
         if plot_ground_truth:
             tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_true_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
+            if silent:
+                tracks_cmd += ' > /dev/null 2>&1'
             os.system(tracks_cmd)
         tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_pred_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
+        if silent:
+            tracks_cmd += ' > /dev/null 2>&1'
         os.system(tracks_cmd)
         if deletion_starts is not None and deletion_widths is not None:
             tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
+            if silent:
+                tracks_cmd += ' > /dev/null 2>&1'
             os.system(tracks_cmd)
 
         

@@ -281,7 +281,6 @@ def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=Non
         seq2 = SequenceFeature(path = seq_chr_path)
         seq2_region = seq2.get(start, end)
         seq_region = np.concatenate((seq_region, seq2_region), axis=1)
-        print('seq2 shape:', seq2_region.shape)
     return seq_region, ctcf_region, atac_region, other_regions
 
 
