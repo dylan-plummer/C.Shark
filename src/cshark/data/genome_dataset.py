@@ -160,7 +160,8 @@ class GenomeDataset(Dataset):
         print(f'Using Assembly: {assembly}')
         if assembly in ['hg38', 'hg19']:
             chrs = list(range(1, 23))
-        elif assembly in ['mm10', 'mm9']:
+        # mouse strain genomes (mm10 is b6)
+        elif str(assembly) in ['mm10', 'mm9', '129', 'pwk', 'aj', 'cast', 'nzo', 'nod', 'wsb']:
             chrs = list(range(1, 20))
         else: raise Exception(f'Assembly {assembly} unknown')
         chrs.append('X')
