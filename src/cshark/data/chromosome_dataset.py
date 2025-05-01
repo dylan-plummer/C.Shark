@@ -257,7 +257,7 @@ def proc_centrotelo(bed_dir):
     ''' Take a bed file indicating location, output a dictionary of items 
     by chromosome which contains a list of 2 value lists (range of loc)
     '''
-    df = pd.read_csv(bed_dir , sep = '\t', names = ['chr', 'start', 'end'])
+    df = pd.read_csv(bed_dir , sep = '\t', names = ['chr', 'start', 'end'], usecols = [0, 1, 2])
     chrs = df['chr'].unique()
     centrotelo_dict = {}
     for chr_name in chrs:
