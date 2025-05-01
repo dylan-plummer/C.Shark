@@ -36,7 +36,7 @@ def write_tmp_cooler(pred, chr_name, start, res=8192, window=2097152, out_file='
     cooler.create_cooler(out_file, bins, pixels, dtypes={'count': np.float32})
 
 
-def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor=1.0):
+def knockout_peaks(signal_array, threshold=2.0, min_peak_width=3, padding_factor=3.0, background_q=0.1):
     """
     Simulates knockout of peaks in a signal array by replacing peak regions with background values.
     
@@ -99,11 +99,13 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor
         post_values = signal_array[post_start:post_end]
         
         # Handle empty regions
-        pre_mean = np.mean(pre_values) if len(pre_values) > 0 else 0.0
-        post_mean = np.mean(post_values) if len(post_values) > 0 else 0.0
+        pre_mean = np.quantile(pre_values, q=background_q) if len(pre_values) > 0 else 0.0
+        post_mean = np.quantile(post_values, q=background_q) if len(post_values) > 0 else 0.0
         
         # Calculate background value as average of pre and post regions
         background_val = (pre_mean + post_mean) / 2.0
+
+        background_val = min(background_val, 1.0)  # Cap background value to 1.0
         
         # Replace peak with background value
         result[peak_start:peak_end] = background_val
@@ -308,8 +310,8 @@ def get_data_at_interval(chr_name, start, end, seq, ctcf, atac):
     return seq_region, ctcf_region, atac_region
 
 ## Load Model ##
-def prediction(seq_region, ctcf_region, atac_region, model_path, other_regions=None, record_attn=False, num_genomic_features=2, mat_size=256, mid_hidden=256, undo_log=True):
-    model = load_default(model_path, record_attn=record_attn, num_genomic_features=num_genomic_features, mat_size=mat_size, mid_hidden=mid_hidden)
+def prediction(seq_region, ctcf_region, atac_region, model_path, other_regions=None, diploid=False, record_attn=False, num_genomic_features=2, mat_size=256, mid_hidden=256, undo_log=True):
+    model = load_default(model_path, record_attn=record_attn, num_genomic_features=num_genomic_features, mat_size=mat_size, diploid=diploid, mid_hidden=mid_hidden)
     if other_regions is None:
         inputs = preprocess_default(seq_region, ctcf_region, atac_region)
     else:

@@ -63,6 +63,8 @@ def main():
                         help='Path to the output file if doing full chromosome prediction', required=False)
     parser.add_argument('--seq', dest='seq_path', 
                         help='Path to the folder where the sequence .fa.gz files are stored', required=True)
+    parser.add_argument('--seq2', dest='seq2_path',
+                        help='Path to the folder where the other allele sequence .fa.gz files are stored', required=False)
     parser.add_argument('--bigwigs', nargs='*', help='Paths to the bigwig files for genomic features', required=True,
                         action=ParseKwargs)
     parser.add_argument('--plot-bigwigs', dest='plot_bigwigs', nargs='+', 
@@ -165,6 +167,7 @@ def main():
                     args.var_pos, args.alt_bp, 
                     args.model_path,
                     args.seq_path, args.ctcf_path, args.atac_path, other_feats, 
+                    seq2_path=args.seq2_path,
                     ko_data=args.ko_data, ko_mode=args.ko_mode,
                     region = args.region,
                     mid_hidden=args.mid_hidden, 
@@ -226,13 +229,15 @@ def main():
             num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
             if atac_region is None:
                 num_genomic_features -= 1
-            pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
+            pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
+                                                  num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
             pred_before = pred_before_output['hic']
             pred_before_1d = pred_before_output['1d']
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
                 start, window, seq_region, ctcf_region, 
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
-            pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
+            pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
+                                           num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
             pred = pred_output['hic']
             pred_1d = pred_output['1d']
             write_tmp_cooler(pred, chr_name, start, res=res)
@@ -330,6 +335,7 @@ def main():
 def single_deletion(output_path, outname, celltype, chr_name, start, deletion_starts, deletion_widths, 
                     var_pos, alt_bp,
                     model_path, seq_path, ctcf_path, atac_path, other_feats, 
+                    seq2_path=None,
                     ko_data=['ctcf'], ko_mode='zero', region=None, mid_hidden=256,
                     plot_bigwigs=[], plot_pred_bigwigs=[],
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
@@ -341,6 +347,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         plot_bigwigs = []
     if plot_pred_bigwigs is None:
         plot_pred_bigwigs = []
+    diploid = seq2_path is not None
     ko_data_types = ko_data  # list of data types to knockout
     tmp_ko_data = []
     for ko_data_type in ko_data:
@@ -348,12 +355,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             tmp_ko_data.append(ko_data_type)
     ko_data = tmp_ko_data  # remove duplicates for plotting etc
     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
-            start, seq_path, ctcf_path, atac_path, other_feats, window = window, ctcf_log2=ctcf_log2)
+            start, seq_path, ctcf_path, atac_path, other_feats, seq2_path=seq2_path,
+            window = window, 
+            ctcf_log2=ctcf_log2)
     num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
     if atac_region is None:
             num_genomic_features -= 1
     # do baseline prediction for comparison
-    pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
+    pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
+                                          num_genomic_features=num_genomic_features, mat_size=image_scale, diploid=diploid, mid_hidden=mid_hidden)
     pred_before = pred_before_output['hic']
     pred_before_1d = pred_before_output['1d']
 
@@ -405,7 +415,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             seq_region = seq_perturb(pos - start - 1, alt, seq_region)
 
     # Prediction
-    pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
+    pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
+                                   num_genomic_features=num_genomic_features, mat_size=image_scale, diploid=diploid, mid_hidden=mid_hidden)
     pred = pred_output['hic']
     pred_1d = pred_output['1d']
 
