@@ -245,19 +245,23 @@ def preprocess_default(seq, ctcf, atac, other=None):
     # Process sequence
     seq = torch.tensor(seq).unsqueeze(0) 
     # Normailze ctcf and atac-seq
-    ctcf = torch.tensor(np.nan_to_num(ctcf, 0)) # Important! replace nan with 0
+    features = []
+    if ctcf is not None:
+        ctcf = torch.tensor(np.nan_to_num(ctcf, 0)) # Important! replace nan with 0
+        features.append(ctcf)
     if atac is not None:
         atac_log = torch.tensor(atac) # Important! replace nan with 0
         # Merge inputs
-        features = [ctcf, atac_log]
-    else:
-        features = [ctcf]
+        features.append(atac_log)
     if other is not None:
         for other_region in other:
             other_feat = torch.tensor(np.nan_to_num(other_region, 0))
             features.append(other_feat)
-    features = torch.cat([feat.unsqueeze(0).unsqueeze(2) for feat in features], dim = 2)
-    inputs = torch.cat([seq, features], dim = 2)
+    if len(features) == 0:
+        inputs = seq
+    else:
+        features = torch.cat([feat.unsqueeze(0).unsqueeze(2) for feat in features], dim = 2)
+        inputs = torch.cat([seq, features], dim = 2)
     # Move input to gpu if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     inputs = inputs.to(device)
@@ -287,7 +291,9 @@ def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=Non
 def load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=False):
     seq_chr_path = os.path.join(seq_path, f'{chr_name}.fa.gz')
     seq = SequenceFeature(path = seq_chr_path)
-    ctcf = GenomicFeature(path = ctcf_path, norm = 'log' if not ctcf_log2 else 'log2')
+    ctcf = None
+    if ctcf_path is not None:
+        ctcf = GenomicFeature(path = ctcf_path, norm = 'log' if not ctcf_log2 else 'log2')
     atac = None
     if atac_path is not None:
         atac = GenomicFeature(path = atac_path, norm = 'log')
@@ -299,7 +305,12 @@ def get_data_at_interval(chr_name, start, end, seq, ctcf, atac):
     Slice data from arrays with transformations
     '''
     seq_region = seq.get(start, end)
-    ctcf_region = ctcf.get(chr_name, start, end)
+    try:
+        ctcf_region = ctcf.get(chr_name, start, end)
+    except RuntimeError:  # no CTCF provided
+        ctcf_region = None
+    except AttributeError:  # also no CTCF provided
+        ctcf_region = None
     try:
         atac_region = atac.get(chr_name, start, end)
     except RuntimeError:  # no ATAC provided

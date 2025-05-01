@@ -61,6 +61,7 @@ class Encoder(nn.Module):
 class EncoderSplit(Encoder):
     def __init__(self, num_epi, hidden = 256, output_size = 256, filter_size = 5, num_blocks = 12, num_bases=5):
         super(Encoder, self).__init__()
+        self.num_epi = num_epi
         self.filter_size = filter_size
         self.num_bases = num_bases
         self.conv_start_seq = nn.Sequential(
@@ -68,26 +69,31 @@ class EncoderSplit(Encoder):
                                     nn.BatchNorm1d(16),
                                     nn.ReLU(),
                                     )
-        self.conv_start_epi = nn.Sequential(
-                                    nn.Conv1d(num_epi, 16, 3, 2, 1),
-                                    nn.BatchNorm1d(16),
-                                    nn.ReLU(),
-                                    )
+        if num_epi > 0:
+            self.conv_start_epi = nn.Sequential(
+                                        nn.Conv1d(num_epi, 16, 3, 2, 1),
+                                        nn.BatchNorm1d(16),
+                                        nn.ReLU(),
+                                        )
         hiddens =        [32, 32, 32, 32, 64, 64, 128, 128, 128, 128, 256, 256]
         hidden_ins = [32, 32, 32, 32, 32, 64, 64, 128, 128, 128, 128, 256]
         hiddens_half = (np.array(hiddens) / 2).astype(int)
         hidden_ins_half = (np.array(hidden_ins) / 2).astype(int)
+        if num_epi == 0:
+            hiddens_half[-1] *= 2
         self.res_blocks_seq = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
         self.res_blocks_epi = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
         self.conv_end = nn.Conv1d(256, hidden, 1)
 
     def forward(self, x):
-        seq = x[:, :self.num_bases, :]
-        epi = x[:, self.num_bases:, :]
-        seq = self.res_blocks_seq(self.conv_start_seq(seq))
-        epi = self.res_blocks_epi(self.conv_start_epi(epi))
-
-        x = torch.cat([seq, epi], dim = 1)
+        if self.num_epi > 0:
+            seq = x[:, :self.num_bases, :]
+            epi = x[:, self.num_bases:, :]
+            seq = self.res_blocks_seq(self.conv_start_seq(seq))
+            epi = self.res_blocks_epi(self.conv_start_epi(epi))
+            x = torch.cat([seq, epi], dim = 1)
+        else:
+            x = self.res_blocks_seq(self.conv_start_seq(x))
         out = self.conv_end(x)
         return out
     

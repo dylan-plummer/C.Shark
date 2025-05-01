@@ -107,77 +107,80 @@ class VizCallback(Callback):
 
     def on_validation_epoch_end(self, trainer, pl_module):
         print("Evaluating is starting")
+        if len(pl_module.hparams.input_features) == 0:
+            self.ctcf = {celltype: None for celltype in self.celltypes}
+            self.atac = {celltype: None for celltype in self.celltypes}
         for celltype in self.celltypes:
             for chr_name, start in zip(self.chr_names, self.starts):
+                #try:
+                locus = f"{chr_name}:{start}"
+                #other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
+                other_paths = []
+                for feature in pl_module.hparams.input_features:
+                    if feature == 'h3k27ac':
+                        other_paths.append(self.h3k27ac[celltype])
+                    elif feature == 'h3k4me3':
+                        other_paths.append(self.h3k4me3[celltype])
+                    elif feature == 'h3k36me3':
+                        other_paths.append(self.h3k36me3[celltype])
+                    elif feature == 'h3k4me1':
+                        other_paths.append(self.h3k4me1[celltype])
+                    elif feature == 'h3k27me3':
+                        other_paths.append(self.h3k27me3[celltype])
+                    elif feature == 'rad21':
+                        other_paths.append(self.rad21[celltype])
+                #other_paths = [self.h3k27me3[celltype]]
+                seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
+                    start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2)
+                inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
+                pl_module.model.eval()
+                print('inputs shape:', inputs.shape)
+                outputs = pl_module.model(inputs)
+                pred = outputs.get('hic')[0].detach().cpu().numpy()
+                print('pred shape:', pred.shape)
+                pred = (pred + pred.T) * 0.5
+                os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
+                plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'prediction', celltype, 
+                                    chr_name, start, res=self.resolution)
+                plot.plot()
+                tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'prediction', 'imgs', f"{chr_name}_{start}.png")
+                new_plot_path = os.path.join(self.out_dir, locus, celltype, f"{pl_module.current_epoch}.png")
                 try:
-                    locus = f"{chr_name}:{start}"
-                    #other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
-                    other_paths = []
-                    for feature in pl_module.hparams.input_features:
-                        if feature == 'h3k27ac':
-                            other_paths.append(self.h3k27ac[celltype])
-                        elif feature == 'h3k4me3':
-                            other_paths.append(self.h3k4me3[celltype])
-                        elif feature == 'h3k36me3':
-                            other_paths.append(self.h3k36me3[celltype])
-                        elif feature == 'h3k4me1':
-                            other_paths.append(self.h3k4me1[celltype])
-                        elif feature == 'h3k27me3':
-                            other_paths.append(self.h3k27me3[celltype])
-                        elif feature == 'rad21':
-                            other_paths.append(self.rad21[celltype])
-                    #other_paths = [self.h3k27me3[celltype]]
-                    seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
-                        start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2)
-                    inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
-                    pl_module.model.eval()
-                    print('inputs shape:', inputs.shape)
-                    outputs = pl_module.model(inputs)
-                    pred = outputs.get('hic')[0].detach().cpu().numpy()
-                    print('pred shape:', pred.shape)
-                    pred = (pred + pred.T) * 0.5
-                    os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
-                    plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'prediction', celltype, 
-                                        chr_name, start, res=self.resolution)
-                    plot.plot()
-                    tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'prediction', 'imgs', f"{chr_name}_{start}.png")
-                    new_plot_path = os.path.join(self.out_dir, locus, celltype, f"{pl_module.current_epoch}.png")
-                    try:
-                        os.rename(tmp_plot_path, new_plot_path)
-                        if pl_module.hparams.use_wandb:
-                            wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
-                    except Exception as e:
-                        print(e)
-
-                    pred_1d_tracks = outputs.get('1d')[0].permute(1, 0).detach().cpu().numpy()
-                    print(pred_1d_tracks.shape)
-                    if pred_1d_tracks is not None:
-                        os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
-                        # visualize 1D tracks as shaded plots
-                        fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(10, len(pred_1d_tracks) * 2))
-                        if len(pred_1d_tracks) == 1:
-                            axs = [axs]
-                        colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
-                        for i, pred_1d in enumerate(pred_1d_tracks):
-                            track_name = pl_module.hparams.output_features[i]
-                            pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
-                            axs[i].plot(pred_1d, color=colors[i % len(colors)])
-                            axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
-                            axs[i].set_title(track_name)
-                            axs[i].set_xticks([])
-                        
-                        plt.tight_layout()
-                        plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))
-                        plt.close()
-
-                        try:
-                            if pl_module.hparams.use_wandb:
-                                wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
-                        except Exception as e:
-                            print(e)
-                            
+                    os.rename(tmp_plot_path, new_plot_path)
+                    if pl_module.hparams.use_wandb:
+                        wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
                 except Exception as e:
                     print(e)
+
+                pred_1d_tracks = outputs.get('1d')[0].permute(1, 0).detach().cpu().numpy()
+                print(pred_1d_tracks.shape)
+                if pred_1d_tracks is not None:
+                    os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
+                    # visualize 1D tracks as shaded plots
+                    fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(10, len(pred_1d_tracks) * 2))
+                    if len(pred_1d_tracks) == 1:
+                        axs = [axs]
+                    colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
+                    for i, pred_1d in enumerate(pred_1d_tracks):
+                        track_name = pl_module.hparams.output_features[i]
+                        pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
+                        axs[i].plot(pred_1d, color=colors[i % len(colors)])
+                        axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
+                        axs[i].set_title(track_name)
+                        axs[i].set_xticks([])
+                    
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))
+                    plt.close()
+
+                    try:
+                        if pl_module.hparams.use_wandb:
+                            wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
+                    except Exception as e:
+                        print(e)
+                            
+                # except Exception as e:
+                #     print(e)
 
 
 def main():
@@ -246,7 +249,6 @@ def init_parser():
   
   # add args for CTCF, ATAC, and other genomic features as either inputs, outputs, or both
   parser.add_argument('--input-features', dest='input_features', nargs='+',
-                            default=['ctcf', 'atac'],
                             help='Input features to use')
   parser.add_argument('--target-features', dest='output_features', nargs='+',
                             default=None,
@@ -267,6 +269,8 @@ def init_parser():
 
 
   args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
+  if args.input_features is None:
+      args.input_features = []
   return args
 
 def init_training(args):
@@ -321,24 +325,25 @@ def init_training(args):
         print('inputs shape:', inputs.shape) # (batch, window, 5 + num_genomic_features)
         print('mat shape:', mat.shape)  # (batch, image_scale, image_scale)
         print('target_1d_tracks shape:', target_1d_tracks.shape if target_1d_tracks is not None else None)
-        
-        # visualize the input genomic features
-        genomic_features = inputs[:, :, 5:]
-        genomic_features = genomic_features[0].detach().cpu().numpy() 
-        #genomic_features = resize(genomic_features, (pl_module.hparams.target_1d_size,), anti_aliasing=True, preserve_range=True)
-        
-        fig, axs = plt.subplots(genomic_features.shape[1], 1, figsize=(15, 4))  
-        if genomic_features.shape[1] == 1:
-            axs = [axs]
+
         colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
-        for i in range(genomic_features.shape[1]):
-            track = np.exp(genomic_features[:, i]) - 1  # inverse log transformation
-            bin_size = int(len(track) / pl_module.hparams.target_1d_size)
-            track = track.reshape(-1, bin_size).mean(axis=1)
-            axs[i].plot(track, color=colors[i % len(colors)])
-            axs[i].fill_between(range(len(track)), track, color=colors[i % len(colors)], alpha=0.5)
-        plt.savefig(f'input_genomic_features.png_{test_batch_i}.png')
-        plt.close()
+        if len(args.input_features) > 0:
+            # visualize the input genomic features
+            genomic_features = inputs[:, :, 5:]
+            genomic_features = genomic_features[0].detach().cpu().numpy() 
+            #genomic_features = resize(genomic_features, (pl_module.hparams.target_1d_size,), anti_aliasing=True, preserve_range=True)
+            fig, axs = plt.subplots(genomic_features.shape[1], 1, figsize=(15, 4))  
+            if genomic_features.shape[1] == 1:
+                axs = [axs]
+            
+            for i in range(genomic_features.shape[1]):
+                track = np.exp(genomic_features[:, i]) - 1  # inverse log transformation
+                bin_size = int(len(track) / pl_module.hparams.target_1d_size)
+                track = track.reshape(-1, bin_size).mean(axis=1)
+                axs[i].plot(track, color=colors[i % len(colors)])
+                axs[i].fill_between(range(len(track)), track, color=colors[i % len(colors)], alpha=0.5)
+            plt.savefig(f'input_genomic_features.png_{test_batch_i}.png')
+            plt.close()
 
         # visualize the target Hi-C matrix
         mat = mat[0].detach().cpu().numpy()
@@ -421,8 +426,11 @@ class TrainModule(pl.LightningModule):
             seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx = batch
         else:
             seq, features, mat, start, end, chr_name, chr_idx = batch
-        features = torch.cat([feat.unsqueeze(2) for feat in features], dim = 2)
-        inputs = torch.cat([seq, features], dim = 2)
+        if len(features) > 0:
+            features = torch.cat([feat.unsqueeze(2) for feat in features], dim = 2)
+            inputs = torch.cat([seq, features], dim = 2)
+        else:
+            inputs = seq
         mat = mat.float()
         if target_1d_tracks is not None:
             target_1d_tracks = torch.stack(target_1d_tracks, dim = 2)
