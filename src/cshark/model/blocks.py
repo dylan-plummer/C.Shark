@@ -84,7 +84,8 @@ class EncoderSplit(Encoder):
             if num_blocks == 11:
                 hiddens_half[-2] *= 2
         self.res_blocks_seq = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
-        self.res_blocks_epi = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
+        if num_epi > 0:
+            self.res_blocks_epi = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
         self.conv_end = nn.Conv1d(256, hidden, 1)
 
     def forward(self, x):
