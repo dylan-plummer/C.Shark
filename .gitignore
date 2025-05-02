@@ -10,6 +10,7 @@ examples/outputs/deeploop_viz/
 examples/tmp/
 examples/checkpoints/
 examples/wandb/
+lightning_logs/
 
 
 # Byte-compiled / optimized / DLL files
