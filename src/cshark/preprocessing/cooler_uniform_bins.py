@@ -21,6 +21,8 @@ def coarsen_to_uniform_bins_vectorized(input_cool_path, output_cool_path, unifor
     chromsizes = c.chromsizes
     original_bins = c.bins()[:] # Load original bins once   
     original_bins['mid'] = (original_bins['start'] + original_bins['end']) // 2 # Calculate midpoints
+    original_pixels = c.pixels()[:]
+    pix_merge = cooler.annotate(original_pixels, original_bins)
 
     # Create new uniform bins
     new_bins = cooler.util.binnify(chromsizes, uniform_binsize)
@@ -31,7 +33,11 @@ def coarsen_to_uniform_bins_vectorized(input_cool_path, output_cool_path, unifor
 
     # Process chromosomes in chunks
     for chrom in tqdm(chromsizes.index, desc="Processing chromosomes"):
-        pixels = c.pixels().fetch(chrom) # Fetch pixels for the chromosome
+        
+        pixels_chr = pix_merge[pix_merge['chrom1'] == chrom]
+        pixels = pixels_chr[['bin1_id','bin2_id','count']]
+
+        # pixels = c.pixels().fetch(chrom) # Fetch pixels for the chromosome
 
         if not pixels.empty: # Process only if there are pixels
             # Fetch bins for the current chromosome for vectorized operations
@@ -73,16 +79,16 @@ def coarsen_to_uniform_bins_vectorized(input_cool_path, output_cool_path, unifor
     print(f"Cooler file with uniform bins (size {uniform_binsize}bp) created at: {output_cool_path}")
 
     # load cooler and plot some heatmaps
-    c = cooler.Cooler(output_cool_path)
-    chrom = 'chr2'
-    mat_size = 2000000  #bp
-    start = 162000000
-    end = start + mat_size
-    mat = c.matrix(balance=False).fetch(f'{chrom}:{start}-{end}')
-    plt.imshow(mat, cmap='Reds')
-    plt.colorbar()  
-    plt.savefig('chr2_162Mb.png')
-    plt.close()
+    # c = cooler.Cooler(output_cool_path)
+    # chrom = 'chr2'
+    # mat_size = 2000000  #bp
+    # start = 162000000
+    # end = start + mat_size
+    # mat = c.matrix(balance=False).fetch(f'{chrom}:{start}-{end}')
+    # plt.imshow(mat, cmap='Reds')
+    # plt.colorbar()  
+    # plt.savefig('chr2_162Mb.png')
+    # plt.close()
 
     # zoomify cooler to create mcool file
     cooler.zoomify_cooler(output_cool_path, output_cool_path.replace('.cool', '.mcool'), 
