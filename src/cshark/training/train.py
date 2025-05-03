@@ -112,75 +112,75 @@ class VizCallback(Callback):
             self.atac = {celltype: None for celltype in self.celltypes}
         for celltype in self.celltypes:
             for chr_name, start in zip(self.chr_names, self.starts):
-                #try:
-                locus = f"{chr_name}:{start}"
-                #other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
-                other_paths = []
-                for feature in pl_module.hparams.input_features:
-                    if feature == 'h3k27ac':
-                        other_paths.append(self.h3k27ac[celltype])
-                    elif feature == 'h3k4me3':
-                        other_paths.append(self.h3k4me3[celltype])
-                    elif feature == 'h3k36me3':
-                        other_paths.append(self.h3k36me3[celltype])
-                    elif feature == 'h3k4me1':
-                        other_paths.append(self.h3k4me1[celltype])
-                    elif feature == 'h3k27me3':
-                        other_paths.append(self.h3k27me3[celltype])
-                    elif feature == 'rad21':
-                        other_paths.append(self.rad21[celltype])
-                #other_paths = [self.h3k27me3[celltype]]
-                seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
-                    start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2)
-                inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
-                pl_module.model.eval()
-                print('inputs shape:', inputs.shape)
-                outputs = pl_module.model(inputs)
-                pred = outputs.get('hic')[0].detach().cpu().numpy()
-                print('pred shape:', pred.shape)
-                pred = (pred + pred.T) * 0.5
-                os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
-                plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'prediction', celltype, 
-                                    chr_name, start, res=self.resolution)
-                plot.plot()
-                tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'prediction', 'imgs', f"{chr_name}_{start}.png")
-                new_plot_path = os.path.join(self.out_dir, locus, celltype, f"{pl_module.current_epoch}.png")
                 try:
-                    os.rename(tmp_plot_path, new_plot_path)
-                    if pl_module.hparams.use_wandb:
-                        wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
-                except Exception as e:
-                    print(e)
-
-                pred_1d_tracks = outputs.get('1d')[0].permute(1, 0).detach().cpu().numpy()
-                print(pred_1d_tracks.shape)
-                if pred_1d_tracks is not None:
-                    os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
-                    # visualize 1D tracks as shaded plots
-                    fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(10, len(pred_1d_tracks) * 2))
-                    if len(pred_1d_tracks) == 1:
-                        axs = [axs]
-                    colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
-                    for i, pred_1d in enumerate(pred_1d_tracks):
-                        track_name = pl_module.hparams.output_features[i]
-                        pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
-                        axs[i].plot(pred_1d, color=colors[i % len(colors)])
-                        axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
-                        axs[i].set_title(track_name)
-                        axs[i].set_xticks([])
-                    
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))
-                    plt.close()
-
+                    locus = f"{chr_name}:{start}"
+                    #other_paths = [self.h3k27ac[celltype], self.h3k4me3[celltype]]
+                    other_paths = []
+                    for feature in pl_module.hparams.input_features:
+                        if feature == 'h3k27ac':
+                            other_paths.append(self.h3k27ac[celltype])
+                        elif feature == 'h3k4me3':
+                            other_paths.append(self.h3k4me3[celltype])
+                        elif feature == 'h3k36me3':
+                            other_paths.append(self.h3k36me3[celltype])
+                        elif feature == 'h3k4me1':
+                            other_paths.append(self.h3k4me1[celltype])
+                        elif feature == 'h3k27me3':
+                            other_paths.append(self.h3k27me3[celltype])
+                        elif feature == 'rad21':
+                            other_paths.append(self.rad21[celltype])
+                    #other_paths = [self.h3k27me3[celltype]]
+                    seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
+                        start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2)
+                    inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
+                    pl_module.model.eval()
+                    print('inputs shape:', inputs.shape)
+                    outputs = pl_module.model(inputs)
+                    pred = outputs.get('hic')[0].detach().cpu().numpy()
+                    print('pred shape:', pred.shape)
+                    pred = (pred + pred.T) * 0.5
+                    os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
+                    plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'prediction', celltype, 
+                                        chr_name, start, res=self.resolution)
+                    plot.plot()
+                    tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'prediction', 'imgs', f"{chr_name}_{start}.png")
+                    new_plot_path = os.path.join(self.out_dir, locus, celltype, f"{pl_module.current_epoch}.png")
                     try:
+                        os.rename(tmp_plot_path, new_plot_path)
                         if pl_module.hparams.use_wandb:
-                            wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
+                            wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
                     except Exception as e:
                         print(e)
+
+                    pred_1d_tracks = outputs.get('1d')[0].permute(1, 0).detach().cpu().numpy()
+                    print(pred_1d_tracks.shape)
+                    if pred_1d_tracks is not None:
+                        os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
+                        # visualize 1D tracks as shaded plots
+                        fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(10, len(pred_1d_tracks) * 2))
+                        if len(pred_1d_tracks) == 1:
+                            axs = [axs]
+                        colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
+                        for i, pred_1d in enumerate(pred_1d_tracks):
+                            track_name = pl_module.hparams.output_features[i]
+                            pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
+                            axs[i].plot(pred_1d, color=colors[i % len(colors)])
+                            axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
+                            axs[i].set_title(track_name)
+                            axs[i].set_xticks([])
+                        
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))
+                        plt.close()
+
+                        try:
+                            if pl_module.hparams.use_wandb:
+                                wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
+                        except Exception as e:
+                            print(e)
                             
-                # except Exception as e:
-                #     print(e)
+                except Exception as e:
+                    print(e)
 
 
 def main():
