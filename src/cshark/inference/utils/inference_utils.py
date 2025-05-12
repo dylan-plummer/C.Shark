@@ -113,11 +113,11 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=3, padding_factor
     return result
 
 
-def get_axis_range_from_bigwig(bigwig_path, chr_name, start, window=2097152, q=0.999):
+def get_axis_range_from_bigwig(bigwig_path, chr_name, start, window=2097152, q=0.995):
     bw = pyBigWig.open(bigwig_path)
     values = np.array(bw.values(chr_name, start, start + window))
     values = np.nan_to_num(values, nan = 0.0)
-    return int(np.quantile(values, q=q))
+    return np.quantile(values, q=q)
 
 
 def chunk_shuffle(arr, chunk_size=1000):
@@ -170,7 +170,7 @@ def write_tmp_pred_bigwig(base_bigwig_path, pred_values, track_name, chr_name, s
     ctcf_ko_bw.close()
 
 
-def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_start, deletion_width, ko_mode='zero', window=2097152):
+def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_start, deletion_width, ko_mode='zero', window=2097152, peak_height=2.0):
     """
     Write a temporary ctcf bigiwg file with the deletion region perturbed based on the ko_mode
     -Open ctcf_path using pyBigWig
@@ -192,7 +192,7 @@ def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_star
 
     if ko_mode == 'knockout':
         sub_values = log_values[deletion_index_start:deletion_index_end]
-        sub_output = knockout_peaks(sub_values)
+        sub_output = knockout_peaks(sub_values, threshold=peak_height)
         ko_peaks[deletion_index_start:deletion_index_end] = sub_output
     
     if ko_mode == 'zero': 
@@ -205,7 +205,7 @@ def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_star
 
     if ko_mode == 'knockout_shuffle':
         sub_values = log_values[deletion_index_start:deletion_index_end]
-        sub_output = knockout_peaks(sub_values)
+        sub_output = knockout_peaks(sub_values, threshold=peak_height)
         sub_output = chunk_shuffle(sub_output)
         ko_peaks[deletion_index_start:deletion_index_end] = sub_output
     

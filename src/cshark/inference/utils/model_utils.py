@@ -10,6 +10,10 @@ def get_1d_track_names(model_path):
     checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     try:
         target_tracks = checkpoint['hyper_parameters']['output_features']
+        if isinstance(target_tracks, list):
+            target_tracks = [track.replace('_norm', '') for track in target_tracks]
+        else:
+            target_tracks = [target_tracks.replace('_norm', '')]
         return target_tracks
     except KeyError:
         return []

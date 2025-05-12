@@ -65,7 +65,7 @@ def main():
                         help='Path to the folder where the sequence .fa.gz files are stored', required=True)
     parser.add_argument('--seq2', dest='seq2_path',
                         help='Path to the folder where the other allele sequence .fa.gz files are stored', required=False)
-    parser.add_argument('--bigwigs', nargs='*', help='Paths to the bigwig files for genomic features', required=True,
+    parser.add_argument('--bigwigs', nargs='*', help='Paths to the bigwig files for genomic features', required=False,
                         action=ParseKwargs)
     parser.add_argument('--plot-bigwigs', dest='plot_bigwigs', nargs='+', 
                         help='Names of bigwig tracks to plot which are not inputs', required=False)
@@ -81,6 +81,8 @@ def main():
                         help='Starting points for deletion.', required=False)
     parser.add_argument('--ko-width', dest='deletion_width', nargs='+', type=int,
                         help='Width for deletion.', required=False)
+    parser.add_argument('--peak-height', dest='peak_height', nargs='+', type=float,
+                        help='Starting points for deletion.', default=2.0)
     parser.add_argument('--var-pos', dest='var_pos', type=int, nargs='+',
                         help='Variant position', required=False)
     parser.add_argument('--alt', dest='alt_bp', type=str, nargs='+',
@@ -135,6 +137,8 @@ def main():
     os.makedirs('tmp', exist_ok=True)
 
     bigwigs = args.bigwigs
+    if bigwigs is None:
+        bigwigs = {}
     args.ctcf_path = None
     args.atac_path = None
     if 'ctcf' in bigwigs:
@@ -163,6 +167,7 @@ def main():
                     region = args.region, n_top_sites=args.n_top_sites, plot_diff=args.plot_diff,
                     min_val=args.min_val_pred, max_val=args.max_val_pred, 
                     min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff,
+                    peak_height=args.peak_height,
                     load_screen=args.load_screen)
     elif args.start is not None:
             single_deletion(args.output_path, args.outname, args.celltype, args.chr_name, args.start, 
@@ -178,6 +183,7 @@ def main():
                     min_val_true=args.min_val_true, max_val_true=args.max_val_true,
                     min_val_pred=args.min_val_pred, max_val_pred=args.max_val_pred, plot_diff=args.plot_diff,
                     min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff,
+                    peak_height=args.peak_height,
                     silent=args.silent)
     else:  # full chromosome prediction
         # use the step-size arg to do predictions for the whole chromosome
@@ -220,7 +226,6 @@ def main():
         # get track_names from ctcf_path, atac_path, other_feats
         # track_names = model_utils.get_1d_track_names(model_path)
         track_names = []
-        print(track_names)
         results_1d = {'chrom': [], 'start': [], 'end': []}
         for track_name in track_names:
             results_1d[f'{track_name}_WT'] = []
@@ -239,7 +244,7 @@ def main():
             pred_before_1d = pred_before_output['1d']
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
                 start, window, seq_region, ctcf_region, 
-                atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
+                atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=args.peak_height)
             pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                            num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
             pred = pred_output['hic']
@@ -344,6 +349,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     plot_bigwigs=[], plot_pred_bigwigs=[],
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
                     min_val_diff=-0.5, max_val_diff=0.5,
+                    peak_height=2.0,
                     ctcf_log2=False, silent=False):
     if not outname.endswith('_') and outname != '':
                 outname += '_'
@@ -365,6 +371,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
     if atac_region is None:
             num_genomic_features -= 1
+    if ctcf_region is None:
+            num_genomic_features -= 1
     # do baseline prediction for comparison
     pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                           num_genomic_features=num_genomic_features, mat_size=image_scale, diploid=diploid, mid_hidden=mid_hidden)
@@ -383,6 +391,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         for other_feat in other_feats:
             input_track_names.append(os.path.basename(other_feat).split('.')[0])
             input_track_paths.append(other_feat)
+
+    if len(input_track_paths) == 0:
+        print('No input tracks found. Using plot_bigwigs only.')
+        # get base data path from seq path (e.g ../cshark_data/data/hg19/dna_sequence --> ../cshark_data/data/hg19)
+        genome_data_path = os.path.dirname(seq_path)
+        print(f'Genome data path: {genome_data_path}')
+        # then append celltype and default to ctcf.bw
+        ctcf_path = os.path.join(genome_data_path, celltype, 'genomic_features', 'ctcf.bw')
+        input_track_paths.append(ctcf_path)
+        input_track_names.append('ctcf')
     
     plot_track_names = []
     plot_track_paths = []
@@ -410,7 +428,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
                     deletion_start, deletion_width, seq_region, ctcf_region, 
                     atac_region, other_regions, ko_data=[ko_data_type], ko_channels=[ko_channel], channel_offset=channel_offset,
-                    ko_mode=ko_mode)
+                    ko_mode=ko_mode, peak_height=peak_height)
     
     # perturb sequence if var_pos is not None
     if var_pos is not None and alt_bp is not None:
@@ -440,20 +458,25 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         ctcf_pred_before = pred_before_1d[:, track_idx]
         ctcf_pred = pred_1d[:, track_idx]
         ctcf_log2fc = np.log2((ctcf_pred + 1e-5) / (ctcf_pred_before + 1e-5))
+        log2fc_norm = ctcf_log2fc * ctcf_pred_before
+
+        ymax = max(np.max(ctcf_pred_before), np.max(ctcf_pred))
 
         fig, axs = plt.subplots(3, 1, figsize=(10, 5))
         axs[0].plot(ctcf_pred_before, label='Before', color='blue')
         # fill to zero
         axs[0].fill_between(range(len(ctcf_pred_before)), ctcf_pred_before, 0, color='blue', alpha=0.2)
+        axs[0].set_ylim(0, ymax)
         axs[1].plot(ctcf_pred, label='After', color='orange')
         # fill to zero
         axs[1].fill_between(range(len(ctcf_pred)), ctcf_pred, 0, color='orange', alpha=0.2)
-        axs[2].plot(ctcf_log2fc, label='Log2FC', color='green')
+        axs[1].set_ylim(0, ymax)
+        axs[2].plot(log2fc_norm, label='Log2FC', color='green')
         # fill to zero
-        axs[2].fill_between(range(len(ctcf_log2fc)), ctcf_log2fc, 0, color='green', alpha=0.2)
+        axs[2].fill_between(range(len(log2fc_norm)), log2fc_norm, 0, color='green', alpha=0.2)
         axs[0].set_title(f'{track_name.upper()} Before')
         axs[1].set_title(f'{track_name.upper()} After')
-        axs[2].set_title(f'{track_name.upper()} Log2FC')
+        axs[2].set_title(f'{track_name.upper()} Log2FC * original signal')
         plt.tight_layout()
         plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{track_name}_log2fc.png'), dpi=300)
         plt.close(fig)
@@ -476,8 +499,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 gt_res = 5000
                 gt_ratio = gt_res / 4096
             mat = hic.get(start, window=int(window), res=gt_res)
-            print(f'Ground truth shape: {mat.shape}')
-            print(image_scale)
             mat = resize(mat, (int(image_scale), int(image_scale)), anti_aliasing=True)
             mat += 0.01
             plot = plot_utils.MatrixPlot(output_path, mat, 'ground_truth', celltype, 
@@ -496,7 +517,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             gt_res = 10000
         elif res == 4096:
             gt_res = 5000
-        print(f'Ground truth res: {gt_res}')
         write_tmp_cooler(mat, chr_name, start, window=(int(window * 2)), out_file='tmp/tmp_true.cool', res=res)
 
     diff = pred - pred_before
@@ -508,7 +528,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 ko_path = input_track_paths[input_track_names.index(ko_data_type)]
                 if ko_data_type in one_perturb_already_done:
                     ko_path = f'tmp/{ko_data_type}_ko.bw'
-                write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=ko_mode)
+                write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=ko_mode, peak_height=peak_height)
                 one_perturb_already_done[ko_data_type] = True
             else:
                 print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
@@ -696,6 +716,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
                         if track_name in plot_pred_bigwigs:
+                            #track_max = get_axis_range_from_bigwig(f'tmp/{track_name}_pred_WT.bw', chr_name, start)
                             f.write(f'[{track_name} pred]\n')
                             f.write(f'file = tmp/{track_name}_pred_WT.bw\n')
                             f.write('height = 2\n')
@@ -806,6 +827,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
               ko_data=['ctcf'], ko_mode='zero', region=None, n_top_sites=5, plot_diff=False,
               min_val=0.1, max_val=None, 
               min_val_diff=-0.5, max_val_diff=0.5,
+              peak_height=2.0,
               save_pred = False, save_deletion = True, save_diff = True, save_impact_score = True, save_bedgraph = True, plot_impact_score = True, plot_frames = False,
               load_screen=False):
     if not outname.endswith('_') and outname != '':
@@ -862,7 +884,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
         for w_start in tqdm(windows):
             pred_start = int(w_start + perturb_width / 2 - 2097152 / 2)
             pred, pred_deletion, diff_map = predict_difference(chr_name, pred_start, int(w_start), perturb_width, model, seq, ctcf, atac, other_feats=other_feats, 
-                                                               ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
+                                                               ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=peak_height)
             preds = np.append(preds, np.expand_dims(pred, 0), axis = 0)
             preds_deletion = np.append(preds_deletion, np.expand_dims(pred_deletion, 0), axis = 0)
             diff_maps = np.append(diff_maps, np.expand_dims(diff_map, 0), axis = 0)
@@ -983,7 +1005,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
     
 
 def predict_difference(chr_name, start, deletion_start, deletion_width, model, seq, ctcf, atac, other_feats=None, 
-                       ko_data=['ctcf'], ko_channels=[0], ko_mode='zero'):
+                       ko_data=['ctcf'], ko_channels=[0], ko_mode='zero', peak_height=2.0):
     # Define window which accomodates deletion
     end = start + 2097152
     seq_region, ctcf_region, atac_region = infer.get_data_at_interval(chr_name, start, end, seq, ctcf, atac)
@@ -1001,7 +1023,7 @@ def predict_difference(chr_name, start, deletion_start, deletion_width, model, s
     # Inputs with deletion
     inputs_deletion = preprocess_deletion(chr_name, start, deletion_start, 
             deletion_width, seq_region, ctcf_region, atac_region, other_regions=other_regions, 
-            ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
+            ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=2.0)
     pred_deletion = model(inputs_deletion)[0].detach().cpu().numpy() # Prediction
     # Compare inputs:
     diff_map = pred_deletion - pred
@@ -1009,11 +1031,11 @@ def predict_difference(chr_name, start, deletion_start, deletion_width, model, s
 
 
 def preprocess_deletion(chr_name, start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
-                        other_regions=None, ko_data=['ctcf'], ko_channels=[0], ko_mode='zero'):
+                        other_regions=None, ko_data=['ctcf'], ko_channels=[0], ko_mode='zero', peak_height=2.0):
     # Delete inputs
     seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
             deletion_start, deletion_width, seq_region, ctcf_region, 
-            atac_region, other_regions=other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
+            atac_region, other_regions=other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=peak_height)
     # Process inputs
     if other_regions is None:
         inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region)
@@ -1022,7 +1044,8 @@ def preprocess_deletion(chr_name, start, deletion_start, deletion_width, seq_reg
     return inputs
 
 def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
-                          other_regions=None, ko_data=['ctcf'], ko_channels=[0], channel_offset=0, ko_mode='zero'):
+                          other_regions=None, ko_data=['ctcf'], ko_channels=[0], channel_offset=0, ko_mode='zero',
+                          peak_height=2.0):
     ''' Delete all signals at a specfied location with corresponding padding at the end '''
     if 'ctcf' in ko_data:
         channel_offset += 1
@@ -1033,11 +1056,11 @@ def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctc
         if track_name == 'ctcf':
             ctcf_region = track_ko(deletion_start - start, 
                 deletion_start - start + deletion_width, 
-                ctcf_region, ko_mode=ko_mode)
+                ctcf_region, ko_mode=ko_mode, peak_height=peak_height)
         elif track_name == 'atac':
             atac_region = track_ko(deletion_start - start, 
                 deletion_start - start + deletion_width, 
-                atac_region, ko_mode=ko_mode)
+                atac_region, ko_mode=ko_mode, peak_height=peak_height)
         elif other_regions is not None:
             print(other_regions)
             print(channel_idx, channel_offset)
@@ -1045,25 +1068,25 @@ def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctc
             original = other_regions[channel_idx - channel_offset].copy()
             other_regions[channel_idx - channel_offset] = track_ko(deletion_start - start,
                 deletion_start - start + deletion_width, 
-                other_regions[channel_idx - channel_offset], ko_mode=ko_mode)
+                other_regions[channel_idx - channel_offset], ko_mode=ko_mode, peak_height=peak_height)
             if np.array_equal(original, other_regions[channel_idx - channel_offset]):
                 print(f'Warning: {track_name} KO did not change the signal. Check the KO mode.')
     return seq_region, ctcf_region, atac_region, other_regions
 
 
-def track_ko(start, end, track, window = 2097152, ko_mode='zero'):
+def track_ko(start, end, track, window = 2097152, ko_mode='zero', peak_height=2.0):
     if ko_mode == 'zero':
         track[start:end] = 0
     elif ko_mode == 'mean':
         mean = np.mean(track[:start] + track[end:])
         track[start:end] = mean
     elif ko_mode == 'knockout':
-        track[start:end] = knockout_peaks(track[start:end])
+        track[start:end] = knockout_peaks(track[start:end], threshold=peak_height)
     elif ko_mode == 'shuffle':
         #track[start:end] = knockout_peaks(track[start:end])
         track[start:end] = chunk_shuffle(track[start:end])
     elif ko_mode == 'knockout_shuffle':
-        track[start:end] = knockout_peaks(track[start:end])
+        track[start:end] = knockout_peaks(track[start:end], threshold=peak_height)
         track[start:end] = chunk_shuffle(track[start:end])
     else:
         raise ValueError('ko_mode must be either zero or mean')
