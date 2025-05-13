@@ -23,8 +23,9 @@ def normalize_bigwig(bw, out_bw, q=0.9995):
         
         # Rank-normalize the data
         data = np.nan_to_num(data)
-        normalized_data = data / np.quantile(data, q=q)
+        normalized_data = data / np.quantile(data[data != 0], q=q)
         normalized_data = np.clip(normalized_data, 0, 1)
+        normalized_data = np.nan_to_num(normalized_data)
         # Write the normalized data to the new bigWig file
         out_bw.addEntries(chrom, 0, ends=bw.chroms()[chrom], values=normalized_data, span=1, step=1)
     # Close the bigWig files
