@@ -339,6 +339,8 @@ def main():
         plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_scatter.png'), dpi=300)
         plt.close(fig)
 
+
+#def gradient_attribution(seq_region, ctcf_region, atac_region, model_path, other_regions):
    
 
 def single_deletion(output_path, outname, celltype, chr_name, start, deletion_starts, deletion_widths, 
@@ -414,12 +416,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         if ko in input_track_names:
             ko_channels.append(input_track_names.index(ko))
         else:
-            print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
+            if ko != 'seq':
+                print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
 
     # Delete inputs
     if deletion_starts is not None and deletion_widths is not None:
         for deletion_start, deletion_width, ko_data_type in zip(deletion_starts, deletion_widths, ko_data_types):
-            ko_channel = input_track_names.index(ko_data_type)
+            if ko_data_type in input_track_names:
+                ko_channel = input_track_names.index(ko_data_type)
+            else:
+                ko_channel = -1
             channel_offset = 0
             if 'ctcf' in ko_data_types:
                 channel_offset += 1
@@ -531,7 +537,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=ko_mode, peak_height=peak_height)
                 one_perturb_already_done[ko_data_type] = True
             else:
-                print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
+                if ko != 'seq':
+                    print(f'Warning: {ko_data_type} not found in input track names. Skipping KO for {ko_data_type}.')
         
 
     # open tracks.ini file and add two vertical lines for the deletion, write in a new tmp tracks file
@@ -1061,6 +1068,10 @@ def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctc
             atac_region = track_ko(deletion_start - start, 
                 deletion_start - start + deletion_width, 
                 atac_region, ko_mode=ko_mode, peak_height=peak_height)
+        elif track_name == 'seq':
+            # replace all bases in seq_region with N
+            seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = 0
+            seq_region[deletion_start - start:deletion_start - start + deletion_width, 4] = 1
         elif other_regions is not None:
             print(other_regions)
             print(channel_idx, channel_offset)
