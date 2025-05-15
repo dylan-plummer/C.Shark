@@ -85,7 +85,7 @@ def find_peaks(bw_in, chrom, threshold, min_peak_width):
 
     return peaks
 
-def calculate_replacement_value(bw_in, chrom, start, end, padding_factor=3.0):
+def calculate_replacement_value(bw_in, chrom, start, end, args, padding_factor=3.0):
     """
     Calculate the replacement value for a peak region based on the selected knockout strategy.
     
@@ -103,7 +103,7 @@ def calculate_replacement_value(bw_in, chrom, start, end, padding_factor=3.0):
     # Take regions before and after the peak
     peak_width = end - start
     padding = min(int(peak_width * padding_factor), 5)
-    
+
     # Region before the peak
     pre_start = max(0, start - padding)
     pre_end = start
@@ -114,8 +114,13 @@ def calculate_replacement_value(bw_in, chrom, start, end, padding_factor=3.0):
     
     # Get stats from regions surrounding the peak
     try:
-        pre_mean = bw_in.stats(chrom, pre_start, pre_end, type="mean", exact=True)[0]
-        post_mean = bw_in.stats(chrom, post_start, post_end, type="mean", exact=True)[0]
+        # pre_mean = bw_in.stats(chrom, pre_start, pre_end, type="mean", exact=True)[0]
+        # post_mean = bw_in.stats(chrom, post_start, post_end, type="mean", exact=True)[0]
+        # get quantile 0.1 instead
+        pre_vals = bw_in.values(chrom, pre_start, pre_end, numpy=True)
+        post_vals = bw_in.values(chrom, post_start, post_end, numpy=True)
+        pre_mean = np.nanquantile(pre_vals, 0.1) if pre_vals.size > 0 else None
+        post_mean = np.nanquantile(post_vals, 0.1) if post_vals.size > 0 else None
     except RuntimeError as e:
         logging.error(f"Error calculating stats for {chrom}:{start}-{end}: {e}")
         pre_mean = None
@@ -547,7 +552,6 @@ color = blue
 height = 4
 # You might want to adjust min/max_value for better comparison
 min_value = 0
-max_value = {args.threshold * 1.5}
 
 [Knockout Signal]
 file = {output_bw_abs_path}
@@ -602,9 +606,9 @@ def main():
     )
     parser.add_argument("input_bigwig", help="Path to the input bigWig file.")
     parser.add_argument("output_bigwig", help="Path for the output (knockout) bigWig file.")
-    parser.add_argument("-t", "--threshold", type=float, default=20.0,
+    parser.add_argument("-t", "--threshold", type=float, default=3.0,
                         help="Minimum signal value threshold to consider a region part of a peak.")
-    parser.add_argument("-w", "--min_peak_width", type=int, default=20,
+    parser.add_argument("-w", "--min_peak_width", type=int, default=3,
                         help="Minimum width (in base pairs) for a region above threshold to be called a peak.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable debug logging.")
