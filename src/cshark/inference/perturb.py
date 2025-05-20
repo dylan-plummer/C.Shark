@@ -529,12 +529,12 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool', res=res)
     if deletion_starts is not None and deletion_widths is not None:
         one_perturb_already_done = {}
-        for deletion_start, deletion_width, ko_data_type in zip(deletion_starts, deletion_widths, ko_data_types):
+        for deletion_start, deletion_width, ko_data_type, knockout_mode in zip(deletion_starts, deletion_widths, ko_data_types, ko_mode):
             if ko_data_type in input_track_names:
                 ko_path = input_track_paths[input_track_names.index(ko_data_type)]
                 if ko_data_type in one_perturb_already_done:
                     ko_path = f'tmp/{ko_data_type}_ko.bw'
-                write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=ko_mode, peak_height=peak_height)
+                write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=knockout_mode, peak_height=peak_height)
                 one_perturb_already_done[ko_data_type] = True
             else:
                 if ko != 'seq':
