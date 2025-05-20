@@ -73,8 +73,8 @@ def main():
                         help='Names of bigwig tracks to plot which are not inputs', required=False)
     parser.add_argument('--ko', dest='ko_data', type=str, nargs='+', default=[],
                         help='name of data modalities to knockout', required=False)
-    parser.add_argument('--ko-mode', dest='ko_mode', type=str, default='zero',
-                        help='min value for color scale of grount truth data', required=False)
+    parser.add_argument('--ko-mode', dest='ko_mode', type=str, nargs='+', default=['zero'],
+                        help='how we simulate the knockout of 1d peaks', required=False)
 
     # Deletion related params
     parser.add_argument('--ko-start', dest='deletion_start', nargs='+', type=int,
@@ -153,6 +153,8 @@ def main():
         other_feats = None
     if type(args.ko_data) == str:
         args.ko_data = [args.ko_data]
+    if type(args.ko_mode) == str:
+        args.ko_mode = [args.ko_mode]
     
     image_scale = args.mat_size
     res = args.resolution
@@ -347,12 +349,13 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     var_pos, alt_bp,
                     model_path, seq_path, ctcf_path, atac_path, other_feats, 
                     seq2_path=None,
-                    ko_data=['ctcf'], ko_mode='zero', region=None, mid_hidden=256,
+                    ko_data=['ctcf'], ko_mode=['zero'], region=None, mid_hidden=256,
                     plot_bigwigs=[], plot_pred_bigwigs=[],
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
                     min_val_diff=-0.5, max_val_diff=0.5,
                     peak_height=2.0,
                     ctcf_log2=False, silent=False):
+    os.makedirs(output_path, exist_ok=True)
     if not outname.endswith('_') and outname != '':
                 outname += '_'
     if plot_bigwigs is None:
@@ -421,7 +424,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
     # Delete inputs
     if deletion_starts is not None and deletion_widths is not None:
-        for deletion_start, deletion_width, ko_data_type in zip(deletion_starts, deletion_widths, ko_data_types):
+        for deletion_start, deletion_width, ko_data_type, knockout_mode in zip(deletion_starts, deletion_widths, ko_data_types, ko_mode):
             if ko_data_type in input_track_names:
                 ko_channel = input_track_names.index(ko_data_type)
             else:
@@ -434,7 +437,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
                     deletion_start, deletion_width, seq_region, ctcf_region, 
                     atac_region, other_regions, ko_data=[ko_data_type], ko_channels=[ko_channel], channel_offset=channel_offset,
-                    ko_mode=ko_mode, peak_height=peak_height)
+                    ko_mode=[knockout_mode], peak_height=peak_height)
     
     # perturb sequence if var_pos is not None
     if var_pos is not None and alt_bp is not None:
@@ -496,14 +499,11 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             ctcf_filename = os.path.basename(ctcf_path).split('.')[0]
             hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace(f'/{ctcf_filename}.bw', '') + f'/{chr_name}.npz'
             hic = HiCFeature(path = hic_path)
-            gt_ratio = 1.0
             gt_res = res
             if res == 8192:
                 gt_res = 10000
-                gt_ratio = gt_res / 8192
             if res == 4096:
                 gt_res = 5000
-                gt_ratio = gt_res / 4096
             mat = hic.get(start, window=int(window), res=gt_res)
             mat = resize(mat, (int(image_scale), int(image_scale)), anti_aliasing=True)
             mat += 0.01
@@ -632,7 +632,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     f.write(f'title = {track_name}\n')
                     f.write('min_value = 0\n')
                     track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                    f.write(f'max_value = {track_max}\n')
+                    if track_max is not None:
+                        f.write(f'max_value = {track_max}\n')
                     f.write('number_of_bins = 512\n\n')
                     if track_name in ko_data:
                         f.write(f'[{track_name} KO]\n')
@@ -641,7 +642,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write(f'color = {colors[track_i]}\n')
                         f.write(f'title = {track_name} KO\n')
                         f.write('min_value = 0\n')
-                        f.write(f'max_value = {track_max}\n')
+                        if track_max is not None:
+                            f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
                     if track_name in plot_pred_bigwigs:
                         f.write(f'[{track_name} pred]\n')
@@ -650,7 +652,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write(f'color = {colors[track_i]}\n')
                         f.write(f'title = {track_name} pred KO\n')
                         f.write('min_value = 0\n')
-                        f.write(f'max_value = {track_max}\n')
+                        if track_max is not None:
+                            f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
 
                 f.write('[KO pred]\n')
@@ -692,7 +695,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write(f'title = {track_name}\n')
                             f.write('min_value = 0\n')
                             track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                            f.write(f'max_value = {track_max}\n')
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
                         # add the ground truth hic matrix
                         f.write('[deeploop]\n')
@@ -720,7 +724,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write(f'title = {track_name}\n')
                         f.write('min_value = 0\n')
                         track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                        f.write(f'max_value = {track_max}\n')
+                        if track_max is not None:
+                            f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
                         if track_name in plot_pred_bigwigs:
                             #track_max = get_axis_range_from_bigwig(f'tmp/{track_name}_pred_WT.bw', chr_name, start)
@@ -728,9 +733,10 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write(f'file = tmp/{track_name}_pred_WT.bw\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
-                            f.write(f'title = {track_name} pred WT\n')
+                            f.write(f'title = {track_name} pred\n')
                             f.write('min_value = 0\n')
-                            f.write(f'max_value = {track_max}\n')
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
                     # add the ground truth hic matrix
                     f.write('[WT pred]\n')
@@ -770,7 +776,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write(f'title = {track_name}\n')
                             f.write('min_value = 0\n')
                             track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                            f.write(f'max_value = {track_max}\n')
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
                             if track_name in ko_data:
                                 f.write(f'[{track_name} KO]\n')
@@ -779,7 +786,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                 f.write(f'color = {colors[track_i]}\n')
                                 f.write(f'title = {track_name} KO\n')
                                 f.write('min_value = 0\n')
-                                f.write(f'max_value = {track_max}\n')
+                                if track_max is not None:
+                                    f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
                             if track_name in plot_pred_bigwigs:
                                 f.write(f'[{track_name} pred]\n')
@@ -788,7 +796,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                 f.write(f'color = {colors[track_i]}\n')
                                 f.write(f'title = {track_name} pred KO\n')
                                 f.write('min_value = 0\n')
-                                f.write(f'max_value = {track_max}\n')
+                                if track_max is not None:
+                                    f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
                  
                         # add the ground truth hic matrix
@@ -831,7 +840,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
 
 def screening(output_path, outname, celltype, chr_name, screen_start, screen_end, perturb_width, step_size, model_path, seq_path, ctcf_path, atac_path, other_paths, 
-              ko_data=['ctcf'], ko_mode='zero', region=None, n_top_sites=5, plot_diff=False,
+              ko_data=['ctcf'], ko_mode=['zero'], region=None, n_top_sites=5, plot_diff=False,
               min_val=0.1, max_val=None, 
               min_val_diff=-0.5, max_val_diff=0.5,
               peak_height=2.0,
@@ -1012,7 +1021,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
     
 
 def predict_difference(chr_name, start, deletion_start, deletion_width, model, seq, ctcf, atac, other_feats=None, 
-                       ko_data=['ctcf'], ko_channels=[0], ko_mode='zero', peak_height=2.0):
+                       ko_data=['ctcf'], ko_channels=[0], ko_mode=['zero'], peak_height=2.0):
     # Define window which accomodates deletion
     end = start + 2097152
     seq_region, ctcf_region, atac_region = infer.get_data_at_interval(chr_name, start, end, seq, ctcf, atac)
@@ -1038,7 +1047,7 @@ def predict_difference(chr_name, start, deletion_start, deletion_width, model, s
 
 
 def preprocess_deletion(chr_name, start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
-                        other_regions=None, ko_data=['ctcf'], ko_channels=[0], ko_mode='zero', peak_height=2.0):
+                        other_regions=None, ko_data=['ctcf'], ko_channels=[0], ko_mode=['zero'], peak_height=2.0):
     # Delete inputs
     seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
             deletion_start, deletion_width, seq_region, ctcf_region, 
@@ -1051,35 +1060,39 @@ def preprocess_deletion(chr_name, start, deletion_start, deletion_width, seq_reg
     return inputs
 
 def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
-                          other_regions=None, ko_data=['ctcf'], ko_channels=[0], channel_offset=0, ko_mode='zero',
+                          other_regions=None, ko_data=['ctcf'], ko_channels=[0], channel_offset=0, ko_mode=['zero'],
                           peak_height=2.0):
     ''' Delete all signals at a specfied location with corresponding padding at the end '''
     if 'ctcf' in ko_data:
         channel_offset += 1
     if 'atac' in ko_data:
         channel_offset += 1
-    for track_name, channel_idx in zip(ko_data, ko_channels):
-        #print(f'Knocking out {track_name} at {deletion_start} with width {deletion_width}')
+    for track_name, knockout_mode, channel_idx in zip(ko_data, ko_mode, ko_channels):
+        #print(f'Knocking out {track_name} at {deletion_start} with width {deletion_width} and mode {knockout_mode}')
         if track_name == 'ctcf':
             ctcf_region = track_ko(deletion_start - start, 
                 deletion_start - start + deletion_width, 
-                ctcf_region, ko_mode=ko_mode, peak_height=peak_height)
+                ctcf_region, ko_mode=knockout_mode, peak_height=peak_height)
         elif track_name == 'atac':
             atac_region = track_ko(deletion_start - start, 
                 deletion_start - start + deletion_width, 
-                atac_region, ko_mode=ko_mode, peak_height=peak_height)
+                atac_region, ko_mode=knockout_mode, peak_height=peak_height)
         elif track_name == 'seq':
-            # replace all bases in seq_region with N
-            seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = 0
-            seq_region[deletion_start - start:deletion_start - start + deletion_width, 4] = 1
+            if knockout_mode == 'knockout' or knockout_mode == 'zero':
+                # replace all bases in seq_region with N
+                seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = 0
+                seq_region[deletion_start - start:deletion_start - start + deletion_width, 4] = 1
+            elif knockout_mode == 'shuffle':
+                # shuffle seq_region
+                idxs = np.arange(seq_region[deletion_start - start:deletion_start - start + deletion_width, :].shape[0])
+                np.random.shuffle(idxs)
+                seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = seq_region[deletion_start - start:deletion_start - start + deletion_width, :][idxs, :]
+       
         elif other_regions is not None:
-            print(other_regions)
-            print(channel_idx, channel_offset)
-            print(len(other_regions))
             original = other_regions[channel_idx - channel_offset].copy()
             other_regions[channel_idx - channel_offset] = track_ko(deletion_start - start,
                 deletion_start - start + deletion_width, 
-                other_regions[channel_idx - channel_offset], ko_mode=ko_mode, peak_height=peak_height)
+                other_regions[channel_idx - channel_offset], ko_mode=knockout_mode, peak_height=peak_height)
             if np.array_equal(original, other_regions[channel_idx - channel_offset]):
                 print(f'Warning: {track_name} KO did not change the signal. Check the KO mode.')
     return seq_region, ctcf_region, atac_region, other_regions
