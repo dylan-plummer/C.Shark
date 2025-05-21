@@ -36,7 +36,7 @@ def write_tmp_cooler(pred, chr_name, start, res=8192, window=2097152, out_file='
     cooler.create_cooler(out_file, bins, pixels, dtypes={'count': np.float32})
 
 
-def knockout_peaks(signal_array, threshold=2.0, min_peak_width=3, padding_factor=3.0, background_q=0.1):
+def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor=3.0, background_q=0.1):
     """
     Simulates knockout of peaks in a signal array by replacing peak regions with background values.
     
@@ -89,9 +89,9 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=3, padding_factor
         
         # Calculate regions before and after peak for background
         pre_start = max(0, peak_start - padding)
-        pre_end = peak_start
+        pre_end = peak_start - peak_width
         
-        post_start = peak_end
+        post_start = peak_end + peak_width
         post_end = min(array_length, peak_end + padding)
         
         # Calculate mean of surrounding regions as background
@@ -109,6 +109,7 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=3, padding_factor
         
         # Replace peak with background value
         result[peak_start:peak_end] = background_val
+        #result[peak_start:peak_end] = 1
     
     return result
 
@@ -117,7 +118,8 @@ def get_axis_range_from_bigwig(bigwig_path, chr_name, start, window=2097152, q=0
     bw = pyBigWig.open(bigwig_path)
     values = np.array(bw.values(chr_name, start, start + window))
     values = np.nan_to_num(values, nan = 0.0)
-    return np.quantile(values, q=q)
+    lim = np.quantile(values, q=q)
+    return lim if lim != 0 else None
 
 
 def chunk_shuffle(arr, chunk_size=1000):
@@ -345,6 +347,7 @@ def prediction(seq_region, ctcf_region, atac_region, model_path, other_regions=N
                 pred_1d = pred_1d[0].detach().cpu().numpy()
                 if undo_log:
                     pred_1d = np.expm1(pred_1d)
+                    pred_1d = np.clip(pred_1d, 0, None)
             else:
                 pred_1d = None
         else:
