@@ -13,7 +13,9 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                  mid_hidden = 256,    # Latent dimension size
                  predict_hic = True,  # Whether to include the Hi-C prediction head
                  predict_1d = False,  # Whether to include the 1D prediction head
+                 recon_1d = True, # Whether to reconstruct the 1D input features
                  diploid=False,
+                 seq_filter_size = 3, # Filter size for sequence features
                  target_mat_size = 256, # Expected size of the Hi-C map (e.g., 256x256)
                  target_1d_length = 2048, # Expected output length for 1D tracks
                  encoder_downsample_factor = 2**7, # Total downsampling from encoder (e.g., 13 blocks * stride 2)
@@ -33,6 +35,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
 
         self.predict_hic = predict_hic
         self.predict_1d = predict_1d
+        self.recon_1d = recon_1d
         self.num_target_tracks = num_target_tracks
         self.record_attn = record_attn
         self.encoder_downsample_factor = encoder_downsample_factor
@@ -43,7 +46,8 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         # --- Encoder ---
         # Takes sequence (5) + genomic features
         self.encoder = blocks.EncoderSplit(num_genomic_features, hidden = mid_hidden, output_size = mid_hidden, 
-                                           num_blocks = self.num_blocks, num_bases=10 if diploid else 5)
+                                           num_blocks = self.num_blocks, num_bases=10 if diploid else 5,
+                                           seq_filter_size=seq_filter_size,)
         # Output: [batch, mid_hidden, reduced_length]
 
         # --- Optional Transformer ---
@@ -61,11 +65,22 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         # 1D Decoder for Tracks
         if self.predict_1d:
             #print(f"1D Decoder using latent dim={mid_hidden}{target_1d_length}")
-
-            self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks,
-                                               num_upsample_blocks=2 if target_mat_size == 512 else 3,
-                                               latent_dim=mid_hidden,
-                                               target_length=self.target_1d_length)
+            if self.recon_1d:
+                self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks,
+                                                num_upsample_blocks=2 if target_mat_size == 512 else 3,
+                                                latent_dim=mid_hidden,
+                                                target_length=self.target_1d_length)
+                self.decoder_1d_seq = None 
+            else:
+                self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks - num_genomic_features,
+                                                num_upsample_blocks=2 if target_mat_size == 512 else 3,
+                                                latent_dim=mid_hidden,
+                                                target_length=self.target_1d_length)
+                # If not reconstructing 1D features, we need to predict them from sequence features
+                self.decoder_1d_seq = blocks.Decoder1D(num_target_tracks = num_genomic_features,
+                                                       num_upsample_blocks=2 if target_mat_size == 512 else 3,
+                                                       latent_dim=128,
+                                                       target_length=self.target_1d_length)
             # Output: [batch, num_target_tracks, target_1d_length]
 
     def forward(self, x):
@@ -77,7 +92,11 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         # Shape: [batch, 5 + num_genomic_features, length]
 
         # 2. Encode
-        latent_seq = self.encoder(x)
+        if self.recon_1d:  # use full features for 1d prediction (input tracks are reconstructed)
+            latent_seq = self.encoder(x)
+        else: # only use full features for Hi-C and other 1d predictions (input tracks are predicted only from sequence features)
+            latent_seq, seq_feats = self.encoder(x, return_seq_feats=True)
+
         # Shape: [batch, mid_hidden, reduced_length]
 
         # 3. Optional Transformer (Attention)
@@ -124,8 +143,13 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
             outputs['hic'] = pred_hic
 
         if self.predict_1d:
-            # Pass final latent sequence to 1D decoder
-            pred_1d = self.decoder_1d(latent_final)
+            if self.recon_1d:
+                # Pass final latent sequence to 1D decoder
+                pred_1d = self.decoder_1d(latent_final)
+            else:
+                pred_1d_inputs = self.decoder_1d_seq(seq_feats) # Use sequence features for 1D prediction
+                pred_1d = self.decoder_1d(latent_final)
+                pred_1d = torch.cat([pred_1d_inputs, pred_1d], dim=2) # Concatenate sequence features with predicted 1D tracks
             # Shape: [batch, num_target_tracks, target_1d_length]
             outputs['1d'] = pred_1d
         else:

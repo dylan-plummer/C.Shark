@@ -59,13 +59,14 @@ class Encoder(nn.Module):
         return res_blocks
 
 class EncoderSplit(Encoder):
-    def __init__(self, num_epi, hidden = 256, output_size = 256, filter_size = 5, num_blocks = 12, num_bases=5):
+    def __init__(self, num_epi, hidden = 256, output_size = 256, filter_size = 5, num_blocks = 12, num_bases=5,
+                 seq_filter_size=3):
         super(Encoder, self).__init__()
         self.num_epi = num_epi
         self.filter_size = filter_size
         self.num_bases = num_bases
         self.conv_start_seq = nn.Sequential(
-                                    nn.Conv1d(num_bases, 16, 3, 2, 1),
+                                    nn.Conv1d(num_bases, 16, seq_filter_size, 2, 1),
                                     nn.BatchNorm1d(16),
                                     nn.ReLU(),
                                     )
@@ -88,7 +89,7 @@ class EncoderSplit(Encoder):
             self.res_blocks_epi = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
         self.conv_end = nn.Conv1d(256, hidden, 1)
 
-    def forward(self, x):
+    def forward(self, x, return_seq_feats=False):
         if self.num_epi > 0:
             seq = x[:, :self.num_bases, :]
             epi = x[:, self.num_bases:, :]
@@ -98,7 +99,10 @@ class EncoderSplit(Encoder):
         else:
             x = self.res_blocks_seq(self.conv_start_seq(x))
         out = self.conv_end(x)
-        return out
+        if return_seq_feats:
+            return out, seq
+        else:
+            return out
     
 class EncoderCrossAttn(Encoder):
     def __init__(self, num_epi_layers, output_size=256, filter_size=5, num_blocks=12):

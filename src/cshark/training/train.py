@@ -261,11 +261,16 @@ def init_parser():
                       help='Size of output 1d track')
   parser.add_argument('--latent-dim', dest='model_latent_dim', type=int, default=256,
                       help='Latent dimension size (mid_hidden)')
+  parser.add_argument('--seq-filter-size', dest='seq_filter_size', type=int, default=3,
+                      help='Size of 1D convolution filter for sequence input (bp)')
   parser.add_argument('--lr', dest='optimizer_lr', type=float, default=2e-4, help='Learning rate')
   parser.add_argument('--loss-weight-hic', dest='training_loss_weight_hic', type=float, default=1.0,
                       help='Weight for Hi-C loss term')
-  parser.add_argument('--loss-weight-1d', dest='training_loss_weight_1d', type=float, default=1.0,
+  parser.add_argument('--loss-weight-1d', dest='training_loss_weight_1d', type=float, default=0.1,
                       help='Weight for 1D track loss term')
+  parser.add_argument('--no-recon', dest='recon_1d',
+                        action='store_false',
+                        help='Whether to reconstruct 1D tracks from full features or from sequence only')
 
 
   args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
@@ -404,7 +409,9 @@ class TrainModule(pl.LightningModule):
             diploid=args.dataset_assembly2 is not None,
             predict_1d=self.predict_1d,
             target_mat_size=args.mat_size,
-            target_1d_length=args.target_1d_size
+            target_1d_length=args.target_1d_size,
+            recon_1d=args.recon_1d,
+            seq_filter_size=args.seq_filter_size,
             # Add other necessary model args from hparams if they exist
         )
         if args.model_path is not None:
@@ -448,10 +455,18 @@ class TrainModule(pl.LightningModule):
 
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
-            loss_1d = self.criterion(pred_1d, target_1d_tracks)
+            #loss_1d = self.criterion(pred_1d, target_1d_tracks)
+            loss_1d = torch.nn.functional.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
+            # log each 1D track loss separately
+            for i, feature in enumerate(self.hparams.output_features):
+                track_loss = loss_1d[:, i].mean()
+                self.log(f'train_loss_1d_{feature}', track_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            # Mask out the 0 values in the target_1d_tracks
+            mask = target_1d_tracks != 0
+            loss_1d = (loss_1d * mask).sum() / mask.sum()
             total_loss += loss_1d * self.hparams.training_loss_weight_1d
             self.log('train_loss_1d', loss_1d, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-
+            
         self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         self.log('train_loss_hic', loss_hic, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         
@@ -468,9 +483,17 @@ class TrainModule(pl.LightningModule):
 
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
-            loss_1d = self.criterion(pred_1d, target_1d_tracks)
+            loss_1d = torch.nn.functional.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
+            # log each 1D track loss separately
+            for i, feature in enumerate(self.hparams.output_features):
+                track_loss = loss_1d[:, i].mean()
+                self.log(f'val_loss_1d_{feature}', track_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            # Mask out the 0 values in the target_1d_tracks
+            mask = target_1d_tracks != 0
+            loss_1d = (loss_1d * mask).sum() / mask.sum()
             total_loss += loss_1d * self.hparams.training_loss_weight_1d
             self.log('val_loss_1d', loss_1d, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            
 
         self.log('val_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         self.log('val_loss_hic', loss_hic, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
@@ -488,10 +511,17 @@ class TrainModule(pl.LightningModule):
 
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
-            loss_1d = self.criterion(pred_1d, target_1d_tracks)
+            loss_1d = torch.nn.functional.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
+            # log each 1D track loss separately
+            for i, feature in enumerate(self.hparams.output_features):
+                track_loss = loss_1d[:, i].mean()
+                self.log(f'test_loss_1d_{feature}', track_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            # Mask out the 0 values in the target_1d_tracks
+            mask = target_1d_tracks != 0
+            loss_1d = (loss_1d * mask).sum() / mask.sum()
             total_loss += loss_1d * self.hparams.training_loss_weight_1d
             self.log('test_loss_1d', loss_1d, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-
+            
         self.log('test_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         self.log('test_loss_hic', loss_hic, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         
