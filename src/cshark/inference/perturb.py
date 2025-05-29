@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 import pandas as pd
 import sys
@@ -23,6 +24,18 @@ en_dict = {'a' : 0, 't' : 1, 'c' : 2, 'g' : 3, 'n' : 4}
 font_size = 15
 plot_width = 17
 track_label_fraction = 0.13
+
+def reverse_complement(seq):
+    '''
+    Complimentary sequence
+    '''
+    seq = np.flip(seq, 0)
+    seq_comp = np.concatenate([seq[:, 1:2],
+                                seq[:, 0:1],
+                                seq[:, 3:4],
+                                seq[:, 2:3],
+                                seq[:, 4:5]], axis = 1)
+    return seq_comp
 
 # https://sumit-ghosh.com/posts/parsing-dictionary-key-value-pairs-kwargs-argparse-python/
 class ParseKwargs(argparse.Action):
@@ -58,6 +71,11 @@ def main():
                       help='Size of output Hi-C matrix')
     parser.add_argument('--latent_size', dest='mid_hidden', type=int, default=256,
                                 help='', required=False)
+    parser.add_argument('--seq-filter-size', dest='seq_filter_size', type=int, default=3,
+                        help='Size of the 1D conv filter for sequence data', required=False)
+    parser.add_argument('--no-recon', dest='recon_1d',
+                        action='store_false',
+                        help='Whether to reconstruct 1D tracks from full features or from sequence only')
     
     parser.add_argument('--out-file', dest='out_file', 
                         help='Path to the output file if doing full chromosome prediction', required=False)
@@ -74,7 +92,7 @@ def main():
     parser.add_argument('--ko', dest='ko_data', type=str, nargs='+', default=[],
                         help='name of data modalities to knockout', required=False)
     parser.add_argument('--ko-mode', dest='ko_mode', type=str, nargs='+', default=['zero'],
-                        help='how we simulate the knockout of 1d peaks', required=False)
+                        help='how we simulate the knockout of 1d peaks (zero, mean, knockout, shuffle, knockout_shuffle, reverse, reverse_motif)', required=False)
 
     # Deletion related params
     parser.add_argument('--ko-start', dest='deletion_start', nargs='+', type=int,
@@ -181,6 +199,8 @@ def main():
                     ko_data=args.ko_data, ko_mode=args.ko_mode,
                     region = args.region,
                     mid_hidden=args.mid_hidden, 
+                    seq_filter_size=args.seq_filter_size,
+                    recon_1d=args.recon_1d,
                     plot_bigwigs=args.plot_bigwigs, plot_pred_bigwigs=args.plot_pred_bigwigs,
                     min_val_true=args.min_val_true, max_val_true=args.max_val_true,
                     min_val_pred=args.min_val_pred, max_val_pred=args.max_val_pred, plot_diff=args.plot_diff,
@@ -223,7 +243,7 @@ def main():
         for ko in ko_data:
             if ko in input_track_names:
                 ko_channels.append(input_track_names.index(ko))
-            else:
+            elif ko != 'seq':
                 print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
         # get track_names from ctcf_path, atac_path, other_feats
         # track_names = model_utils.get_1d_track_names(model_path)
@@ -241,14 +261,16 @@ def main():
             if atac_region is None:
                 num_genomic_features -= 1
             pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
-                                                  num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
+                                                  num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                                  mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, recon_1d=args.recon_1d)
             pred_before = pred_before_output['hic']
             pred_before_1d = pred_before_output['1d']
-            seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
+            seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                 start, window, seq_region, ctcf_region, 
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=args.peak_height)
             pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
-                                           num_genomic_features=num_genomic_features, mat_size=image_scale, mid_hidden=mid_hidden)
+                                           num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                           mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, recon_1d=args.recon_1d)
             pred = pred_output['hic']
             pred_1d = pred_output['1d']
             write_tmp_cooler(pred, chr_name, start, res=res)
@@ -316,20 +338,21 @@ def main():
                 track_col_names.append(f'{track_name}_WT')
                 track_col_names.append(f'{track_name}_KO')
             res_1d_df = res_1d_df[['chrom', 'start', 'end'] + track_col_names]
-            res_1d_df.to_csv(args.out_file.replace('.tsv', '_1d.tsv'), sep='\t', header=True, index=False)
+            res_1d_df.to_csv(args.out_file.replace('.tsv', '_1d.bed'), sep='\t', header=True, index=False)
 
             # plot the 1d WT and KO overlaid
-            fig, axs = plt.subplots(len(track_names), 1, figsize=(5, 5 * len(track_names)))
-            for track_idx, track_name in enumerate(track_names):
-                sns.scatterplot(data=res_1d_df, x=f'{track_name}_WT', y=f'{track_name}_KO', alpha=0.5, ax=axs[track_idx])
-                axs[track_idx].set_xlabel(f'{track_name} WT')
-                axs[track_idx].set_ylabel(f'{track_name} KO')
-                axs[track_idx].set_title(f'{track_name} WT vs KO')
-                # make the axes equal
-                axs[track_idx].set_aspect('equal', adjustable='box')
+            if len(track_names) > 0:
+                fig, axs = plt.subplots(len(track_names), 1, figsize=(5, 5 * len(track_names)))
+                for track_idx, track_name in enumerate(track_names):
+                    sns.scatterplot(data=res_1d_df, x=f'{track_name}_WT', y=f'{track_name}_KO', alpha=0.5, ax=axs[track_idx])
+                    axs[track_idx].set_xlabel(f'{track_name} WT')
+                    axs[track_idx].set_ylabel(f'{track_name} KO')
+                    axs[track_idx].set_title(f'{track_name} WT vs KO')
+                    # make the axes equal
+                    axs[track_idx].set_aspect('equal', adjustable='box')
 
-            plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_1d_scatter.png'), dpi=300)
-            plt.close(fig)
+                plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_1d_scatter.png'), dpi=300)
+                plt.close(fig)
         
         # plot a simple scatter plot of the WT vs KO
         fig, ax = plt.subplots(figsize=(10, 10))
@@ -349,7 +372,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     var_pos, alt_bp,
                     model_path, seq_path, ctcf_path, atac_path, other_feats, 
                     seq2_path=None,
-                    ko_data=['ctcf'], ko_mode=['zero'], region=None, mid_hidden=256,
+                    ko_data=['ctcf'], ko_mode=['zero'], region=None, mid_hidden=256, seq_filter_size=3, recon_1d=True,
                     plot_bigwigs=[], plot_pred_bigwigs=[],
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
                     min_val_diff=-0.5, max_val_diff=0.5,
@@ -380,7 +403,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             num_genomic_features -= 1
     # do baseline prediction for comparison
     pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
-                                          num_genomic_features=num_genomic_features, mat_size=image_scale, diploid=diploid, mid_hidden=mid_hidden)
+                                          num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                          diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, recon_1d=recon_1d)
     pred_before = pred_before_output['hic']
     pred_before_1d = pred_before_output['1d']
 
@@ -434,7 +458,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 channel_offset += 1
             if 'atac' in ko_data_types:
                 channel_offset += 1
-            seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
+            seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                     deletion_start, deletion_width, seq_region, ctcf_region, 
                     atac_region, other_regions, ko_data=[ko_data_type], ko_channels=[ko_channel], channel_offset=channel_offset,
                     ko_mode=[knockout_mode], peak_height=peak_height)
@@ -454,7 +478,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
     # Prediction
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
-                                   num_genomic_features=num_genomic_features, mat_size=image_scale, diploid=diploid, mid_hidden=mid_hidden)
+                                   num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                   diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, recon_1d=recon_1d)
     pred = pred_output['hic']
     pred_1d = pred_output['1d']
 
@@ -537,7 +562,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=knockout_mode, peak_height=peak_height)
                 one_perturb_already_done[ko_data_type] = True
             else:
-                if ko != 'seq':
+                if ko_data_type != 'seq':
                     print(f'Warning: {ko_data_type} not found in input track names. Skipping KO for {ko_data_type}.')
         
 
@@ -615,7 +640,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     tracks = get_tracks(data_root, celltype, assembly)
     lines = tracks.split('\n')
     lines = [line + '\n' for line in lines]
-    colors = ['red', 'blue', 'green', 'orange', 'purple', 'pink', 'brown', 'gray']
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'pink', 'brown', 'gray', 'cyan', 'magenta', 'yellow', 'red', 'blue', 'green', 'orange', 'purple', 'pink']
     with open('tmp/tmp_tracks.ini', 'w') as f:
         for line in lines:
             if 'arcs.bed' in line:
@@ -635,6 +660,13 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     if track_max is not None:
                         f.write(f'max_value = {track_max}\n')
                     f.write('number_of_bins = 512\n\n')
+                    if track_name.lower() == 'ctcf':
+                        if 'ctcf_motif.bed' in os.listdir('tmp'):
+                            f.write('[CTCF motif]\n')
+                            f.write('file = tmp/ctcf_motif.bed\n')
+                            f.write('file_type = bed\n')
+                            f.write('fontsize = 10\n')
+                            f.write('display = interleaved\n')
                     if track_name in ko_data:
                         f.write(f'[{track_name} KO]\n')
                         f.write(f'file = tmp/{track_name}_ko.bw\n')
@@ -837,6 +869,11 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         
     except Exception as e:  # probably no tracks.ini file
          print(e)
+    
+    try:
+        os.remove('tmp/ctcf_motif.bed')
+    except Exception:
+        pass
 
 
 def screening(output_path, outname, celltype, chr_name, screen_start, screen_end, perturb_width, step_size, model_path, seq_path, ctcf_path, atac_path, other_paths, 
@@ -862,7 +899,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
     if atac is None:
             num_genomic_features -= 1
     print(f'Number of genomic features: {num_genomic_features}')
-    model = model_utils.load_default(model_path, num_genomic_features=num_genomic_features, mat_size=image_scale)
+    model = model_utils.load_default(model_path, num_genomic_features=num_genomic_features, mat_size=image_scale, seq_filter_size=seq_filter_size, mid_hidden=mid_hidden)
     input_track_names = []
     input_track_paths = []
     if ctcf_path is not None:
@@ -880,7 +917,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
     for ko in ko_data:
         if ko in input_track_names:
             ko_channels.append(input_track_names.index(ko))
-        else:
+        elif ko != 'seq':
             print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
     # Generate pertubation windows
     # Windows are centered. Thus, both sides have enough margins
@@ -1049,7 +1086,7 @@ def predict_difference(chr_name, start, deletion_start, deletion_width, model, s
 def preprocess_deletion(chr_name, start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
                         other_regions=None, ko_data=['ctcf'], ko_channels=[0], ko_mode=['zero'], peak_height=2.0):
     # Delete inputs
-    seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(start, 
+    seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
             deletion_start, deletion_width, seq_region, ctcf_region, 
             atac_region, other_regions=other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=peak_height)
     # Process inputs
@@ -1059,7 +1096,7 @@ def preprocess_deletion(chr_name, start, deletion_start, deletion_width, seq_reg
         inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
     return inputs
 
-def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
+def deletion_with_padding(chr_name, start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
                           other_regions=None, ko_data=['ctcf'], ko_channels=[0], channel_offset=0, ko_mode=['zero'],
                           peak_height=2.0):
     ''' Delete all signals at a specfied location with corresponding padding at the end '''
@@ -1087,7 +1124,101 @@ def deletion_with_padding(start, deletion_start, deletion_width, seq_region, ctc
                 idxs = np.arange(seq_region[deletion_start - start:deletion_start - start + deletion_width, :].shape[0])
                 np.random.shuffle(idxs)
                 seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = seq_region[deletion_start - start:deletion_start - start + deletion_width, :][idxs, :]
-       
+            elif knockout_mode == 'reverse':
+                seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = reverse_complement(seq_region[deletion_start - start:deletion_start - start + deletion_width, :])
+            elif knockout_mode == 'reverse_motif':
+                from pyjaspar import jaspardb
+                jdb_obj = jaspardb(release='JASPAR2024')
+                motifs = jdb_obj.fetch_motifs(
+                        collection = ['CORE'],
+                        tf_name = 'CTCF',
+                        tax_group = ['Vertebrates'],
+                        species=['9606'],
+                        all_versions = False)
+                motif = motifs[0]
+                matrix_dict = motif.counts.normalize()  # ACGT 
+                matrix = []
+                for base in ['A', 'T', 'C', 'G', 'N']:
+                    if base in matrix_dict:
+                        matrix.append(list(matrix_dict[base]))
+                    else:
+                        matrix.append([0] * len(matrix_dict['A']))
+                matrix = np.array(matrix).T
+                seq_scan = seq_region[deletion_start - start:deletion_start - start + deletion_width, :]
+                corrs = []
+                is_reverse = []
+                for i in range(seq_scan.shape[0]):
+                    try:
+                        corr = np.dot(seq_scan[i: i + matrix.shape[0], :].flatten(), matrix.flatten()) / matrix.shape[0]
+                        rc_seq = reverse_complement(seq_scan[i: i + matrix.shape[0], :])
+                        corr_reverse = np.dot(rc_seq.flatten(), matrix.flatten()) / matrix.shape[0]
+                        is_reverse.append(corr_reverse > corr)
+                        corr = max(corr, corr_reverse)
+                        corrs.append(corr)
+                        
+                    except Exception as e:
+                        break
+                corrs = np.array(corrs)
+                
+                # get the index of the maximum correlation
+                max_idx = np.argmax(corrs)
+                # print the sequence at the maximum index
+                print(f'Maximum correlation at index {max_idx}')
+                ref_bases = []
+                for i in range(deletion_start - start + max_idx, deletion_start - start + max_idx + matrix.shape[0]):
+                    if i < 0 or i >= len(seq_region):
+                        ref_bases.append('N')
+                    else:
+                        ref_bases.append(list(en_dict.keys())[list(en_dict.values()).index(seq_region[i].argmax())])
+                ref_bases = ''.join(ref_bases).upper()
+                print(f'Reference sequence: {ref_bases}')
+                # reverse complement the sequence
+                # motif_seq = seq_region[deletion_start - start + max_idx: deletion_start - start + max_idx + matrix.shape[0], :]
+                # rc_motif_seq = reverse_complement(motif_seq)
+                # seq_region[deletion_start - start + max_idx: deletion_start - start + max_idx + matrix.shape[0], :] = rc_motif_seq
+                # find the number of peaks that should be included based on the cumulative distribution of the correlations
+                top_n = np.sum(corrs > 0.65)
+                max_idxs = np.argsort(corrs)[-top_n:]  # Get top 20 indices
+                print(f'Maximum indices: {max_idxs}')
+                forward_motif_xs = []
+                forward_motif_ys = []
+                reverse_motif_xs = []
+                reverse_motif_ys = []
+                # display top 10 sequences
+                for i in max_idxs:
+                    ref_bases = []
+                    for j in range(deletion_start - start + i, deletion_start - start + i + matrix.shape[0]):
+                        if j < 0 or j >= len(seq_region):
+                            ref_bases.append('N')
+                        else:
+                            ref_bases.append(list(en_dict.keys())[list(en_dict.values()).index(seq_region[j].argmax())])
+                    ref_bases = ''.join(ref_bases).upper()
+                    print(f'Sequence at index {i}: {ref_bases} (corr: {corrs[i]:.3f})')
+                    if is_reverse[i]:
+                        reverse_motif_xs.append(i)
+                        reverse_motif_ys.append(corrs[i])
+                    else:
+                        forward_motif_xs.append(i)
+                        forward_motif_ys.append(corrs[i])
+
+                    # reverse complement the sequence
+                    motif_seq = seq_region[deletion_start - start + i: deletion_start - start + i + matrix.shape[0], :]
+                    rc_motif_seq = reverse_complement(motif_seq)
+                    seq_region[deletion_start - start + i: deletion_start - start + i + matrix.shape[0], :] = rc_motif_seq
+                
+                
+                fig = plt.figure(figsize=(15, 4))
+                plt.plot(corrs)
+                plt.scatter(forward_motif_xs, forward_motif_ys, color='blue', marker='>', label='Forward motif')
+                plt.scatter(reverse_motif_xs, reverse_motif_ys, color='red', marker='<', label='Reverse motif')
+                plt.savefig('tmp/ctcf_corr.png')
+                plt.close()
+
+                # write a bed file with the motif locations and directions
+                with open('tmp/ctcf_motif.bed', 'w') as f:
+                    for i in max_idxs:
+                        f.write(f'{chr_name}\t{deletion_start + i}\t{deletion_start + i + matrix.shape[0]}\t{"<" if is_reverse[i] else ">"}\t{corrs[i]:.3f}\n')
+            
         elif other_regions is not None:
             original = other_regions[channel_idx - channel_offset].copy()
             other_regions[channel_idx - channel_offset] = track_ko(deletion_start - start,
@@ -1112,6 +1243,9 @@ def track_ko(start, end, track, window = 2097152, ko_mode='zero', peak_height=2.
     elif ko_mode == 'knockout_shuffle':
         track[start:end] = knockout_peaks(track[start:end], threshold=peak_height)
         track[start:end] = chunk_shuffle(track[start:end])
+    elif ko_mode == 'reverse' or ko_mode == 'reverse_motif':
+        # reverse the track
+        track[start:end] = track[start:end][::-1]
     else:
         raise ValueError('ko_mode must be either zero or mean')
     return track[:window]

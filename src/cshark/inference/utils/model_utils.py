@@ -21,6 +21,8 @@ def get_1d_track_names(model_path):
 
 def load_default(model_path, record_attn=False, 
                  num_genomic_features=2, mat_size=256,
+                 seq_filter_size=3,
+                 recon_1d=False,
                  mid_hidden=256, 
                  diploid=False,
                  model_name='ConvTransModel'):
@@ -38,6 +40,8 @@ def load_default(model_path, record_attn=False,
                               record_attn=record_attn, 
                               diploid=diploid,
                               num_target_tracks=0, 
+                              seq_filter_size=seq_filter_size,
+                              recon_1d=recon_1d,
                               predict_1d=False)
             load_checkpoint(model, model_path)
         except Exception as e:  # new C.Shark checkpoint (with 1D tracks)
@@ -50,6 +54,8 @@ def load_default(model_path, record_attn=False,
                               record_attn=record_attn, 
                               diploid=diploid,
                               num_target_tracks=num_target_tracks, 
+                              seq_filter_size=seq_filter_size,
+                              recon_1d=recon_1d,
                               predict_1d=True)
             load_checkpoint(model, model_path)
     return model
@@ -57,6 +63,8 @@ def load_default(model_path, record_attn=False,
 def get_model(model_name, mid_hidden, num_genomic_features=2, mat_size=256, 
               diploid=False,
               num_target_tracks=0, predict_1d=False,
+              seq_filter_size=3,
+              recon_1d=False,
               record_attn=False):
     ModelClass = getattr(corigami_models, model_name)
     if model_name == 'MultiTaskConvTransModel':
@@ -66,6 +74,8 @@ def get_model(model_name, mid_hidden, num_genomic_features=2, mat_size=256,
                            predict_1d=predict_1d,
                            target_mat_size=mat_size, 
                            diploid=diploid,
+                           seq_filter_size=seq_filter_size,
+                           recon_1d=recon_1d,
                            record_attn=record_attn)
     else:
         model = ModelClass(num_genomic_features, mid_hidden = mid_hidden, record_attn=record_attn)
