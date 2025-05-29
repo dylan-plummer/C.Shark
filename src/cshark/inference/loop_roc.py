@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from tqdm import tqdm
+from scipy.stats import pearsonr, spearmanr
 from cshark.preprocessing.cooler_remap import coarsen_to_uniform_bins_vectorized
 
 def sorted_nicely(l):
@@ -17,7 +18,7 @@ def sorted_nicely(l):
     return sorted(l, key=alphanum_key)
 
 
-def loop_roc(pred_c, true_c, q_cutoff=0.99, chrom_only=None):
+def loop_roc(pred_c, true_c, q_cutoff=0.995, chrom_only=None):
     genome_tprs = []
     genome_fprs = []
 
@@ -29,7 +30,23 @@ def loop_roc(pred_c, true_c, q_cutoff=0.99, chrom_only=None):
         pred_pixels = pred_c.pixels().fetch(locus)
         true_pixels = true_c.pixels().fetch(locus)
 
+        # merge and compute correlation
+        merged_pixels = pd.merge(
+            pred_pixels, true_pixels, 
+            on=['bin1_id', 'bin2_id'], 
+            suffixes=('_pred', '_true')
+        )
+        if merged_pixels.empty:
+            print(f'No pixels found for chromosome {chrom}. Skipping...')
+            continue
+        # Calculate correlation
+        corr = pearsonr(merged_pixels['count_pred'], merged_pixels['count_true'])[0]
+        print(f'Chromosome: {chrom}, Pearson correlation: {corr:.3f}')
+        corr_spearman = spearmanr(merged_pixels['count_pred'], merged_pixels['count_true'])[0]
+        print(f'Chromosome: {chrom}, Spearman correlation: {corr_spearman:.3f}')
+
         loop_cutoff = np.quantile(true_pixels['count'], q_cutoff) 
+        print(f'Chromosome: {chrom}, Loop cutoff: {loop_cutoff:.3f}')
 
         # Split true pixels once outside the loop
         true_significant = true_pixels[true_pixels['count'] > loop_cutoff]
