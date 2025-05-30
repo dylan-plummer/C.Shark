@@ -29,6 +29,7 @@ class ChromosomeDataset(Dataset):
                  target_res=10000,
                  target_mat_size=256,
                  target_1d_size=512,
+                 hic_log_transform=True,
                  use_aug = True):
         self.use_aug = use_aug
         self.res = target_res # 10kb resolution
@@ -41,6 +42,7 @@ class ChromosomeDataset(Dataset):
         self.predict_hic = predict_hic
         self.predict_1d = predict_1d
         self.target_1d_len = target_1d_size
+        self.hic_log_transform = hic_log_transform
 
         # print(f'Loading chromosome {chr_name}...')
         # print(f'Predicting Hi-C: {self.predict_hic}, Predicting 1D Tracks: {self.predict_1d}')
@@ -165,7 +167,8 @@ class ChromosomeDataset(Dataset):
         # Hi-C matrix processing
         mat = self.mat.get(start, res=self.res)
         mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
-        mat = np.log(mat + 1)
+        if self.hic_log_transform:
+            mat = np.log(mat + 1)
         # Target 1D track processing
         loaded_paths = [item.path for item in self.genomic_features]
         target_1d_tracks_out = []

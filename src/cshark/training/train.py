@@ -271,6 +271,9 @@ def init_parser():
   parser.add_argument('--no-recon', dest='recon_1d',
                         action='store_false',
                         help='Whether to reconstruct 1D tracks from full features or from sequence only')
+  parser.add_argument('--no-hic-log-transform', dest='hic_log_transform',
+                        action='store_false',
+                        help='Whether to apply log transformation to Hi-C matrices')
 
 
   args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
@@ -568,6 +571,7 @@ class TrainModule(pl.LightningModule):
                                 target_mat_size = args.mat_size,
                                 target_1d_size = args.target_1d_size,
                                 mode = mode,
+                                hic_log_transform = args.hic_log_transform,
                                 include_sequence = True,
                                 include_genomic_features = True)
 

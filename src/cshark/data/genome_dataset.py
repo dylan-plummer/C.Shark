@@ -21,6 +21,7 @@ class GenomeDataset(Dataset):
                        target_res=10000,
                        target_mat_size=256,
                        target_1d_size=512,
+                       hic_log_transform=True,
                        use_aug = True):
         self.data_root = celltype_root
         self.include_sequence = include_sequence
@@ -32,6 +33,7 @@ class GenomeDataset(Dataset):
         self.target_res = target_res
         self.target_mat_size = target_mat_size
         self.target_1d_size = target_1d_size
+        self.hic_log_transform = hic_log_transform
 
         if not self.include_sequence: print('Not using sequence!')
         if not self.include_genomic_features: print('Not using genomic features!')
@@ -131,6 +133,7 @@ class GenomeDataset(Dataset):
                                                         target_res=self.target_res,
                                                         target_mat_size=self.target_mat_size,
                                                         target_1d_size=self.target_1d_size,
+                                                        hic_log_transform=self.hic_log_transform,
                                                         use_aug=self.use_aug)
             lengths.append(len(chr_data_dict[chr_name]))
         print('Chromosome datasets loaded')
