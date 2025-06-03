@@ -7,6 +7,7 @@ import cooler
 import seaborn as sns
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from importlib.resources import files
 from skimage.transform import resize
 
 from cshark.data.data_feature import GenomicFeature, HiCFeature
@@ -76,6 +77,9 @@ def main():
     parser.add_argument('--no-recon', dest='recon_1d',
                         action='store_false',
                         help='Whether to reconstruct 1D tracks from full features or from sequence only')
+    parser.add_argument('--no-hic-log-transform', dest='hic_log_transform',
+                        action='store_false',
+                        help='Whether to apply log transformation to Hi-C matrices')
     
     parser.add_argument('--out-file', dest='out_file', 
                         help='Path to the output file if doing full chromosome prediction', required=False)
@@ -149,6 +153,8 @@ def main():
                         help='min value for color scale of diff matrix', required=False)
     parser.add_argument('--max-val-diff', dest='max_val_diff', type=float, default=0.5,
                         help='max value for color scale of diff matrix', required=False)
+    parser.add_argument('--ctcf-motif-p', dest='ctcf_motif_p', type=int, default=None,
+                        help='max p-value (transformed) to display motif (see https://jaspar2020.genereg.net/genome-tracks/)', required=False)
 
     args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
 
@@ -206,6 +212,8 @@ def main():
                     min_val_pred=args.min_val_pred, max_val_pred=args.max_val_pred, plot_diff=args.plot_diff,
                     min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff,
                     peak_height=args.peak_height,
+                    ctcf_motif_p=args.ctcf_motif_p,
+                    undo_log=args.hic_log_transform,
                     silent=args.silent)
     else:  # full chromosome prediction
         # use the step-size arg to do predictions for the whole chromosome
@@ -262,7 +270,8 @@ def main():
                 num_genomic_features -= 1
             pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                                   num_genomic_features=num_genomic_features, mat_size=image_scale, 
-                                                  mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, recon_1d=args.recon_1d)
+                                                  mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
+                                                  recon_1d=args.recon_1d, undo_log=args.hic_log_transform)
             pred_before = pred_before_output['hic']
             pred_before_1d = pred_before_output['1d']
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
@@ -270,7 +279,8 @@ def main():
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=args.peak_height)
             pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                            num_genomic_features=num_genomic_features, mat_size=image_scale, 
-                                           mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, recon_1d=args.recon_1d)
+                                           mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
+                                           recon_1d=args.recon_1d, undo_log=args.hic_log_transform)
             pred = pred_output['hic']
             pred_1d = pred_output['1d']
             write_tmp_cooler(pred, chr_name, start, res=res)
@@ -376,7 +386,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     plot_bigwigs=[], plot_pred_bigwigs=[],
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
                     min_val_diff=-0.5, max_val_diff=0.5,
-                    peak_height=2.0,
+                    peak_height=2.0, ctcf_motif_p=500,
+                    undo_log=True,
                     ctcf_log2=False, silent=False):
     os.makedirs(output_path, exist_ok=True)
     if not outname.endswith('_') and outname != '':
@@ -404,7 +415,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     # do baseline prediction for comparison
     pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                           num_genomic_features=num_genomic_features, mat_size=image_scale, 
-                                          diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, recon_1d=recon_1d)
+                                          diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
+                                          recon_1d=recon_1d, undo_log=undo_log)
     pred_before = pred_before_output['hic']
     pred_before_1d = pred_before_output['1d']
 
@@ -479,7 +491,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     # Prediction
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                    num_genomic_features=num_genomic_features, mat_size=image_scale, 
-                                   diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, recon_1d=recon_1d)
+                                   diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
+                                   recon_1d=recon_1d, undo_log=undo_log)
     pred = pred_output['hic']
     pred_1d = pred_output['1d']
 
@@ -578,8 +591,14 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     baseline_cutoff = np.quantile(pred_before, 0.99)
     cutoff = np.quantile(pred, 0.99)  
     if plot_diff:
-        diff_cutoff_gain = np.quantile(diff[diff > 0], 0.99)
-        diff_cutoff_loss = np.quantile(diff[diff < 0], 0.01)
+        if np.sum(diff > 0) == 0:
+            diff_cutoff_gain = 0.0
+        else:
+            diff_cutoff_gain = np.quantile(diff[diff > 0], 0.99)
+        if np.sum(diff < 0) == 0:
+            diff_cutoff_loss = 0.0
+        else:
+            diff_cutoff_loss = np.quantile(diff[diff < 0], 0.01)
     if plot_ground_truth:
          ground_truth_cutoff = np.quantile(mat, 0.99)
     region_start = int(region.split(':')[1].split('-')[0]) if region is not None else start
@@ -660,13 +679,18 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     if track_max is not None:
                         f.write(f'max_value = {track_max}\n')
                     f.write('number_of_bins = 512\n\n')
-                    if track_name.lower() == 'ctcf':
-                        if 'ctcf_motif.bed' in os.listdir('tmp'):
-                            f.write('[CTCF motif]\n')
-                            f.write('file = tmp/ctcf_motif.bed\n')
-                            f.write('file_type = bed\n')
-                            f.write('fontsize = 10\n')
-                            f.write('display = interleaved\n')
+                    if track_name.lower() == 'ctcf' and ctcf_motif_p is not None:
+                        #if 'ctcf_motif.bed' in os.listdir('tmp'):
+                        f.write('[CTCF motif]\n')
+                        #f.write('file = tmp/ctcf_motif.bed\n')
+                        motif_file = str(files("cshark").joinpath(f"static/ctcf_motifs_jaspar.bed"))
+                        motifs = pd.read_csv(motif_file, sep='\t', names=['chrom', 'start', 'end', 'strand', 'q'])
+                        motifs = motifs.loc[motifs['q'] > ctcf_motif_p].reset_index(drop=True)
+                        motifs.to_csv('tmp/ctcf_motif.bed', sep='\t', header=False, index=False)
+                        f.write('file = tmp/ctcf_motif.bed\n')
+                        f.write('file_type = bed\n')
+                        f.write('fontsize = 10\n')
+                        f.write('display = interleaved\n')
                     if track_name in ko_data:
                         f.write(f'[{track_name} KO]\n')
                         f.write(f'file = tmp/{track_name}_ko.bw\n')
@@ -871,7 +895,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
          print(e)
     
     try:
-        os.remove('tmp/ctcf_motif.bed')
+        os.rename('tmp/ctcf_motif.bed', 'tmp/ctcf_motifs_detected.bed')
     except Exception:
         pass
 
@@ -1163,7 +1187,6 @@ def deletion_with_padding(chr_name, start, deletion_start, deletion_width, seq_r
                 # get the index of the maximum correlation
                 max_idx = np.argmax(corrs)
                 # print the sequence at the maximum index
-                print(f'Maximum correlation at index {max_idx}')
                 ref_bases = []
                 for i in range(deletion_start - start + max_idx, deletion_start - start + max_idx + matrix.shape[0]):
                     if i < 0 or i >= len(seq_region):
@@ -1171,54 +1194,54 @@ def deletion_with_padding(chr_name, start, deletion_start, deletion_width, seq_r
                     else:
                         ref_bases.append(list(en_dict.keys())[list(en_dict.values()).index(seq_region[i].argmax())])
                 ref_bases = ''.join(ref_bases).upper()
-                print(f'Reference sequence: {ref_bases}')
                 # reverse complement the sequence
                 # motif_seq = seq_region[deletion_start - start + max_idx: deletion_start - start + max_idx + matrix.shape[0], :]
                 # rc_motif_seq = reverse_complement(motif_seq)
                 # seq_region[deletion_start - start + max_idx: deletion_start - start + max_idx + matrix.shape[0], :] = rc_motif_seq
                 # find the number of peaks that should be included based on the cumulative distribution of the correlations
                 top_n = np.sum(corrs > 0.65)
-                max_idxs = np.argsort(corrs)[-top_n:]  # Get top 20 indices
-                print(f'Maximum indices: {max_idxs}')
-                forward_motif_xs = []
-                forward_motif_ys = []
-                reverse_motif_xs = []
-                reverse_motif_ys = []
-                # display top 10 sequences
-                for i in max_idxs:
-                    ref_bases = []
-                    for j in range(deletion_start - start + i, deletion_start - start + i + matrix.shape[0]):
-                        if j < 0 or j >= len(seq_region):
-                            ref_bases.append('N')
-                        else:
-                            ref_bases.append(list(en_dict.keys())[list(en_dict.values()).index(seq_region[j].argmax())])
-                    ref_bases = ''.join(ref_bases).upper()
-                    print(f'Sequence at index {i}: {ref_bases} (corr: {corrs[i]:.3f})')
-                    if is_reverse[i]:
-                        reverse_motif_xs.append(i)
-                        reverse_motif_ys.append(corrs[i])
-                    else:
-                        forward_motif_xs.append(i)
-                        forward_motif_ys.append(corrs[i])
-
-                    # reverse complement the sequence
-                    motif_seq = seq_region[deletion_start - start + i: deletion_start - start + i + matrix.shape[0], :]
-                    rc_motif_seq = reverse_complement(motif_seq)
-                    seq_region[deletion_start - start + i: deletion_start - start + i + matrix.shape[0], :] = rc_motif_seq
-                
-                
-                fig = plt.figure(figsize=(15, 4))
-                plt.plot(corrs)
-                plt.scatter(forward_motif_xs, forward_motif_ys, color='blue', marker='>', label='Forward motif')
-                plt.scatter(reverse_motif_xs, reverse_motif_ys, color='red', marker='<', label='Reverse motif')
-                plt.savefig('tmp/ctcf_corr.png')
-                plt.close()
-
-                # write a bed file with the motif locations and directions
-                with open('tmp/ctcf_motif.bed', 'w') as f:
+                if top_n > 0:
+                    max_idxs = np.argsort(corrs)[-top_n:]  # Get top 20 indices
+                    forward_motif_xs = []
+                    forward_motif_ys = []
+                    reverse_motif_xs = []
+                    reverse_motif_ys = []
+                    # display top 10 sequences
                     for i in max_idxs:
-                        f.write(f'{chr_name}\t{deletion_start + i}\t{deletion_start + i + matrix.shape[0]}\t{"<" if is_reverse[i] else ">"}\t{corrs[i]:.3f}\n')
+                        ref_bases = []
+                        for j in range(deletion_start - start + i, deletion_start - start + i + matrix.shape[0]):
+                            if j < 0 or j >= len(seq_region):
+                                ref_bases.append('N')
+                            else:
+                                ref_bases.append(list(en_dict.keys())[list(en_dict.values()).index(seq_region[j].argmax())])
+                        ref_bases = ''.join(ref_bases).upper()
+                        print(f'{chr_name}:{deletion_start + i} - {ref_bases} {"<" if is_reverse[i] else ">"} (corr: {corrs[i]:.3f})')
+                        if is_reverse[i]:
+                            reverse_motif_xs.append(i)
+                            reverse_motif_ys.append(corrs[i])
+                        else:
+                            forward_motif_xs.append(i)
+                            forward_motif_ys.append(corrs[i])
+
+                        # reverse complement the sequence
+                        motif_seq = seq_region[deletion_start - start + i: deletion_start - start + i + matrix.shape[0], :]
+                        rc_motif_seq = reverse_complement(motif_seq)
+                        seq_region[deletion_start - start + i: deletion_start - start + i + matrix.shape[0], :] = rc_motif_seq
             
+                    fig = plt.figure(figsize=(15, 4))
+                    plt.plot(corrs)
+                    plt.scatter(forward_motif_xs, forward_motif_ys, color='blue', marker='>', label='Forward motif')
+                    plt.scatter(reverse_motif_xs, reverse_motif_ys, color='red', marker='<', label='Reverse motif')
+                    plt.savefig('tmp/ctcf_corr.png')
+                    plt.close()
+
+                    # write a bed file with the motif locations and directions
+                    with open('tmp/ctcf_motif.bed', 'w') as f:
+                        for i in max_idxs:
+                            f.write(f'{chr_name}\t{deletion_start + i}\t{deletion_start + i + matrix.shape[0]}\t{"<" if is_reverse[i] else ">"}\t{corrs[i]:.3f}\n')
+                else:
+                    print('No motifs found with correlation > 0.65') 
+
         elif other_regions is not None:
             original = other_regions[channel_idx - channel_offset].copy()
             other_regions[channel_idx - channel_offset] = track_ko(deletion_start - start,

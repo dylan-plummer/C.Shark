@@ -99,8 +99,10 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor
         post_values = signal_array[post_start:post_end]
         
         # Handle empty regions
-        pre_mean = np.quantile(pre_values, q=background_q) if len(pre_values) > 0 else 0.0
-        post_mean = np.quantile(post_values, q=background_q) if len(post_values) > 0 else 0.0
+        # pre_mean = np.quantile(pre_values, q=background_q) if len(pre_values) > 0 else 0.0
+        # post_mean = np.quantile(post_values, q=background_q) if len(post_values) > 0 else 0.0
+        pre_mean = np.mean(pre_values) if len(pre_values) > 0 else 0.0
+        post_mean = np.mean(post_values) if len(post_values) > 0 else 0.0
         
         # Calculate background value as average of pre and post regions
         background_val = (pre_mean + post_mean) / 2.0
@@ -209,6 +211,11 @@ def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_star
         sub_values = log_values[deletion_index_start:deletion_index_end]
         sub_output = knockout_peaks(sub_values, threshold=peak_height)
         sub_output = chunk_shuffle(sub_output)
+        ko_peaks[deletion_index_start:deletion_index_end] = sub_output
+    
+    if ko_mode == 'reverse' or ko_mode == 'reverse_motif':
+        sub_values = log_values[deletion_index_start:deletion_index_end]
+        sub_output = np.flip(sub_values)
         ko_peaks[deletion_index_start:deletion_index_end] = sub_output
     
     ko_peaks = np.exp(ko_peaks) - 1 
