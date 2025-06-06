@@ -6,7 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-def normalize_bigwig(bw, out_bw, q=0.9995):
+def normalize_bigwig(bw, out_bw, q=0.9995, max_val=10):
     # Open the bigWig file
     bw = pyBigWig.open(bw, 'r')
     # Create a new bigWig file for output
@@ -26,6 +26,7 @@ def normalize_bigwig(bw, out_bw, q=0.9995):
         normalized_data = data / np.quantile(data[data != 0], q=q)
         normalized_data = np.clip(normalized_data, 0, 1)
         normalized_data = np.nan_to_num(normalized_data)
+        normalized_data = normalized_data * max_val
         # Write the normalized data to the new bigWig file
         out_bw.addEntries(chrom, 0, ends=bw.chroms()[chrom], values=normalized_data, span=1, step=1)
     # Close the bigWig files
@@ -36,9 +37,11 @@ def normalize_bigwig(bw, out_bw, q=0.9995):
 if __name__ == "__main__":
     in_bw = sys.argv[1]
     out_bw = sys.argv[2]
+    if len(sys.argv) > 3:
+        max_val = float(sys.argv[3])
     if not os.path.exists(in_bw):
         print(f"Input bigWig file {in_bw} does not exist.")
         sys.exit(1)
 
-    normalize_bigwig(in_bw, out_bw)
+    normalize_bigwig(in_bw, out_bw, max_val=max_val)
     print(f"Normalized bigWig file saved to {out_bw}.")
