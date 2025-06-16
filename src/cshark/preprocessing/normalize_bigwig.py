@@ -20,9 +20,15 @@ def normalize_bigwig(bw, out_bw, q=0.9995, max_val=10):
     for chrom in tqdm(chroms):
         # Get the data for the chromosome
         data = bw.values(chrom, 0, bw.chroms()[chrom])
-        
-        # Rank-normalize the data
         data = np.nan_to_num(data)
+
+        # Skip the chromosomes with all zero values
+        nonzero_data = data[data != 0]
+        if len(nonzero_data) == 0:
+            print(f"[Skipped] {chrom}: all values are zero")
+            continue
+
+        # Rank-normalize the data
         normalized_data = data / np.quantile(data[data != 0], q=q)
         normalized_data = np.clip(normalized_data, 0, 1)
         normalized_data = np.nan_to_num(normalized_data)
