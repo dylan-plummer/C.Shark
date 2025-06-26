@@ -383,7 +383,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     model_path, seq_path, ctcf_path, atac_path, other_feats, 
                     seq2_path=None,
                     ko_data=['ctcf'], ko_mode=['zero'], region=None, mid_hidden=256, seq_filter_size=3, recon_1d=True,
-                    plot_bigwigs=[], plot_pred_bigwigs=[],
+                    plot_bigwigs=[], plot_pred_bigwigs=[], plot_pred_log2fc=False,
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
                     min_val_diff=-0.5, max_val_diff=0.5,
                     peak_height=2.0, ctcf_motif_p=500,
@@ -447,6 +447,10 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     plot_track_paths = []
     for plot_track in plot_bigwigs:
         if plot_track not in input_track_names:  # only plot additional tracks
+            plot_track_names.append(plot_track)
+            plot_track_paths.append(input_track_paths[0].replace(input_track_names[0], plot_track))
+    for plot_track in plot_pred_bigwigs:
+        if plot_track not in input_track_names and plot_track not in plot_track_names:  # only plot additional tracks
             plot_track_names.append(plot_track)
             plot_track_paths.append(input_track_paths[0].replace(input_track_names[0], plot_track))
     # get indices of the input tracks for KO
@@ -528,9 +532,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{track_name}_log2fc.png'), dpi=300)
         plt.close(fig)
 
-        # write bigwig files for pred
-        write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred_before, track_name, chr_name, start, suffix='pred_WT')
-        write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred, track_name, chr_name, start, suffix='pred_KO')
+        if track_name in plot_track_names or track_name in input_track_names:
+            # write bigwig files for pred
+            write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred_before, track_name, chr_name, start, suffix='pred_WT')
+            if plot_pred_log2fc:
+                ctcf_log2fc = np.clip(ctcf_log2fc, -1, 1)  # clip to avoid extreme values
+                #ctcf_log2fc[(ctcf_pred_before < 0.2) | (ctcf_pred < 0.2)] = 0  # set to zero if original signal is low
+                write_tmp_pred_bigwig(input_track_paths[0], ctcf_log2fc, track_name, chr_name, start, suffix='pred_KO')
+            else:
+                write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred, track_name, chr_name, start, suffix='pred_KO')
 
     plot_ground_truth = False
     try:    
@@ -669,47 +679,56 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 # write additional tracks for each input track
                 for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                     track_name = os.path.basename(track_path).split('.')[0]
-                    f.write(f'[{track_name}]\n')
-                    f.write(f'file = {track_path}\n')
-                    f.write('height = 2\n')
-                    f.write(f'color = {colors[track_i]}\n')
-                    f.write(f'title = {track_name}\n')
-                    f.write('min_value = 0\n')
-                    track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                    if track_max is not None:
-                        f.write(f'max_value = {track_max}\n')
-                    f.write('number_of_bins = 512\n\n')
-                    if track_name.lower() == 'ctcf' and ctcf_motif_p is not None:
-                        #if 'ctcf_motif.bed' in os.listdir('tmp'):
-                        f.write('[CTCF motif]\n')
-                        #f.write('file = tmp/ctcf_motif.bed\n')
-                        motif_file = str(files("cshark").joinpath(f"static/ctcf_motifs_jaspar.bed"))
-                        motifs = pd.read_csv(motif_file, sep='\t', names=['chrom', 'start', 'end', 'strand', 'q'])
-                        motifs = motifs.loc[motifs['q'] > ctcf_motif_p].reset_index(drop=True)
-                        motifs.to_csv('tmp/ctcf_motif.bed', sep='\t', header=False, index=False)
-                        f.write('file = tmp/ctcf_motif.bed\n')
-                        f.write('file_type = bed\n')
-                        f.write('fontsize = 10\n')
-                        f.write('display = interleaved\n')
-                    if track_name in ko_data:
-                        f.write(f'[{track_name} KO]\n')
-                        f.write(f'file = tmp/{track_name}_ko.bw\n')
+                    track_max = None
+                    if os.path.exists(track_path):
+                        f.write(f'[{track_name}]\n')
+                        f.write(f'file = {track_path}\n')
                         f.write('height = 2\n')
                         f.write(f'color = {colors[track_i]}\n')
-                        f.write(f'title = {track_name} KO\n')
+                        f.write(f'title = {track_name}\n')
                         f.write('min_value = 0\n')
+                        track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
                         if track_max is not None:
                             f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
+                        if track_name.lower() == 'ctcf' and ctcf_motif_p is not None:
+                            #if 'ctcf_motif.bed' in os.listdir('tmp'):
+                            f.write('[CTCF motif]\n')
+                            #f.write('file = tmp/ctcf_motif.bed\n')
+                            motif_file = str(files("cshark").joinpath(f"static/ctcf_motifs_jaspar.bed"))
+                            motifs = pd.read_csv(motif_file, sep='\t', names=['chrom', 'start', 'end', 'strand', 'q'])
+                            motifs = motifs.loc[motifs['q'] > ctcf_motif_p].reset_index(drop=True)
+                            motifs.to_csv('tmp/ctcf_motif.bed', sep='\t', header=False, index=False)
+                            f.write('file = tmp/ctcf_motif.bed\n')
+                            f.write('file_type = bed\n')
+                            f.write('fontsize = 10\n')
+                            f.write('display = interleaved\n')
+                        if track_name in ko_data:
+                            f.write(f'[{track_name} KO]\n')
+                            f.write(f'file = tmp/{track_name}_ko.bw\n')
+                            f.write('height = 2\n')
+                            f.write(f'color = {colors[track_i]}\n')
+                            f.write(f'title = {track_name} KO\n')
+                            f.write('min_value = 0\n')
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
+                            f.write('number_of_bins = 512\n\n')
                     if track_name in plot_pred_bigwigs:
                         f.write(f'[{track_name} pred]\n')
                         f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
                         f.write('height = 2\n')
-                        f.write(f'color = {colors[track_i]}\n')
-                        f.write(f'title = {track_name} pred KO\n')
-                        f.write('min_value = 0\n')
-                        if track_max is not None:
-                            f.write(f'max_value = {track_max}\n')
+                        if plot_pred_log2fc:
+                            f.write(f'title = {track_name} log2FC\n')
+                            f.write(f'color = red\n')
+                            f.write('negative_color = blue\n')
+                            f.write('min_value = -1\n')
+                            f.write('max_value = 1\n')
+                        else:
+                            f.write(f'title = {track_name} pred KO\n')
+                            f.write(f'color = {colors[track_i]}\n')
+                            f.write('min_value = 0\n')
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
 
                 f.write('[KO pred]\n')
@@ -744,13 +763,17 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         # write additional tracks for each input track
                         for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                             track_name = os.path.basename(track_path).split('.')[0]
+                            try:
+                                track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                            except Exception as e:
+                                print(f'Error getting axis range for {track_path}: {e}')
+                                continue
                             f.write(f'[{track_name}]\n')
                             f.write(f'file = {track_path}\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
                             f.write(f'title = {track_name}\n')
                             f.write('min_value = 0\n')
-                            track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
@@ -773,16 +796,18 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     # write additional tracks for each input track
                     for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                         track_name = os.path.basename(track_path).split('.')[0]
-                        f.write(f'[{track_name}]\n')
-                        f.write(f'file = {track_path}\n')
-                        f.write('height = 2\n')
-                        f.write(f'color = {colors[track_i]}\n')
-                        f.write(f'title = {track_name}\n')
-                        f.write('min_value = 0\n')
-                        track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                        if track_max is not None:
-                            f.write(f'max_value = {track_max}\n')
-                        f.write('number_of_bins = 512\n\n')
+                        track_max = None
+                        if os.path.exists(track_path):
+                            f.write(f'[{track_name}]\n')
+                            f.write(f'file = {track_path}\n')
+                            f.write('height = 2\n')
+                            f.write(f'color = {colors[track_i]}\n')
+                            f.write(f'title = {track_name}\n')
+                            f.write('min_value = 0\n')
+                            track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
+                            f.write('number_of_bins = 512\n\n')
                         if track_name in plot_pred_bigwigs:
                             #track_max = get_axis_range_from_bigwig(f'tmp/{track_name}_pred_WT.bw', chr_name, start)
                             f.write(f'[{track_name} pred]\n')
@@ -825,35 +850,44 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     if '[Genes]' in line:
                         for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                             track_name = os.path.basename(track_path).split('.')[0]
-                            f.write(f'[{track_name}]\n')
-                            f.write(f'file = {track_path}\n')
-                            f.write('height = 2\n')
-                            f.write(f'color = {colors[track_i]}\n')
-                            f.write(f'title = {track_name}\n')
-                            f.write('min_value = 0\n')
-                            track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
-                            if track_max is not None:
-                                f.write(f'max_value = {track_max}\n')
-                            f.write('number_of_bins = 512\n\n')
-                            if track_name in ko_data:
-                                f.write(f'[{track_name} KO]\n')
-                                f.write(f'file = tmp/{track_name}_ko.bw\n')
+                            track_max = None
+                            if os.path.exists(track_path):
+                                f.write(f'[{track_name}]\n')
+                                f.write(f'file = {track_path}\n')
                                 f.write('height = 2\n')
                                 f.write(f'color = {colors[track_i]}\n')
-                                f.write(f'title = {track_name} KO\n')
+                                f.write(f'title = {track_name}\n')
                                 f.write('min_value = 0\n')
+                                track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
                                 if track_max is not None:
                                     f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
+                                if track_name in ko_data:
+                                    f.write(f'[{track_name} KO]\n')
+                                    f.write(f'file = tmp/{track_name}_ko.bw\n')
+                                    f.write('height = 2\n')
+                                    f.write(f'color = {colors[track_i]}\n')
+                                    f.write(f'title = {track_name} KO\n')
+                                    f.write('min_value = 0\n')
+                                    if track_max is not None:
+                                        f.write(f'max_value = {track_max}\n')
+                                    f.write('number_of_bins = 512\n\n')
                             if track_name in plot_pred_bigwigs:
                                 f.write(f'[{track_name} pred]\n')
                                 f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
                                 f.write('height = 2\n')
-                                f.write(f'color = {colors[track_i]}\n')
-                                f.write(f'title = {track_name} pred KO\n')
-                                f.write('min_value = 0\n')
-                                if track_max is not None:
-                                    f.write(f'max_value = {track_max}\n')
+                                if plot_pred_log2fc:
+                                    f.write(f'title = {track_name} log2FC\n')
+                                    f.write(f'color = red\n')
+                                    f.write('negative_color = blue\n')
+                                    f.write('min_value = -1\n')
+                                    f.write('max_value = 1\n')
+                                else:
+                                    f.write(f'title = {track_name} pred KO\n')
+                                    f.write(f'color = {colors[track_i]}\n')
+                                    f.write('min_value = 0\n')
+                                    if track_max is not None:
+                                        f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
                  
                         # add the ground truth hic matrix

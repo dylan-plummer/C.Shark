@@ -45,25 +45,46 @@ def load_default(model_path, record_attn=False,
                               predict_1d=False)
             load_checkpoint(model, model_path)
         except Exception as e:  # new C.Shark checkpoint (with 1D tracks)
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-            num_target_tracks = len(checkpoint['hyper_parameters']['output_features'])
-            model = get_model('MultiTaskConvTransModel', mid_hidden, 
-                              num_genomic_features=num_genomic_features, 
-                              mat_size=mat_size,
-                              record_attn=record_attn, 
-                              diploid=diploid,
-                              num_target_tracks=num_target_tracks, 
-                              seq_filter_size=seq_filter_size,
-                              recon_1d=recon_1d,
-                              predict_1d=True)
-            load_checkpoint(model, model_path)
+            try:
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+                num_target_tracks = len(checkpoint['hyper_parameters']['output_features'])
+                model = get_model('MultiTaskConvTransModel', mid_hidden, 
+                                num_genomic_features=num_genomic_features, 
+                                mat_size=mat_size,
+                                record_attn=record_attn, 
+                                diploid=diploid,
+                                num_target_tracks=num_target_tracks, 
+                                seq_filter_size=seq_filter_size,
+                                recon_1d=recon_1d,
+                                predict_1d=True)
+                load_checkpoint(model, model_path)
+            except Exception as e:  # fallback to older 1D track model
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+                num_target_tracks = len(checkpoint['hyper_parameters']['output_features'])
+                model = get_model('MultiTaskConvTransModelOld', mid_hidden, 
+                                num_genomic_features=num_genomic_features, 
+                                mat_size=mat_size,
+                                record_attn=record_attn, 
+                                diploid=diploid,
+                                num_target_tracks=num_target_tracks, 
+                                seq_filter_size=seq_filter_size,
+                                epi_filter_size=3,
+                                target_1d_length=2048,
+                                recon_1d=recon_1d,
+                                predict_1d=True)
+                #print(model)
+                load_checkpoint(model, model_path)
     return model
 
 def get_model(model_name, mid_hidden, num_genomic_features=2, mat_size=256, 
               diploid=False,
               num_target_tracks=0, predict_1d=False,
               seq_filter_size=3,
+              epi_filter_size=5,
+              use_seq_attn=True,
+              target_1d_length=8192,
               recon_1d=False,
               record_attn=False):
     ModelClass = getattr(corigami_models, model_name)
@@ -75,6 +96,21 @@ def get_model(model_name, mid_hidden, num_genomic_features=2, mat_size=256,
                            target_mat_size=mat_size, 
                            diploid=diploid,
                            seq_filter_size=seq_filter_size,
+                           epi_filter_size=epi_filter_size,
+                           use_seq_attn=use_seq_attn,
+                           target_1d_length=target_1d_length,
+                           recon_1d=recon_1d,
+                           record_attn=record_attn)
+    elif model_name == 'MultiTaskConvTransModelOld':
+        model = ModelClass(num_genomic_features, 
+                           num_target_tracks=num_target_tracks, 
+                           mid_hidden=mid_hidden, 
+                           predict_1d=predict_1d,
+                           target_mat_size=mat_size, 
+                           diploid=diploid,
+                           seq_filter_size=seq_filter_size,
+                           epi_filter_size=epi_filter_size,
+                           target_1d_length=target_1d_length,
                            recon_1d=recon_1d,
                            record_attn=record_attn)
     else:

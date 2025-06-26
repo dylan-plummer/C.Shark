@@ -60,6 +60,7 @@ class Encoder(nn.Module):
 
 class EncoderSplit(Encoder):
     def __init__(self, num_epi, hidden = 256, output_size = 256, filter_size = 5, num_blocks = 12, num_bases=5,
+                 epi_filter_size=5,
                  seq_filter_size=3):
         super(Encoder, self).__init__()
         self.num_epi = num_epi
@@ -72,7 +73,7 @@ class EncoderSplit(Encoder):
                                     )
         if num_epi > 0:
             self.conv_start_epi = nn.Sequential(
-                                        nn.Conv1d(num_epi, 16, 3, 2, 1),
+                                        nn.Conv1d(num_epi, 16, epi_filter_size, 2, 1),
                                         nn.BatchNorm1d(16),
                                         nn.ReLU(),
                                         )
