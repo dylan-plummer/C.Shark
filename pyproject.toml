@@ -37,7 +37,7 @@ Homepage = 'https://github.com/dylan-plummer/C.Shark'
 Repository = 'https://github.com/dylan-plummer/C.Shark'
 
 [project.scripts]
-cshark-perturb = 'corigami.inference.perturb:main'
+cshark-perturb = 'cshark.inference.perturb:main'
 
 [tool.setuptools.package-data]
 cshark = ["static/*.bed"]
