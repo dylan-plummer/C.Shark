@@ -1294,6 +1294,12 @@ def track_ko(start, end, track, window = 2097152, ko_mode='zero', peak_height=2.
         track[start:end] = mean
     elif ko_mode == 'knockout':
         track[start:end] = knockout_peaks(track[start:end], threshold=peak_height)
+    elif 'increase' in ko_mode:
+        # increase the peak signal by some factor
+        if '_' not in ko_mode:
+            increase_factor = 2.0
+        increase_factor = float(ko_mode.split('_')[1])
+        track[start:end] = knockout_peaks(track[start:end], threshold=peak_height, increase_factor=increase_factor)
     elif ko_mode == 'shuffle':
         #track[start:end] = knockout_peaks(track[start:end])
         track[start:end] = chunk_shuffle(track[start:end])

@@ -36,7 +36,7 @@ def write_tmp_cooler(pred, chr_name, start, res=8192, window=2097152, out_file='
     cooler.create_cooler(out_file, bins, pixels, dtypes={'count': np.float32})
 
 
-def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor=3.0, background_q=0.1):
+def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor=3.0, background_q=0.1, increase_factor=None):
     """
     Simulates knockout of peaks in a signal array by replacing peak regions with background values.
     
@@ -109,9 +109,13 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor
 
         background_val = min(background_val, 1.0)  # Cap background value to 1.0
         
-        # Replace peak with background value
-        result[peak_start:peak_end] = background_val
-        #result[peak_start:peak_end] = 1
+        if increase_factor is not None:
+            # Increase peak value by the specified factor
+            result[peak_start:peak_end] = signal_array[peak_start:peak_end] * increase_factor
+        else:
+            # Replace peak with background value
+            result[peak_start:peak_end] = background_val
+            #result[peak_start:peak_end] = 1
     
     return result
 
@@ -197,6 +201,14 @@ def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_star
     if ko_mode == 'knockout':
         sub_values = log_values[deletion_index_start:deletion_index_end]
         sub_output = knockout_peaks(sub_values, threshold=peak_height)
+        ko_peaks[deletion_index_start:deletion_index_end] = sub_output
+
+    if 'increase' in ko_mode:
+        if '_' not in ko_mode:
+            increase_factor = 2.0
+        increase_factor = float(ko_mode.split('_')[1])
+        sub_values = log_values[deletion_index_start:deletion_index_end]
+        sub_output = knockout_peaks(sub_values, threshold=peak_height, increase_factor=increase_factor)
         ko_peaks[deletion_index_start:deletion_index_end] = sub_output
     
     if ko_mode == 'zero': 
