@@ -41,7 +41,9 @@ if __name__ == "__main__":
                 os.path.join(query_directory, chrom_file),
                 sep='\t')
             print(query_data.head())
-            reference_data = ref_cooler.pixels().fetch(chrom_name)['count'].values  
+            chrom = chrom_name.split('_')[0]
+            reference_data = ref_cooler.pixels().fetch(chrom)['count'].values
+            # reference_data = ref_cooler.pixels().fetch(chrom_name)['count'].values  
             
             # Normalize each row in the query data
             normalized_wt = quantile_normalize(
