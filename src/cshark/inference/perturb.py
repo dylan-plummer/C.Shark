@@ -1298,8 +1298,19 @@ def track_ko(start, end, track, window = 2097152, ko_mode='zero', peak_height=2.
         # increase the peak signal by some factor
         if '_' not in ko_mode:
             increase_factor = 2.0
-        increase_factor = float(ko_mode.split('_')[1])
+        else:
+            increase_factor = float(ko_mode.split('_')[1])
         track[start:end] = knockout_peaks(track[start:end], threshold=peak_height, increase_factor=increase_factor)
+    elif 'cluster' in ko_mode:
+        # add a cluster of peaks in the region
+        if '_' not in ko_mode:
+            cluster_ratio = 0.05
+        else:
+            cluster_ratio = float(ko_mode.split('_')[1])
+        cluster_indices = np.random.choice(np.arange(start, end), size=int((end - start) * cluster_ratio), replace=False)
+        for idx in cluster_indices:
+            # add a peak at idx
+            track[idx] = np.random.uniform(1, 5)
     elif ko_mode == 'shuffle':
         #track[start:end] = knockout_peaks(track[start:end])
         track[start:end] = chunk_shuffle(track[start:end])

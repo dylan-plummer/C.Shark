@@ -210,6 +210,18 @@ def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_star
         sub_values = log_values[deletion_index_start:deletion_index_end]
         sub_output = knockout_peaks(sub_values, threshold=peak_height, increase_factor=increase_factor)
         ko_peaks[deletion_index_start:deletion_index_end] = sub_output
+
+    if 'cluster' in ko_mode:
+        # add a cluster of peaks in the region
+        if '_' not in ko_mode:
+            cluster_ratio = 0.05
+        else:
+            cluster_ratio = float(ko_mode.split('_')[1])
+        cluster_indices = np.random.choice(np.arange(deletion_index_start, deletion_index_end), size=int((deletion_index_end - deletion_index_start) * cluster_ratio), replace=False)
+        for idx in cluster_indices:
+            # add a peak at idx
+            ko_peaks[idx] = np.random.uniform(1, 5)
+
     
     if ko_mode == 'zero': 
         ko_peaks[deletion_index_start:deletion_index_end] = 0
