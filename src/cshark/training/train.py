@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 import wandb
 import torch
 import argparse
@@ -9,6 +10,7 @@ import lightning as pl
 import lightning.pytorch.callbacks as callbacks
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers.wandb import WandbLogger
+from lightning.pytorch.utilities import grad_norm
 
 from skimage.transform import resize
 
@@ -257,7 +259,7 @@ def init_parser():
                       help='Resolution (bp) of output Hi-C matrix')
   parser.add_argument('--matrix-size', dest='mat_size', type=int, default=256,
                       help='Size of output Hi-C matrix')
-  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=2048,
+  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=16384,
                       help='Size of output 1d track')
   parser.add_argument('--latent-dim', dest='model_latent_dim', type=int, default=256,
                       help='Latent dimension size (mid_hidden)')
@@ -274,6 +276,7 @@ def init_parser():
   parser.add_argument('--no-hic-log-transform', dest='hic_log_transform',
                         action='store_false',
                         help='Whether to apply log transformation to Hi-C matrices')
+  
 
 
   args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
@@ -491,6 +494,11 @@ class TrainModule(pl.LightningModule):
             for i, feature in enumerate(self.hparams.output_features):
                 track_loss = loss_1d[:, i].mean()
                 self.log(f'val_loss_1d_{feature}', track_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+                # Calculate correlation for each 1D track
+                pred_track = torch.clamp(torch.exp(pred_1d[..., i]) - 1, min=0)  # inverse log transformation
+                target_track = torch.clamp(torch.exp(target_1d_tracks[..., i]) - 1, min=0)
+                corr = torch.corrcoef(torch.stack([pred_track.flatten(), target_track.flatten()]))[0, 1]
+                self.log(f'val_corr_1d_{feature}', corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             # Mask out the 0 values in the target_1d_tracks
             mask = target_1d_tracks != 0
             loss_1d = (loss_1d * mask).sum() / mask.sum()
@@ -515,10 +523,11 @@ class TrainModule(pl.LightningModule):
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
             loss_1d = torch.nn.functional.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
-            # log each 1D track loss separately
+            # log each 1D track loss separately and measure correlation
             for i, feature in enumerate(self.hparams.output_features):
                 track_loss = loss_1d[:, i].mean()
                 self.log(f'test_loss_1d_{feature}', track_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+     
             # Mask out the 0 values in the target_1d_tracks
             mask = target_1d_tracks != 0
             loss_1d = (loss_1d * mask).sum() / mask.sum()
@@ -531,9 +540,9 @@ class TrainModule(pl.LightningModule):
         return total_loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), 
+        optimizer = torch.optim.AdamW(self.parameters(), 
                                      lr = 2e-4,
-                                     weight_decay = 0)
+                                     weight_decay = 1e-6)
 
         import pl_bolts
         scheduler = pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
@@ -547,6 +556,12 @@ class TrainModule(pl.LightningModule):
             'name': 'WarmupCosineAnnealing',
         }
         return {'optimizer' : optimizer, 'lr_scheduler' : scheduler_config}
+    
+    def on_before_optimizer_step(self, optimizer):
+        # Compute the 2-norm for each layer
+        # If using mixed precision, the gradients are already unscaled here
+        norms = grad_norm(self.model, norm_type=2)
+        self.log_dict(norms)
 
     def get_dataset(self, args, mode, celltype):
 

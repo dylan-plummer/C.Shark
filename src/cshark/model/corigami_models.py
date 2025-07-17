@@ -73,7 +73,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         if self.predict_1d:
             #print(f"1D Decoder using latent dim={mid_hidden}{target_1d_length}")
             # number of upsamples to go from 256 to target_1d_length
-            num_upsample_blocks = int(math.log2(target_1d_length // 512)) # Number of upsample blocks based on target length
+            num_upsample_blocks = int(math.log2(target_1d_length // target_mat_size)) # Number of upsample blocks based on target length
             if self.recon_1d:
                 self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks,
                                                 num_upsample_blocks=num_upsample_blocks,
