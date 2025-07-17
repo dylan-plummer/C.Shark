@@ -5,6 +5,170 @@ import torch.nn as nn
 import cshark.model.blocks as blocks
 
 
+class CSharkUniversalModel(nn.Module):
+    """
+    A flexible, general-purpose model for genomic track prediction, aligned
+    with the original C.Shark architectural patterns.
+
+    This model accepts a variable set of input tracks (as a dictionary) and can
+    be asked to predict any set of output tracks, enabling true de novo prediction
+    for in-silico experiments.
+
+    Architecture:
+    1.  **Modal-Embedders**: Each input track (sequence, CTCF, etc.) is passed
+        through its own dedicated CNN embedder (`blocks.Encoder`). This creates
+        a latent representation for each modality.
+    2.  **Modality-Tagging**: A unique, learnable "modality embedding" is added
+        to each track's latent representation to identify its origin.
+    3.  **Universal Transformer Encoder**: All tagged latent sequences are
+        concatenated along the length dimension and processed by a single,
+        powerful Transformer encoder. This creates a deeply contextualized
+        "universal embedding" that captures all intra- and inter-track relationships.
+    4.  **Aggregation & Decoding**:
+        - The universal embedding is aggregated (by averaging) across all input
+          modalities to create a single, fused latent representation.
+        - This fused embedding is used by all decoders.
+        - The Hi-C head uses the existing `diagonalize` and `Decoder2D` blocks.
+        - The 1D track heads use the existing `Decoder1D` block, which performs
+          the necessary upsampling to match `target_1d_length`.
+    """
+    def __init__(self, all_track_names: list,
+                 transformer_hidden_dim=32,
+                 num_transformer_layers=4,
+                 target_mat_size=256,
+                 target_1d_length=8192,
+                 diploid=False,
+                 predict_hic=True,
+                 record_attn=False,
+                 **kwargs):
+        super().__init__()
+        self.all_track_names = all_track_names
+        self.transformer_hidden_dim = transformer_hidden_dim
+        self.predict_hic = predict_hic
+        self.record_attn = record_attn
+
+        # --- 1. Modal Embedders ---
+        embedder_blocks = 11 if target_mat_size == 512 else 12
+
+        # Sequence Embedder (handles diploid case)
+        self.seq_embedder = blocks.Encoder(
+            in_channel=10 if diploid else 5,
+            output_size=transformer_hidden_dim,
+            num_blocks=embedder_blocks
+        )
+
+        # A dictionary of embedders for each possible 1D track
+        self.track_embedders = nn.ModuleDict({
+            name: blocks.Encoder(in_channel=1, output_size=transformer_hidden_dim, num_blocks=embedder_blocks)
+            for name in all_track_names
+        })
+
+        # --- 2. Modality-Tagging and Universal Encoder ---
+        self.modality_embeddings = nn.Parameter(torch.randn(1 + len(all_track_names), transformer_hidden_dim))
+        self.pos_encoder = blocks.PositionalEncoding(transformer_hidden_dim, max_len=2048)
+        encoder_layers = blocks.TransformerLayer(transformer_hidden_dim, nhead=4, dropout=0.1,
+                                                 dim_feedforward=32, batch_first=True)
+        self.transformer_encoder = blocks.TransformerEncoder(encoder_layers,
+                                                             num_layers=num_transformer_layers,
+                                                             record_attn=record_attn)
+
+        # --- 3. Decoders (Prediction Heads) ---
+        if self.predict_hic:
+            self.decoder_2d = blocks.Decoder2D(transformer_hidden_dim * 2)
+
+        # 1D decoders using your upsampling `Decoder1D` block
+        num_upsample_blocks = int(math.log2(target_1d_length // target_mat_size))
+        self.decoder_1d_heads = nn.ModuleDict({
+            name: blocks.Decoder1D(
+                num_target_tracks=1,
+                latent_dim=transformer_hidden_dim,
+                target_length=target_1d_length,
+                num_upsample_blocks=num_upsample_blocks
+            ) for name in all_track_names
+        })
+
+    def forward(self, input_dict: dict, predict_tracks: list):
+        """
+        Args:
+            input_dict (dict): Keys are track names (e.g., 'seq', 'ctcf'),
+                               values are tensors. 'seq' is [B, C_seq, L],
+                               other tracks are [B, 1, L].
+            predict_tracks (list): List of track names to predict, e.g., ['hic', 'atac'].
+        """
+        all_embeddings = []
+        embedding_segments = {}
+        track_name_map = {name: i + 1 for i, name in enumerate(self.all_track_names)}
+
+        # Process sequence
+        if 'seq' in input_dict:
+            seq_in = self.move_feature_forward(input_dict['seq']).float()  # Ensure input is float
+            seq_latent = self.seq_embedder(seq_in).transpose(1, 2)
+            seq_embed = seq_latent + self.modality_embeddings[0]
+            all_embeddings.append(seq_embed)
+            embedding_segments['seq'] = seq_embed
+
+        # Process other 1D tracks
+        for name, tensor in input_dict.items():
+            if name == 'seq':
+                continue
+            track_latent = self.track_embedders[name](self.move_feature_forward(tensor).float()).transpose(1, 2)
+            track_embed = track_latent + self.modality_embeddings[track_name_map[name]]
+            all_embeddings.append(track_embed)
+            embedding_segments[name] = track_embed
+
+        # Create single sequence for the Universal Transformer
+        full_sequence = torch.cat(all_embeddings, dim=1)
+        full_sequence = self.pos_encoder(full_sequence)
+
+        transformer_output = self.transformer_encoder(full_sequence)
+        universal_embedding = transformer_output[0] if self.record_attn else transformer_output
+        attn_weights = transformer_output[1] if self.record_attn else None
+
+        # --- Aggregation and Decoding ---
+        outputs = {'1d': {}, 'hic': None, 'attn_weights': attn_weights}
+
+        # Reconstruct the different parts of the universal embedding to aggregate them
+        current_pos = 0
+        reconstructed_segments = []
+        for name in embedding_segments.keys():
+            segment_len = embedding_segments[name].shape[1]
+            reconstructed_segments.append(universal_embedding[:, current_pos:current_pos + segment_len, :])
+            current_pos += segment_len
+        
+        # Aggregate (average) across modalities to get a single fused latent representation
+        stacked_segments = torch.stack(reconstructed_segments, dim=1)
+        aggregated_latent = torch.mean(stacked_segments, dim=1) # Shape: [B, L', D]
+
+        # Use the single aggregated embedding for all decoders
+        latent_for_decoding = aggregated_latent.transpose(1, 2) # Shape: [B, D, L']
+
+        if self.predict_hic and 'hic' in predict_tracks:
+            diag_input = self.diagonalize(latent_for_decoding)
+            outputs['hic'] = self.decoder_2d(diag_input).squeeze(1)
+
+        # Predict all requested 1D tracks
+        for track_name in predict_tracks:
+            if track_name in self.decoder_1d_heads:
+                # The Decoder1D block handles upsampling from L' to target_1d_length
+                pred_1d = self.decoder_1d_heads[track_name](latent_for_decoding) # Output: [B, target_L, 1]
+                outputs['1d'][track_name] = pred_1d.squeeze(-1) # Output: [B, target_L]
+
+        return outputs
+    
+    def move_feature_forward(self, x):
+        '''
+        Transpose between [batch, length, features] and [batch, features, length]
+        '''
+        return x.transpose(1, 2).contiguous()
+
+    def diagonalize(self, x):
+        L = x.shape[-1]
+        x_i = x.unsqueeze(3).repeat(1, 1, 1, L)
+        x_j = x.unsqueeze(2).repeat(1, 1, L, 1)
+        input_map = torch.cat([x_i, x_j], dim=1)
+        return input_map
+
+
 class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
     """
     Predicts both 2D Hi-C maps and 1D tracks.
