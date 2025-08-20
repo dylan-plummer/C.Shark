@@ -32,7 +32,9 @@ class CSharkUniversalModel(nn.Module):
         - The 1D track heads use the existing `Decoder1D` block, which performs
           the necessary upsampling to match `target_1d_length`.
     """
-    def __init__(self, all_track_names: list,
+    def __init__(self, 
+                 input_track_names: list,
+                 all_track_names: list,
                  transformer_hidden_dim=32,
                  num_transformer_layers=4,
                  target_mat_size=256,
@@ -42,6 +44,7 @@ class CSharkUniversalModel(nn.Module):
                  record_attn=False,
                  **kwargs):
         super().__init__()
+        self.input_track_names = input_track_names
         self.all_track_names = all_track_names
         self.transformer_hidden_dim = transformer_hidden_dim
         self.predict_hic = predict_hic
@@ -60,7 +63,7 @@ class CSharkUniversalModel(nn.Module):
         # A dictionary of embedders for each possible 1D track
         self.track_embedders = nn.ModuleDict({
             name: blocks.Encoder(in_channel=1, output_size=transformer_hidden_dim, num_blocks=embedder_blocks)
-            for name in all_track_names
+            for name in input_track_names
         })
 
         # --- 2. Modality-Tagging and Universal Encoder ---
@@ -74,7 +77,8 @@ class CSharkUniversalModel(nn.Module):
 
         # --- 3. Decoders (Prediction Heads) ---
         if self.predict_hic:
-            self.decoder_2d = blocks.Decoder2D(transformer_hidden_dim * 2)
+            self.decoder_2d = blocks.Decoder2D(transformer_hidden_dim * 2,
+                                               hidden=transformer_hidden_dim)
 
         # 1D decoders using your upsampling `Decoder1D` block
         num_upsample_blocks = int(math.log2(target_1d_length // target_mat_size))

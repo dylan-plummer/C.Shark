@@ -5,7 +5,9 @@ import random
 import wandb
 import torch
 import argparse
+import pandas as pd
 import numpy as np
+import seaborn as sns
 import matplotlib.pyplot as plt
 import lightning as pl
 import lightning.pytorch.callbacks as callbacks
@@ -14,6 +16,7 @@ from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.utilities import grad_norm
 
 from skimage.transform import resize
+from sklearn.decomposition import PCA
 
 import cshark.model.corigami_models as corigami_models
 from cshark.data import genome_dataset
@@ -113,6 +116,20 @@ class VizCallback(Callback):
         if len(pl_module.hparams.input_features) == 0:
             self.ctcf = {celltype: None for celltype in self.celltypes}
             self.atac = {celltype: None for celltype in self.celltypes}
+
+        # get the modality-specific embedding params for visualization
+        modality_embeddings = pl_module.model.modality_embeddings
+        modality_pca = PCA(n_components=2).fit_transform(modality_embeddings.detach().cpu().numpy())
+        modality_df = {'modality': [], 'PC1': [], 'PC2': []}
+        for i, name in enumerate(pl_module.hparams.input_features):
+            modality_df['modality'].append(name)
+            modality_df['PC1'].append(modality_pca[i, 0])
+            modality_df['PC2'].append(modality_pca[i, 1])
+        modality_df = pd.DataFrame(modality_df)
+        sns.scatterplot(data=modality_df, x='PC1', y='PC2', hue='modality')
+        plt.savefig(os.path.join(self.out_dir, f'modality_embeddings_{pl_module.current_epoch}.png'))
+        plt.close()
+
         for celltype in self.celltypes:
             for chr_name, start in zip(self.chr_names, self.starts):
                 try:
@@ -180,9 +197,72 @@ class VizCallback(Callback):
                                 wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
                         except Exception as e:
                             print(e)
+
+                    # now make some predictions with various track combinations
+                    plots_and_imgs = {}
+
+                    input_dict = {'seq': inputs[:, :, :5], 'ctcf': inputs[:, :, 5:6]}
+                    outputs = pl_module.model(input_dict, predict_tracks=pl_module.hparams.output_features + ['hic'])
+                    pred = outputs.get('hic')[0].detach().cpu().numpy()
+                    pred = (pred + pred.T) * 0.5
+                    plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'seq_ctcf', celltype, 
+                                        chr_name, start, res=self.resolution)
+                    plot.plot()
+                    tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'seq_ctcf', 'imgs', f"{chr_name}_{start}.png")
+                    plots_and_imgs['seq_ctcf'] = tmp_plot_path
+
+                    input_dict = {'seq': inputs[:, :, :5], 'atac': inputs[:, :, 6:7]}
+                    outputs = pl_module.model(input_dict, predict_tracks=pl_module.hparams.output_features + ['hic'])
+                    pred = outputs.get('hic')[0].detach().cpu().numpy()
+                    pred = (pred + pred.T) * 0.5
+                    plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'seq_atac', celltype,
+                                        chr_name, start, res=self.resolution)
+                    plot.plot()
+                    tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'seq_atac', 'imgs', f"{chr_name}_{start}.png")
+                    plots_and_imgs['seq_atac'] = tmp_plot_path
+
+                    plots_and_imgs['seq_ctcf_atac'] = new_plot_path
+
+                    input_dict = {'seq': inputs[:, :, :5], 'ctcf': inputs[:, :, 5:6], 'atac': inputs[:, :, 6:7], 'rad21': inputs[:, :, 7:8]}
+                    outputs = pl_module.model(input_dict, predict_tracks=pl_module.hparams.output_features + ['hic'])
+                    pred = outputs.get('hic')[0].detach().cpu().numpy()
+                    pred = (pred + pred.T) * 0.5
+                    plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'seq_ctcf_atac_rad21', celltype, 
+                                        chr_name, start, res=self.resolution)
+                    plot.plot()
+                    tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'seq_ctcf_atac_rad21', 'imgs', f"{chr_name}_{start}.png")
+                    plots_and_imgs['seq_ctcf_atac_rad21'] = tmp_plot_path
+
+                    # stack imgs together and save them 
+                    stacked_imgs = []
+                    names = []
+                    for key, img_path in plots_and_imgs.items():
+                        if os.path.exists(img_path):
+                            img = plt.imread(img_path)
+                            stacked_imgs.append(img)
+                            names.append(key)
+                    if len(stacked_imgs) > 0:
+                        fig, axs = plt.subplots(1, len(stacked_imgs), figsize=(len(stacked_imgs) * 4, 4))
+                        if len(stacked_imgs) == 1:
+                            axs = [axs]
+                        for i, img in enumerate(stacked_imgs):
+                            axs[i].imshow(img)
+                            axs[i].axis('off')
+                            axs[i].set_title(names[i])
+                        plt.tight_layout()
+                        stacked_plot_path = os.path.join(self.out_dir, locus, celltype, f"{chr_name}_{start}_stacked_{pl_module.current_epoch}.png")
+                        plt.savefig(stacked_plot_path)
+                        plt.close()
+                        try:
+                            if pl_module.hparams.use_wandb:
+                                wandb.log({locus + '_' + celltype + '_stacked': wandb.Image(stacked_plot_path)})
+                        except Exception as e:
+                            print(e)
                             
                 except Exception as e:
                     print(e)
+
+        
 
 
 def main():
@@ -276,7 +356,10 @@ def init_parser():
   parser.add_argument('--no-hic-log-transform', dest='hic_log_transform',
                         action='store_false',
                         help='Whether to apply log transformation to Hi-C matrices')
-  
+  parser.add_argument('--no-bigwig-log-transform', dest='bigwig_log_transform',
+                        action='store_false',
+                        help='Whether to apply log transformation to BigWig tracks')
+
 
 
   args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
@@ -406,9 +489,15 @@ class TrainModule(pl.LightningModule):
         if self.predict_1d:
             num_target_tracks = len(self.hparams.output_features)
 
+        all_track_names = []
+        for track in self.hparams.input_features + self.hparams.output_features:
+            if track not in all_track_names:
+                all_track_names.append(track)
+
         # Instantiate the model
         model = ModelClass(
-            all_track_names = self.hparams.input_features + self.hparams.output_features if self.hparams.output_features is not None else self.hparams.input_features,
+            input_track_names=self.hparams.input_features,
+            all_track_names=all_track_names,
             num_genomic_features=num_input_features, # Input features
             num_target_tracks=num_target_tracks,    # Target 1D tracks
             mid_hidden=self.hparams.model_latent_dim,
@@ -421,7 +510,7 @@ class TrainModule(pl.LightningModule):
             seq_filter_size=args.seq_filter_size,
             # Add other necessary model args from hparams if they exist
         )
-        print(model)
+        #print(model)
         if args.model_path is not None:
             checkpoint = torch.load(args.model_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
             model_weights = checkpoint['state_dict']
@@ -546,8 +635,12 @@ class TrainModule(pl.LightningModule):
                 track_loss = loss_1d[:, i].mean()
                 self.log(f'val_loss_1d_{feature}', track_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
                 # Calculate correlation for each 1D track
-                pred_track = torch.clamp(torch.exp(pred_1d[..., i]) - 1, min=0)  # inverse log transformation
-                target_track = torch.clamp(torch.exp(target_1d_tracks[..., i]) - 1, min=0)
+                if self.hparams.bigwig_log_transform:
+                    pred_track = torch.clamp(torch.exp(pred_1d[..., i]) - 1, min=0)  # inverse log transformation
+                    target_track = torch.clamp(torch.exp(target_1d_tracks[..., i]) - 1, min=0)
+                else:
+                    pred_track = pred_1d[..., i]
+                    target_track = target_1d_tracks[..., i]
                 corr = torch.corrcoef(torch.stack([pred_track.flatten(), target_track.flatten()]))[0, 1]
                 self.log(f'val_corr_1d_{feature}', corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             # Mask out the 0 values in the target_1d_tracks
@@ -620,12 +713,12 @@ class TrainModule(pl.LightningModule):
         genomic_features = {}
         for feature in args.input_features:
             genomic_features[feature] = {'file_name' : f'{feature}.bw',
-                                         'norm' : 'log' }
+                                         'norm' : 'log' if args.bigwig_log_transform else None }
         target_features = {}
         if args.output_features is not None:
             for feature in args.output_features:
                 target_features[feature] = {'file_name' : f'{feature}.bw',
-                                            'norm' : 'log' }
+                                            'norm' : 'log' if args.bigwig_log_transform else None }
         dataset = genome_dataset.GenomeDataset(celltype_root, 
                                 args.dataset_assembly,
                                 input_feat_dicts = genomic_features, 
