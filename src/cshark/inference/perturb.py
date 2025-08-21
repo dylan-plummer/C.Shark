@@ -766,7 +766,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 f.write(f'min_value = {min_val_pred}\n')
                 if max_val_pred is not None:
                     f.write(f'max_value = {max_val_pred}\n')
-                f.write('colormap = Reds\n')
+                f.write('colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]\n')
                 f.write('file_type = hic_matrix_square\n\n')
                 
 
@@ -813,7 +813,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write(f'min_value = {min_val_true}\n')
                         if max_val_true is not None:
                             f.write(f'max_value = {max_val_true}\n')
-                        f.write('colormap = Reds\n')
+                        f.write('colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]\n')
                         f.write('file_type = hic_matrix_square\n\n')
                     f.write(line)
 
@@ -855,7 +855,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     f.write(f'min_value = {min_val_pred}\n')
                     if max_val_pred is not None:
                         f.write(f'max_value = {max_val_pred}\n')
-                    f.write('colormap = Reds\n')
+                    f.write('colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]\n')
                     f.write('file_type = hic_matrix_square\n\n')
                 f.write(line)
     
@@ -1099,7 +1099,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
                         f.write(f'min_value = {min_val}\n')
                         if max_val is not None:
                             f.write(f'max_value = {max_val}\n')
-                        f.write('colormap = Reds\n')
+                        f.write('colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]\n')
                         f.write('file_type = hic_matrix_square\n\n')
                         f.write('[KO pred]\n')
                         f.write('file = tmp/tmp_deletion.cool\n')
@@ -1107,7 +1107,7 @@ def screening(output_path, outname, celltype, chr_name, screen_start, screen_end
                         f.write(f'min_value = {min_val}\n')
                         if max_val is not None:
                             f.write(f'max_value = {max_val}\n')
-                        f.write('colormap = Reds\n')
+                        f.write('colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]\n')
                         f.write('file_type = hic_matrix_square\n\n')
                 f.write(line)
             # now add the deletion line
