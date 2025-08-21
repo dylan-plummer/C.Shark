@@ -80,7 +80,10 @@ def main():
     parser.add_argument('--no-hic-log-transform', dest='hic_log_transform',
                         action='store_false',
                         help='Whether to apply log transformation to Hi-C matrices')
-    
+    parser.add_argument('--no-bigwig-log-transform', dest='bigwig_log_transform',
+                        action='store_false',
+                        help='Whether to apply log transformation to bigwig tracks')
+
     parser.add_argument('--out-file', dest='out_file', 
                         help='Path to the output file if doing full chromosome prediction', required=False)
     parser.add_argument('--seq', dest='seq_path', 
@@ -97,7 +100,6 @@ def main():
                         help='name of data modalities to knockout', required=False)
     parser.add_argument('--ko-mode', dest='ko_mode', type=str, nargs='+', default=['zero'],
                         help='how we simulate the knockout of 1d peaks (zero, mean, knockout, shuffle, knockout_shuffle, reverse, reverse_motif)', required=False)
-
     # Deletion related params
     parser.add_argument('--ko-start', dest='deletion_start', nargs='+', type=int,
                         help='Starting points for deletion.', required=False)
@@ -115,7 +117,7 @@ def main():
     parser.add_argument('--hide-line', dest='hide_deletion_line', 
                         action = 'store_true',
                         help='Remove the line showing deletion site (default: %(default)s)')
-    parser.add_argument('--region', dest='region', 
+    parser.add_argument('--region', '--locus', dest='region', 
                                 help='specific region to visualize, otherwise full 2Mb window', required=False)
     
     # Screening related params
@@ -206,6 +208,7 @@ def main():
                     region = args.region,
                     mid_hidden=args.mid_hidden, 
                     seq_filter_size=args.seq_filter_size,
+                    bigwig_log_transform=args.bigwig_log_transform,
                     recon_1d=args.recon_1d,
                     plot_bigwigs=args.plot_bigwigs, plot_pred_bigwigs=args.plot_pred_bigwigs,
                     min_val_true=args.min_val_true, max_val_true=args.max_val_true,
@@ -227,10 +230,23 @@ def main():
         mid_hidden = args.mid_hidden
         ko_data = args.ko_data
         ko_mode = args.ko_mode
+        region = args.region
         chr_length = bw.length(chr_name)
         print(f'Chromosome length: {chr_length}')
         step_size = int(window / args.n_overlap_preds)
-        starts = np.arange(0, chr_length - window, step_size)
+        if region is not None:
+            if ':' in region:
+                chr_name, region = region.split(':')
+                start, end = region.split('-')
+                region_start = int(start)
+                region_end = int(end)
+            else:
+                start, end = region.split('-')
+                region_start = int(start)
+                region_end = int(end)
+            starts = np.arange(region_start - step_size, region_end + step_size, step_size)
+        else:
+            starts = np.arange(0, chr_length - window, step_size)
         ends = starts + window
         results = {'a1': [], 'a2': [], 'WT': [], 'KO': []}
         bins = []
@@ -331,8 +347,15 @@ def main():
         res_df['end1'] = res_df['a1'].map(end_map)
         res_df['end2'] = res_df['a2'].map(end_map)
         res_df = res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO']]
+        # remove predictions outside region
+        if region is not None:
+            res_df = res_df[(res_df['start1'] >= region_start) & (res_df['end1'] <= region_end) & (res_df['start2'] >= region_start) & (res_df['end2'] <= region_end)]
+            bins_df = bins_df[(bins_df['start'] >= region_start) & (bins_df['end'] <= region_end)]
         # make sure outfile directory exists
-        os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
+        except Exception as e:
+            print(f"Error creating directory: {e}")
         # make sure outfile ends with .tsv
         if not args.out_file.endswith('.tsv'):
             args.out_file += '.tsv'
@@ -348,6 +371,9 @@ def main():
                 track_col_names.append(f'{track_name}_WT')
                 track_col_names.append(f'{track_name}_KO')
             res_1d_df = res_1d_df[['chrom', 'start', 'end'] + track_col_names]
+            # remove predictions outside region
+            if region is not None:
+                res_1d_df = res_1d_df[(res_1d_df['start'] >= region_start) & (res_1d_df['end'] <= region_end)]
             res_1d_df.to_csv(args.out_file.replace('.tsv', '_1d.bed'), sep='\t', header=True, index=False)
 
             # plot the 1d WT and KO overlaid
@@ -383,6 +409,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     model_path, seq_path, ctcf_path, atac_path, other_feats, 
                     seq2_path=None,
                     ko_data=['ctcf'], ko_mode=['zero'], region=None, mid_hidden=256, seq_filter_size=3, recon_1d=True,
+                    bigwig_log_transform=True,
                     plot_bigwigs=[], plot_pred_bigwigs=[], plot_pred_log2fc=False,
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
                     min_val_diff=-0.5, max_val_diff=0.5,
@@ -406,7 +433,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
             start, seq_path, ctcf_path, atac_path, other_feats, seq2_path=seq2_path,
             window = window, 
-            ctcf_log2=ctcf_log2)
+            ctcf_log2=ctcf_log2,
+            bigwig_log=bigwig_log_transform)
     num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
     if atac_region is None:
             num_genomic_features -= 1
@@ -416,7 +444,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                           num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                           diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
-                                          recon_1d=recon_1d, undo_log=undo_log)
+                                          recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform)
     pred_before = pred_before_output['hic']
     pred_before_1d = pred_before_output['1d']
 
@@ -496,7 +524,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                    num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                    diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
-                                   recon_1d=recon_1d, undo_log=undo_log)
+                                   recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform)
     pred = pred_output['hic']
     pred_1d = pred_output['1d']
 
@@ -504,10 +532,12 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     track_names = model_utils.get_1d_track_names(model_path)
     if track_names is None:
         track_names = []
-
     for track_idx, track_name in enumerate(track_names):
-        ctcf_pred_before = pred_before_1d[:, track_idx]
-        ctcf_pred = pred_1d[:, track_idx]
+        try:
+            ctcf_pred_before = pred_before_1d[:, track_idx]
+            ctcf_pred = pred_1d[:, track_idx]
+        except IndexError:
+            break
         ctcf_log2fc = np.log2((ctcf_pred + 1e-5) / (ctcf_pred_before + 1e-5))
         log2fc_norm = ctcf_log2fc * ctcf_pred_before
 

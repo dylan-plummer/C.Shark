@@ -301,7 +301,8 @@ def preprocess_default(seq, ctcf, atac, other=None):
     return inputs
 
 ## Load data ##
-def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=None, seq2_path=None, window = 2097152, ctcf_log2=False):
+def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=None, seq2_path=None, window = 2097152, ctcf_log2=False,
+                bigwig_log=True):
     ''' Single loading method for one region '''
     end = start + window
     seq, ctcf, atac = load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=ctcf_log2)
@@ -310,7 +311,7 @@ def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=Non
         other_feats = []
         other_regions = []
         for feat_path in other_paths:
-            other_feats.append(GenomicFeature(path = feat_path, norm = 'log'))
+            other_feats.append(GenomicFeature(path = feat_path, norm = 'log' if bigwig_log else None))
             other_regions.append(other_feats[-1].get(chr_name, start, end))
     seq_region, ctcf_region, atac_region = get_data_at_interval(chr_name, start, end, seq, ctcf, atac)
     if seq2_path is not None:
@@ -321,15 +322,19 @@ def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=Non
     return seq_region, ctcf_region, atac_region, other_regions
 
 
-def load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=False):
+def load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=False,
+                      bigwig_log=True):
     seq_chr_path = os.path.join(seq_path, f'{chr_name}.fa.gz')
     seq = SequenceFeature(path = seq_chr_path)
     ctcf = None
     if ctcf_path is not None:
-        ctcf = GenomicFeature(path = ctcf_path, norm = 'log' if not ctcf_log2 else 'log2')
+        ctcf_log = 'log' if not ctcf_log2 else 'log2'
+        if not bigwig_log:
+            ctcf_log = None
+        ctcf = GenomicFeature(path = ctcf_path, norm = ctcf_log)
     atac = None
     if atac_path is not None:
-        atac = GenomicFeature(path = atac_path, norm = 'log')
+        atac = GenomicFeature(path = atac_path, norm = 'log' if bigwig_log else None)
 
     return seq, ctcf, atac
 
@@ -356,8 +361,11 @@ def get_data_at_interval(chr_name, start, end, seq, ctcf, atac):
 def prediction(seq_region, ctcf_region, atac_region, model_path, 
                other_regions=None, diploid=False, record_attn=False, 
                num_genomic_features=2, mat_size=256, mid_hidden=256, 
+               bigwig_log=True,
                undo_log=True, seq_filter_size=3, recon_1d=True):
-    model = load_default(model_path, record_attn=record_attn, num_genomic_features=num_genomic_features, mat_size=mat_size, diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, recon_1d=recon_1d)
+    model = load_default(model_path, record_attn=record_attn, num_genomic_features=num_genomic_features, 
+                         mat_size=mat_size, diploid=diploid, mid_hidden=mid_hidden, 
+                         seq_filter_size=seq_filter_size, recon_1d=recon_1d)
     if other_regions is None:
         inputs = preprocess_default(seq_region, ctcf_region, atac_region)
     else:
@@ -373,13 +381,27 @@ def prediction(seq_region, ctcf_region, atac_region, model_path,
             pred = np.expm1(pred)
         return pred, attn, cross_attn
     else:
-        output = model(inputs)
+        try:
+            output = model(inputs)
+        except TypeError:
+            output = model({
+                    'seq': inputs[..., :5],
+                    'ctcf': inputs[..., 5:6],
+                    'atac': inputs[..., 6:7]
+                },
+                predict_tracks=['hic', 'ctcf', 'atac', 'rad21']
+            )
         if isinstance(output, dict):
             pred = output['hic']
             pred_1d = output['1d']
             if pred_1d is not None:
-                pred_1d = pred_1d[0].detach().cpu().numpy()
-                if undo_log:
+                if isinstance(pred_1d, dict):
+                    tmp_1d = [v.detach().cpu().numpy() for v in pred_1d.values()]
+                    pred_1d = np.concatenate(tmp_1d, axis=0).transpose()
+                    print(pred_1d.shape)
+                else:
+                    pred_1d = pred_1d[0].detach().cpu().numpy()
+                if bigwig_log:
                     pred_1d = np.expm1(pred_1d)
                     pred_1d = np.clip(pred_1d, 0, None)
             else:
