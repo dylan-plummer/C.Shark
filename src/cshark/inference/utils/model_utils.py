@@ -91,6 +91,7 @@ def load_default(model_path, record_attn=False,
                                 diploid=diploid,
                                 num_target_tracks=0, 
                                 seq_filter_size=seq_filter_size,
+                                epi_filter_size=3,
                                 recon_1d=recon_1d,
                                 predict_1d=False)
                 load_checkpoint(model, model_path)
