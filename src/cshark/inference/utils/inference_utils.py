@@ -305,7 +305,8 @@ def load_region(chr_name, start, seq_path, ctcf_path, atac_path, other_paths=Non
                 bigwig_log=True):
     ''' Single loading method for one region '''
     end = start + window
-    seq, ctcf, atac = load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=ctcf_log2)
+    seq, ctcf, atac = load_data_default(chr_name, seq_path, ctcf_path, atac_path, ctcf_log2=ctcf_log2, 
+                                        bigwig_log=bigwig_log)
     other_regions = None
     if other_paths is not None:
         other_feats = []
@@ -389,7 +390,7 @@ def prediction(seq_region, ctcf_region, atac_region, model_path,
                     'ctcf': inputs[..., 5:6],
                     'atac': inputs[..., 6:7]
                 },
-                predict_tracks=['hic', 'ctcf', 'atac', 'rad21']
+                predict_tracks=['ctcf', 'atac', 'rad21', 'h3k27ac', 'h3k4me3', 'hic']
             )
         if isinstance(output, dict):
             pred = output['hic']

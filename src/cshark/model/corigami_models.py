@@ -35,7 +35,7 @@ class CSharkUniversalModel(nn.Module):
     def __init__(self, 
                  input_track_names: list,
                  all_track_names: list,
-                 transformer_hidden_dim=32,
+                 transformer_hidden_dim=64,
                  num_transformer_layers=4,
                  target_mat_size=256,
                  target_1d_length=8192,
@@ -56,6 +56,7 @@ class CSharkUniversalModel(nn.Module):
         # Sequence Embedder (handles diploid case)
         self.seq_embedder = blocks.Encoder(
             in_channel=10 if diploid else 5,
+            start_filter_size=3,
             output_size=transformer_hidden_dim,
             num_blocks=embedder_blocks
         )
@@ -78,7 +79,7 @@ class CSharkUniversalModel(nn.Module):
         # --- 3. Decoders (Prediction Heads) ---
         if self.predict_hic:
             self.decoder_2d = blocks.Decoder2D(transformer_hidden_dim * 2,
-                                               hidden=transformer_hidden_dim)
+                                               hidden=transformer_hidden_dim * 2)
 
         # 1D decoders using your upsampling `Decoder1D` block
         num_upsample_blocks = int(math.log2(target_1d_length // target_mat_size))

@@ -31,11 +31,13 @@ class ConvBlock(nn.Module):
         return out
 
 class Encoder(nn.Module):
-    def __init__(self, in_channel, output_size = 256, filter_size = 5, num_blocks = 12):
+    def __init__(self, in_channel, output_size = 256, 
+                 start_filter_size = 3,
+                 filter_size = 5, num_blocks = 12):
         super(Encoder, self).__init__()
         self.filter_size = filter_size
         self.conv_start = nn.Sequential(
-                                    nn.Conv1d(in_channel, 32, 3, 2, 1),
+                                    nn.Conv1d(in_channel, 32, start_filter_size, 2, 1),
                                     nn.BatchNorm1d(32),
                                     nn.ReLU(),
                                     )
