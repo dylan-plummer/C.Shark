@@ -42,6 +42,7 @@ class CSharkUniversalModel(nn.Module):
                  diploid=False,
                  predict_hic=True,
                  record_attn=False,
+                 activation_1d=None,
                  **kwargs):
         super().__init__()
         self.input_track_names = input_track_names
@@ -56,14 +57,17 @@ class CSharkUniversalModel(nn.Module):
         # Sequence Embedder (handles diploid case)
         self.seq_embedder = blocks.Encoder(
             in_channel=10 if diploid else 5,
-            start_filter_size=3,
+            start_filter_size=15,
             output_size=transformer_hidden_dim,
             num_blocks=embedder_blocks
         )
 
         # A dictionary of embedders for each possible 1D track
         self.track_embedders = nn.ModuleDict({
-            name: blocks.Encoder(in_channel=1, output_size=transformer_hidden_dim, num_blocks=embedder_blocks)
+            name: blocks.Encoder(in_channel=1, 
+                                 start_filter_size=7,
+                                 output_size=transformer_hidden_dim, 
+                                 num_blocks=embedder_blocks)
             for name in input_track_names
         })
 
@@ -71,7 +75,7 @@ class CSharkUniversalModel(nn.Module):
         self.modality_embeddings = nn.Parameter(torch.randn(1 + len(all_track_names), transformer_hidden_dim))
         self.pos_encoder = blocks.PositionalEncoding(transformer_hidden_dim, max_len=2048)
         encoder_layers = blocks.TransformerLayer(transformer_hidden_dim, nhead=4, dropout=0.1,
-                                                 dim_feedforward=32, batch_first=True)
+                                                 dim_feedforward=transformer_hidden_dim, batch_first=True)
         self.transformer_encoder = blocks.TransformerEncoder(encoder_layers,
                                                              num_layers=num_transformer_layers,
                                                              record_attn=record_attn)
@@ -91,6 +95,19 @@ class CSharkUniversalModel(nn.Module):
                 num_upsample_blocks=num_upsample_blocks
             ) for name in all_track_names
         })
+        self.activation_1d = activation_1d
+        self.final_activation = None
+        if activation_1d is not None:
+            if activation_1d == 'relu':
+                self.final_activation = nn.ReLU()
+            elif activation_1d == 'sigmoid':
+                self.final_activation = nn.Sigmoid()
+            elif activation_1d == 'tanh':
+                self.final_activation = nn.Tanh()
+            elif activation_1d == 'softplus':
+                self.final_activation = nn.Softplus()
+            else:
+                raise ValueError(f"Unsupported activation_1d: {activation_1d}")
 
     def forward(self, input_dict: dict, predict_tracks: list):
         """
@@ -156,6 +173,8 @@ class CSharkUniversalModel(nn.Module):
             if track_name in self.decoder_1d_heads:
                 # The Decoder1D block handles upsampling from L' to target_1d_length
                 pred_1d = self.decoder_1d_heads[track_name](latent_for_decoding) # Output: [B, target_L, 1]
+                if self.final_activation is not None:
+                    pred_1d = self.final_activation(pred_1d)
                 outputs['1d'][track_name] = pred_1d.squeeze(-1) # Output: [B, target_L]
 
         return outputs
@@ -191,6 +210,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                  target_mat_size = 256, # Expected size of the Hi-C map (e.g., 256x256)
                  target_1d_length = 8192, # Expected output length for 1D tracks
                  encoder_downsample_factor = 2**7, # Total downsampling from encoder (e.g., 13 blocks * stride 2)
+                 activation_1d=None,
                  record_attn = False):
         super(MultiTaskConvTransModel, self).__init__()
 
@@ -250,10 +270,12 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                                                 target_length=self.target_1d_length)
                 self.decoder_1d_seq = None 
             else:
-                self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks - num_genomic_features,
-                                                num_upsample_blocks=num_upsample_blocks,
-                                                latent_dim=mid_hidden,
-                                                target_length=self.target_1d_length)
+                self.decoder_1d = None
+                if self.num_target_tracks - num_genomic_features > 0:
+                    self.decoder_1d = blocks.Decoder1D(num_target_tracks = self.num_target_tracks - num_genomic_features,
+                                                    num_upsample_blocks=num_upsample_blocks,
+                                                    latent_dim=mid_hidden,
+                                                    target_length=self.target_1d_length)
                 # If not reconstructing 1D features, we need to predict them from sequence features
                 if use_seq_attn:
                     self.seq_attn = blocks.AttnModule(hidden = mid_hidden // 2, record_attn = False, layers=4)
@@ -262,6 +284,20 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                                                        latent_dim=mid_hidden // 2,
                                                        target_length=self.target_1d_length)
             # Output: [batch, num_target_tracks, target_1d_length]
+    
+        self.activation_1d = activation_1d
+        self.final_activation = None
+        if activation_1d is not None:
+            if activation_1d == 'relu':
+                self.final_activation = nn.ReLU()
+            elif activation_1d == 'sigmoid':
+                self.final_activation = nn.Sigmoid()
+            elif activation_1d == 'tanh':
+                self.final_activation = nn.Tanh()
+            elif activation_1d == 'softplus':
+                self.final_activation = nn.Softplus()
+            else:
+                raise ValueError(f"Unsupported activation_1d: {activation_1d}")
 
     def forward(self, x):
         '''
@@ -332,9 +368,14 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                     seq_feats_transformed = self.seq_attn(seq_feats_permuted) # Apply attention to sequence features
                     seq_feats_final = self.move_feature_forward(seq_feats_transformed) # Permute back
                 pred_1d_inputs = self.decoder_1d_seq(seq_feats_final) # Use sequence features for 1D prediction
-                pred_1d = self.decoder_1d(latent_final)
-                #print(f"Predicted 1D tracks shape: {pred_1d.shape}")
-                pred_1d = torch.cat([pred_1d_inputs, pred_1d], dim=2) # Concatenate sequence features with predicted 1D tracks
+                if self.decoder_1d is not None:
+                    pred_1d = self.decoder_1d(latent_final)
+                    #print(f"Predicted 1D tracks shape: {pred_1d.shape}")
+                    pred_1d = torch.cat([pred_1d_inputs, pred_1d], dim=2) # Concatenate sequence features with predicted 1D tracks
+                else:
+                    pred_1d = pred_1d_inputs
+            if self.final_activation is not None:
+                pred_1d = self.final_activation(pred_1d)
             # Shape: [batch, num_target_tracks, target_1d_length]
             outputs['1d'] = pred_1d
         else:
