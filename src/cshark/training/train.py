@@ -1,6 +1,7 @@
 import os
 import sys
 import math
+import random
 import wandb
 import torch
 import argparse
@@ -133,7 +134,8 @@ class VizCallback(Callback):
                             other_paths.append(self.rad21[celltype])
                     #other_paths = [self.h3k27me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
-                        start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2)
+                        start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2,
+                        bigwig_log=pl_module.hparams.bigwig_log_transform)
                     inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
                     pl_module.model.eval()
                     print('inputs shape:', inputs.shape)
@@ -211,6 +213,8 @@ def init_parser():
                         help='Genome assembly for training data')
   parser.add_argument('--assembly2', dest='dataset_assembly2', default=None,
                         help='Genome assembly for other assembly of double stranded training data')
+  parser.add_argument('--alt-assemblies', dest='alt_assemblies', default=None, nargs='+',
+                        help='Other genome assemblies for multi-assembly training (should match the celltype names)')
   # list of celltypes
   parser.add_argument('--celltypes', dest='dataset_celltypes', default=['alpha', 'beta'], nargs='+',
                         help='Cell types to train on')
@@ -259,7 +263,7 @@ def init_parser():
                       help='Resolution (bp) of output Hi-C matrix')
   parser.add_argument('--matrix-size', dest='mat_size', type=int, default=256,
                       help='Size of output Hi-C matrix')
-  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=16384,
+  parser.add_argument('--target-feature-size', dest='target_1d_size', type=int, default=8192,
                       help='Size of output 1d track')
   parser.add_argument('--latent-dim', dest='model_latent_dim', type=int, default=256,
                       help='Latent dimension size (mid_hidden)')
@@ -276,6 +280,15 @@ def init_parser():
   parser.add_argument('--no-hic-log-transform', dest='hic_log_transform',
                         action='store_false',
                         help='Whether to apply log transformation to Hi-C matrices')
+  parser.add_argument('--no-bigwig-log-transform', dest='bigwig_log_transform',
+                        action='store_false',
+                        help='Whether to apply log transformation to BigWig tracks')
+  parser.add_argument('--masking-prob', dest='training_masking_prob', type=float, default=0.0,
+                        help='Probability of masking an input 1D track during training (0.0 to disable). Recommended: 0.15')
+  parser.add_argument('--masking-min-chunk', dest='training_masking_min_chunk', type=int, default=256,
+                    help='Minimum size (in bp) of a random mask chunk. Default is one output bin size.')
+  parser.add_argument('--masking-max-chunk', dest='training_masking_max_chunk', type=int, default=10240,
+                    help='Maximum size (in bp) of a random mask chunk. (e.g., 10kb)')
   
 
 
@@ -373,7 +386,10 @@ def init_training(args):
             if target_1d_tracks.shape[1] == 1:
                 axs = [axs]
             for i in range(target_1d_tracks.shape[1]):
-                track = np.exp(target_1d_tracks[:, i]) - 1  # inverse log transformation
+                if args.bigwig_log_transform:
+                    track = np.exp(target_1d_tracks[:, i]) - 1  # inverse log transformation
+                else:
+                    track = target_1d_tracks[:, i]
                 axs[i].plot(track, color=colors[i % len(colors)])
                 axs[i].fill_between(range(len(target_1d_tracks)), track, color=colors[i % len(colors)], alpha=0.5)
             plt.title('Target 1D Tracks')
@@ -405,6 +421,8 @@ class TrainModule(pl.LightningModule):
         num_target_tracks = 0
         if self.predict_1d:
             num_target_tracks = len(self.hparams.output_features)
+        print(f'Number of input genomic features: {num_input_features}')
+        print(f'Number of target 1D tracks: {num_target_tracks}')
 
         # Instantiate the model
         model = ModelClass(
@@ -418,6 +436,7 @@ class TrainModule(pl.LightningModule):
             target_1d_length=args.target_1d_size,
             recon_1d=args.recon_1d,
             seq_filter_size=args.seq_filter_size,
+            activation_1d='softplus' if not self.hparams.bigwig_log_transform else None
             # Add other necessary model args from hparams if they exist
         )
         if args.model_path is not None:
@@ -453,6 +472,37 @@ class TrainModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         total_loss = 0.0
         inputs, mat, target_1d_tracks = self.proc_batch(batch)
+        if self.hparams.training_masking_prob > 0.0 and len(self.hparams.input_features) > 0:
+            # Clone the inputs to avoid modifying the original tensor if it's needed elsewhere
+            # (though in this training_step, it's safe to modify in-place)
+            genomic_features = inputs[:, :, 5:] # Shape: [Batch, Length, Num_Tracks]
+            
+            B, L, C = genomic_features.shape
+
+            # Iterate over each sample and each track to apply chunk masking
+            for b in range(B):
+                for c in range(C):
+                    masked_length_so_far = 0
+                    target_mask_length = int(L * self.hparams.training_masking_prob)
+                    
+                    # Keep adding chunks until we've masked the target fraction of the sequence
+                    while masked_length_so_far < target_mask_length:
+                        # Determine the size of the next chunk
+                        chunk_size = random.randint(
+                            self.hparams.training_masking_min_chunk,
+                            self.hparams.training_masking_max_chunk
+                        )
+                        # Don't overshoot the target length
+                        chunk_size = min(chunk_size, target_mask_length - masked_length_so_far)
+                        
+                        # Determine the starting position of the chunk
+                        if L - chunk_size <= 0: continue # Skip if chunk is larger than sequence
+                        start_idx = random.randint(0, L - chunk_size)
+                        
+                        # Apply the mask (set the region to 0.0)
+                        genomic_features[b, start_idx : start_idx + chunk_size, c] = 0.0
+                        
+                        masked_length_so_far += chunk_size
         outputs = self(inputs)
 
         pred_hic = outputs.get('hic')
@@ -575,6 +625,12 @@ class TrainModule(pl.LightningModule):
             for feature in args.output_features:
                 target_features[feature] = {'file_name' : f'{feature}.bw',
                                             'norm' : 'log' }
+        if args.alt_assemblies is not None:
+            alt_assemblies = args.alt_assemblies
+            if len(alt_assemblies) != len(args.dataset_celltypes):
+                raise ValueError('Number of alt assemblies must match number of celltypes')
+            alt_assembly = alt_assemblies[args.dataset_celltypes.index(celltype)]
+
         dataset = genome_dataset.GenomeDataset(celltype_root, 
                                 args.dataset_assembly,
                                 input_feat_dicts = genomic_features, 
@@ -582,6 +638,7 @@ class TrainModule(pl.LightningModule):
                                 predict_hic = True,
                                 predict_1d = (args.output_features is not None),
                                 genome_assembly2 = args.dataset_assembly2,
+                                alt_assembly= alt_assembly if args.alt_assemblies is not None else None,
                                 target_res=args.resolution,
                                 target_mat_size = args.mat_size,
                                 target_1d_size = args.target_1d_size,

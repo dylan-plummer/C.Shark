@@ -18,6 +18,7 @@ class GenomeDataset(Dataset):
                        predict_hic=True, # NEW: Control Hi-C loading/prediction
                        predict_1d=False,  # NEW: Control 1D track loading/prediction
                        genome_assembly2=None,
+                       alt_assembly=None,
                        target_res=10000,
                        target_mat_size=256,
                        target_1d_size=512,
@@ -30,6 +31,7 @@ class GenomeDataset(Dataset):
         self.predict_1d = predict_1d
         self.genome_assembly = genome_assembly
         self.genome_assembly2 = genome_assembly2
+        self.alt_assembly = alt_assembly
         self.target_res = target_res
         self.target_mat_size = target_mat_size
         self.target_1d_size = target_1d_size
@@ -130,6 +132,7 @@ class GenomeDataset(Dataset):
                                                         genomic_features, target_features, predict_hic=True, 
                                                         predict_1d=self.predict_1d, 
                                                         celltype_root2=self.data_root.replace(self.genome_assembly, self.genome_assembly2) if self.genome_assembly2 else None,
+                                                        alt_assembly=self.alt_assembly,
                                                         target_res=self.target_res,
                                                         target_mat_size=self.target_mat_size,
                                                         target_1d_size=self.target_1d_size,

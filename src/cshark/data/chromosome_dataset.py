@@ -26,6 +26,7 @@ class ChromosomeDataset(Dataset):
                  feature_list, target_track_list,
                  predict_hic=True, predict_1d=False, 
                  celltype_root2=None,
+                 alt_assembly=None,
                  target_res=10000,
                  target_mat_size=256,
                  target_1d_size=512,
@@ -51,6 +52,9 @@ class ChromosomeDataset(Dataset):
         # Get the parent directory of celltype_root
         parent_dir = os.path.dirname(celltype_root)
         dna_sequence_path = os.path.join(parent_dir, 'dna_sequence', f'{chr_name}.fa.gz')
+        if alt_assembly:
+            celltype_parent_dir = os.path.dirname(parent_dir)
+            dna_sequence_path = os.path.join(celltype_parent_dir, alt_assembly, 'dna_sequence', f'{chr_name}.fa.gz')
 
         self.seq = data_feature.SequenceFeature(path=dna_sequence_path)
         print(dna_sequence_path)

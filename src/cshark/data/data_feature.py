@@ -158,7 +158,7 @@ class SequenceFeature(Feature):
             array: A numpy char array that contains DNA for a chromosome
         '''
         seq = seq[start : end]
-        en_dict = {'a' : 0, 't' : 1, 'c' : 2, 'g' : 3, 'n' : 4}
+        en_dict = {'a' : 0, 't' : 1, 'c' : 2, 'g' : 3, 'n' : 4, 'y': 4, 'r':4, 'w':4, 's':4, 'm':4, 'k':4, 'h':4, 'b':4, 'v':4, '-':4}
         en_seq = [en_dict[ch] for ch in seq]
         np_seq = np.array(en_seq, dtype = int)
         return np_seq
