@@ -435,6 +435,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             window = window, 
             ctcf_log2=ctcf_log2,
             bigwig_log=bigwig_log_transform)
+    print(len(other_regions) if other_regions is not None else 0)
     num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
     if atac_region is None:
             num_genomic_features -= 1
@@ -446,6 +447,11 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                           diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
                                           recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform)
     pred_before = pred_before_output['hic']
+    plt.imshow(pred_before, cmap='Reds')
+    plt.colorbar()
+    plt.title('Prediction before perturbation')
+    plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred_before.png'), dpi=300)
+    plt.close()
     pred_before_1d = pred_before_output['1d']
 
     input_track_names = []
@@ -498,9 +504,9 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             else:
                 ko_channel = -1
             channel_offset = 0
-            if 'ctcf' in ko_data_types:
+            if 'ctcf' in input_track_names:
                 channel_offset += 1
-            if 'atac' in ko_data_types:
+            if 'atac' in input_track_names:
                 channel_offset += 1
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                     deletion_start, deletion_width, seq_region, ctcf_region, 
@@ -526,6 +532,11 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                    diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
                                    recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform)
     pred = pred_output['hic']
+    plt.imshow(pred, cmap='Reds')
+    plt.colorbar()
+    plt.title('Prediction after perturbation')
+    plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred.png'), dpi=300)
+    plt.close()
     pred_1d = pred_output['1d']
 
     # get track_names from ctcf_path, atac_path, other_feats
@@ -536,7 +547,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         try:
             ctcf_pred_before = pred_before_1d[:, track_idx]
             ctcf_pred = pred_1d[:, track_idx]
-        except IndexError:
+        except IndexError as e:
             break
         ctcf_log2fc = np.log2((ctcf_pred + 1e-5) / (ctcf_pred_before + 1e-5))
         log2fc_norm = ctcf_log2fc * ctcf_pred_before
@@ -1188,10 +1199,10 @@ def deletion_with_padding(chr_name, start, deletion_start, deletion_width, seq_r
                           other_regions=None, ko_data=['ctcf'], ko_channels=[0], channel_offset=0, ko_mode=['zero'],
                           peak_height=2.0):
     ''' Delete all signals at a specfied location with corresponding padding at the end '''
-    if 'ctcf' in ko_data:
-        channel_offset += 1
-    if 'atac' in ko_data:
-        channel_offset += 1
+    # if 'ctcf' in ko_data:
+    #     channel_offset += 1
+    # if 'atac' in ko_data:
+    #     channel_offset += 1
     for track_name, knockout_mode, channel_idx in zip(ko_data, ko_mode, ko_channels):
         #print(f'Knocking out {track_name} at {deletion_start} with width {deletion_width} and mode {knockout_mode}')
         if track_name == 'ctcf':
