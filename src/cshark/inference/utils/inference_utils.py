@@ -363,7 +363,8 @@ def prediction(seq_region, ctcf_region, atac_region, model_path,
                other_regions=None, diploid=False, record_attn=False, 
                num_genomic_features=2, mat_size=256, mid_hidden=256, 
                bigwig_log=True,
-               undo_log=True, seq_filter_size=3, recon_1d=True):
+               undo_log=True, seq_filter_size=3, recon_1d=True,
+               other_feat_names=None):
     model = load_default(model_path, record_attn=record_attn, num_genomic_features=num_genomic_features, 
                          mat_size=mat_size, diploid=diploid, mid_hidden=mid_hidden, 
                          seq_filter_size=seq_filter_size, recon_1d=recon_1d)
@@ -385,12 +386,16 @@ def prediction(seq_region, ctcf_region, atac_region, model_path,
         try:
             output = model(inputs)
         except TypeError:
-            output = model({
+            inputs = {
                     'seq': inputs[..., :5],
                     'ctcf': inputs[..., 5:6],
                     'atac': inputs[..., 6:7]
-                },
-                predict_tracks=['ctcf', 'atac', 'rad21', 'h3k27ac', 'h3k4me3', 'hic']
+                }
+            if other_feat_names is not None and other_regions is not None:
+                for i, other_feat in enumerate(other_feat_names):
+                    inputs[other_feat] = torch.tensor(other_regions[i]).unsqueeze(0).unsqueeze(2).to(inputs['seq'].device)
+            output = model(inputs,
+                predict_tracks=['ctcf', 'atac', 'rad21', 'h3k27ac', 'h3k4me3', 'h3k9me3', 'h3k36me3', 'h3k27me3', 'myc', 'nanog', 'yy1', 'polr2a', 'rnaseq', 'hic']
             )
         if isinstance(output, dict):
             pred = output['hic']

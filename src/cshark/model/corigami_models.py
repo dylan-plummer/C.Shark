@@ -36,6 +36,7 @@ class CSharkUniversalModel(nn.Module):
                  input_track_names: list,
                  all_track_names: list,
                  transformer_hidden_dim=64,
+                 dim_feedforward=64,
                  num_transformer_layers=4,
                  target_mat_size=256,
                  target_1d_length=8192,
@@ -43,6 +44,8 @@ class CSharkUniversalModel(nn.Module):
                  predict_hic=True,
                  record_attn=False,
                  activation_1d=None,
+                 seq_filter_size=15,
+                 epi_filter_size=7,
                  **kwargs):
         super().__init__()
         self.input_track_names = input_track_names
@@ -57,7 +60,7 @@ class CSharkUniversalModel(nn.Module):
         # Sequence Embedder (handles diploid case)
         self.seq_embedder = blocks.Encoder(
             in_channel=10 if diploid else 5,
-            start_filter_size=15,
+            start_filter_size=seq_filter_size,
             output_size=transformer_hidden_dim,
             num_blocks=embedder_blocks
         )
@@ -65,7 +68,7 @@ class CSharkUniversalModel(nn.Module):
         # A dictionary of embedders for each possible 1D track
         self.track_embedders = nn.ModuleDict({
             name: blocks.Encoder(in_channel=1, 
-                                 start_filter_size=7,
+                                 start_filter_size=epi_filter_size,
                                  output_size=transformer_hidden_dim, 
                                  num_blocks=embedder_blocks)
             for name in input_track_names
@@ -75,7 +78,7 @@ class CSharkUniversalModel(nn.Module):
         self.modality_embeddings = nn.Parameter(torch.randn(1 + len(all_track_names), transformer_hidden_dim))
         self.pos_encoder = blocks.PositionalEncoding(transformer_hidden_dim, max_len=2048)
         encoder_layers = blocks.TransformerLayer(transformer_hidden_dim, nhead=4, dropout=0.1,
-                                                 dim_feedforward=transformer_hidden_dim, batch_first=True)
+                                                 dim_feedforward=dim_feedforward, batch_first=True)
         self.transformer_encoder = blocks.TransformerEncoder(encoder_layers,
                                                              num_layers=num_transformer_layers,
                                                              record_attn=record_attn)

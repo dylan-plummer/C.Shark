@@ -62,19 +62,37 @@ def load_default(model_path, record_attn=False,
         # print(f'Target tracks: {target_tracks}')
         # print(f'Input tracks: {input_tracks}')
         num_target_tracks = len(target_tracks)
-        model = get_model('CSharkUniversalModel', mid_hidden, 
-                        num_genomic_features=num_genomic_features, 
-                        mat_size=mat_size,
-                        record_attn=record_attn, 
-                        diploid=diploid,
-                        num_target_tracks=num_target_tracks, 
-                        target_1d_length=4096,
-                        seq_filter_size=seq_filter_size,
-                        recon_1d=recon_1d,
-                        predict_1d=True,
-                        input_track_names=input_tracks,
-                        all_track_names=all_track_names)
-        load_checkpoint(model, model_path)
+        try:
+            model = get_model('CSharkUniversalModel', mid_hidden, 
+                            num_genomic_features=num_genomic_features, 
+                            mat_size=mat_size,
+                            record_attn=record_attn, 
+                            diploid=diploid,
+                            num_target_tracks=num_target_tracks, 
+                            target_1d_length=4096,
+                            seq_filter_size=15,
+                            epi_filter_size=7,
+                            recon_1d=recon_1d,
+                            predict_1d=True,
+                            input_track_names=input_tracks,
+                            all_track_names=all_track_names)
+            load_checkpoint(model, model_path)
+        except Exception as e:  # fallback to old universal model
+            model = get_model('CSharkUniversalModel', mid_hidden, 
+                            num_genomic_features=num_genomic_features, 
+                            mat_size=mat_size,
+                            record_attn=record_attn, 
+                            diploid=diploid,
+                            num_target_tracks=num_target_tracks, 
+                            target_1d_length=4096,
+                            seq_filter_size=3,
+                            epi_filter_size=3,
+                            dim_feedforward=32,
+                            recon_1d=recon_1d,
+                            predict_1d=True,
+                            input_track_names=input_tracks,
+                            all_track_names=all_track_names)
+            load_checkpoint(model, model_path)
     except Exception as e:  # fallback to old models
         try:  # old C.Origami checkpoint
             model = get_model(model_name, mid_hidden, 
@@ -134,6 +152,7 @@ def get_model(model_name, mid_hidden, num_genomic_features=2, mat_size=256,
               num_target_tracks=0, predict_1d=False,
               seq_filter_size=3,
               epi_filter_size=5,
+              dim_feedforward=64,
               use_seq_attn=True,
               target_1d_length=8192,
               recon_1d=False,
@@ -177,10 +196,12 @@ def get_model(model_name, mid_hidden, num_genomic_features=2, mat_size=256,
                            diploid=diploid,
                            seq_filter_size=seq_filter_size,
                            epi_filter_size=epi_filter_size,
+                           dim_feedforward=dim_feedforward,
                            use_seq_attn=use_seq_attn,
                            target_1d_length=target_1d_length,
                            recon_1d=recon_1d,
-                           record_attn=record_attn)
+                           record_attn=record_attn,
+                           activation_1d='softplus')
         #print(model.decoder_1d_heads)
         
     else:
@@ -193,7 +214,6 @@ def load_checkpoint(model, model_path):
     model.to(device)
 
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    #print(checkpoint)
     model_weights = checkpoint['state_dict']
 
     # Edit keys

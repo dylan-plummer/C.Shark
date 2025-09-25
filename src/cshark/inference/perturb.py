@@ -157,7 +157,9 @@ def main():
                         help='max value for color scale of diff matrix', required=False)
     parser.add_argument('--ctcf-motif-p', dest='ctcf_motif_p', type=int, default=None,
                         help='max p-value (transformed) to display motif (see https://jaspar2020.genereg.net/genome-tracks/)', required=False)
-
+    parser.add_argument('--no-plots', dest='no_plots', 
+                        action = 'store_true',
+                        help='do not generate plots')
     args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
 
     os.makedirs('tmp', exist_ok=True)
@@ -217,6 +219,7 @@ def main():
                     peak_height=args.peak_height,
                     ctcf_motif_p=args.ctcf_motif_p,
                     undo_log=args.hic_log_transform,
+                    no_plots=args.no_plots,
                     silent=args.silent)
     else:  # full chromosome prediction
         # use the step-size arg to do predictions for the whole chromosome
@@ -415,7 +418,9 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     min_val_diff=-0.5, max_val_diff=0.5,
                     peak_height=2.0, ctcf_motif_p=500,
                     undo_log=True,
-                    ctcf_log2=False, silent=False):
+                    ctcf_log2=False, 
+                    no_plots=False,
+                    silent=False):
     os.makedirs(output_path, exist_ok=True)
     if not outname.endswith('_') and outname != '':
                 outname += '_'
@@ -435,7 +440,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             window = window, 
             ctcf_log2=ctcf_log2,
             bigwig_log=bigwig_log_transform)
-    print(len(other_regions) if other_regions is not None else 0)
     num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
     if atac_region is None:
             num_genomic_features -= 1
@@ -447,11 +451,12 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                           diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
                                           recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform)
     pred_before = pred_before_output['hic']
-    plt.imshow(pred_before, cmap='Reds')
-    plt.colorbar()
-    plt.title('Prediction before perturbation')
-    plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred_before.png'), dpi=300)
-    plt.close()
+    if not no_plots:
+        plt.imshow(pred_before, cmap='Reds')
+        plt.colorbar()
+        plt.title('Prediction before perturbation')
+        plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred_before.png'), dpi=300)
+        plt.close()
     pred_before_1d = pred_before_output['1d']
 
     input_track_names = []
@@ -530,13 +535,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                    num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                    diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
-                                   recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform)
+                                   recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform,
+                                   other_feat_names=input_track_names[2:])
     pred = pred_output['hic']
-    plt.imshow(pred, cmap='Reds')
-    plt.colorbar()
-    plt.title('Prediction after perturbation')
-    plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred.png'), dpi=300)
-    plt.close()
+    if not no_plots:
+        plt.imshow(pred, cmap='Reds')
+        plt.colorbar()
+        plt.title('Prediction after perturbation')
+        plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred.png'), dpi=300)
+        plt.close()
     pred_1d = pred_output['1d']
 
     # get track_names from ctcf_path, atac_path, other_feats
@@ -549,29 +556,32 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             ctcf_pred = pred_1d[:, track_idx]
         except IndexError as e:
             break
+        if track_name not in plot_track_names:
+            continue
         ctcf_log2fc = np.log2((ctcf_pred + 1e-5) / (ctcf_pred_before + 1e-5))
         log2fc_norm = ctcf_log2fc * ctcf_pred_before
 
         ymax = max(np.max(ctcf_pred_before), np.max(ctcf_pred))
 
-        fig, axs = plt.subplots(3, 1, figsize=(10, 5))
-        axs[0].plot(ctcf_pred_before, label='Before', color='blue')
-        # fill to zero
-        axs[0].fill_between(range(len(ctcf_pred_before)), ctcf_pred_before, 0, color='blue', alpha=0.2)
-        axs[0].set_ylim(0, ymax)
-        axs[1].plot(ctcf_pred, label='After', color='orange')
-        # fill to zero
-        axs[1].fill_between(range(len(ctcf_pred)), ctcf_pred, 0, color='orange', alpha=0.2)
-        axs[1].set_ylim(0, ymax)
-        axs[2].plot(log2fc_norm, label='Log2FC', color='green')
-        # fill to zero
-        axs[2].fill_between(range(len(log2fc_norm)), log2fc_norm, 0, color='green', alpha=0.2)
-        axs[0].set_title(f'{track_name.upper()} Before')
-        axs[1].set_title(f'{track_name.upper()} After')
-        axs[2].set_title(f'{track_name.upper()} Log2FC * original signal')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{track_name}_log2fc.png'), dpi=300)
-        plt.close(fig)
+        if not no_plots:
+            fig, axs = plt.subplots(3, 1, figsize=(10, 5))
+            axs[0].plot(ctcf_pred_before, label='Before', color='blue')
+            # fill to zero
+            axs[0].fill_between(range(len(ctcf_pred_before)), ctcf_pred_before, 0, color='blue', alpha=0.2)
+            axs[0].set_ylim(0, ymax)
+            axs[1].plot(ctcf_pred, label='After', color='orange')
+            # fill to zero
+            axs[1].fill_between(range(len(ctcf_pred)), ctcf_pred, 0, color='orange', alpha=0.2)
+            axs[1].set_ylim(0, ymax)
+            axs[2].plot(log2fc_norm, label='Log2FC', color='green')
+            # fill to zero
+            axs[2].fill_between(range(len(log2fc_norm)), log2fc_norm, 0, color='green', alpha=0.2)
+            axs[0].set_title(f'{track_name.upper()} Before')
+            axs[1].set_title(f'{track_name.upper()} After')
+            axs[2].set_title(f'{track_name.upper()} Log2FC * original signal')
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{track_name}_log2fc.png'), dpi=300)
+            plt.close(fig)
 
         if track_name in plot_track_names or track_name in input_track_names:
             # write bigwig files for pred
@@ -582,28 +592,28 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 write_tmp_pred_bigwig(input_track_paths[0], ctcf_log2fc, track_name, chr_name, start, suffix='pred_KO')
             else:
                 write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred, track_name, chr_name, start, suffix='pred_KO')
-
     plot_ground_truth = False
-    try:    
-            ctcf_filename = os.path.basename(ctcf_path).split('.')[0]
-            hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace(f'/{ctcf_filename}.bw', '') + f'/{chr_name}.npz'
-            hic = HiCFeature(path = hic_path)
-            gt_res = res
-            if res == 8192:
-                gt_res = 10000
-            if res == 4096:
-                gt_res = 5000
-            mat = hic.get(start, window=int(window), res=gt_res)
-            mat = resize(mat, (int(image_scale), int(image_scale)), anti_aliasing=True)
-            mat += 0.01
-            plot = plot_utils.MatrixPlot(output_path, mat, 'ground_truth', celltype, 
-                                    chr_name, start)
-            plot.plot(vmin=1.0, vmax=2.5)
-            plot_ground_truth = True
-    except Exception as e:
-            print(e)
-            print('No ground truth found')
-            mat = np.zeros_like(pred)
+    if not no_plots:
+        try:    
+                ctcf_filename = os.path.basename(ctcf_path).split('.')[0]
+                hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace(f'/{ctcf_filename}.bw', '') + f'/{chr_name}.npz'
+                hic = HiCFeature(path = hic_path)
+                gt_res = res
+                if res == 8192:
+                    gt_res = 10000
+                if res == 4096:
+                    gt_res = 5000
+                mat = hic.get(start, window=int(window), res=gt_res)
+                mat = resize(mat, (int(image_scale), int(image_scale)), anti_aliasing=True)
+                mat += 0.01
+                plot = plot_utils.MatrixPlot(output_path, mat, 'ground_truth', celltype, 
+                                        chr_name, start)
+                plot.plot(vmin=1.0, vmax=2.5)
+                plot_ground_truth = True
+        except Exception as e:
+                print(e)
+                print('No ground truth found')
+                mat = np.zeros_like(pred)
 
     write_tmp_cooler(pred, chr_name, start, res=res)
     write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool', res=res)
@@ -942,37 +952,38 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     f.write(line)
         
 
-    try:
-        region = region if region is not None else f"{chr_name}:{start}-{start + window}"
-        
-        if plot_diff:
-            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks_diff.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
+    if not no_plots:
+        try:
+            region = region if region is not None else f"{chr_name}:{start}-{start + window}"
+            
+            if plot_diff:
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks_diff.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
+                if silent:
+                    tracks_cmd += ' > /dev/null 2>&1'
+                os.system(tracks_cmd)
+            if plot_ground_truth:
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_true_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
+                if silent:
+                    tracks_cmd += ' > /dev/null 2>&1'
+                os.system(tracks_cmd)
+            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_pred_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
             if silent:
                 tracks_cmd += ' > /dev/null 2>&1'
             os.system(tracks_cmd)
-        if plot_ground_truth:
-            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_true_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
-            if silent:
-                tracks_cmd += ' > /dev/null 2>&1'
-            os.system(tracks_cmd)
-        tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_pred_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
-        if silent:
-            tracks_cmd += ' > /dev/null 2>&1'
-        os.system(tracks_cmd)
-        if deletion_starts is not None and deletion_widths is not None:
-            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
-            if silent:
-                tracks_cmd += ' > /dev/null 2>&1'
-            os.system(tracks_cmd)
+            if deletion_starts is not None and deletion_widths is not None:
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
+                if silent:
+                    tracks_cmd += ' > /dev/null 2>&1'
+                os.system(tracks_cmd)
 
+            
+        except Exception as e:  # probably no tracks.ini file
+            print(e)
         
-    except Exception as e:  # probably no tracks.ini file
-         print(e)
-    
-    try:
-        os.rename('tmp/ctcf_motif.bed', 'tmp/ctcf_motifs_detected.bed')
-    except Exception:
-        pass
+        try:
+            os.rename('tmp/ctcf_motif.bed', 'tmp/ctcf_motifs_detected.bed')
+        except Exception:
+            pass
 
 
 def screening(output_path, outname, celltype, chr_name, screen_start, screen_end, perturb_width, step_size, model_path, seq_path, ctcf_path, atac_path, other_paths, 
