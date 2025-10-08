@@ -98,6 +98,7 @@ def load_default(model_path, record_attn=False,
             model = get_model(model_name, mid_hidden, 
                             num_genomic_features=num_genomic_features, 
                             mat_size=mat_size, 
+                            epi_filter_size=3,
                             record_attn=record_attn)
             load_checkpoint(model, model_path)
         except Exception as e:

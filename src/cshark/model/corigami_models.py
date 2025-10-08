@@ -634,7 +634,9 @@ class ConvTransModel(ConvModel):
         if use_cross_attn:
             self.encoder = blocks.EncoderCrossAttn(num_genomic_features, output_size = mid_hidden, num_blocks = 12)
         else:
-            self.encoder = blocks.EncoderSplit(num_genomic_features, output_size = mid_hidden, num_blocks = 12)
+            self.encoder = blocks.EncoderSplit(num_genomic_features, output_size = mid_hidden, 
+                                               epi_filter_size=3,
+                                               num_blocks = 12)
         self.attn = blocks.AttnModule(hidden = mid_hidden, record_attn = record_attn)
         self.decoder = blocks.Decoder2D(mid_hidden * 2)
         self.record_attn = record_attn

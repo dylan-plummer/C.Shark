@@ -430,15 +430,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         plot_pred_bigwigs = []
     diploid = seq2_path is not None
     ko_data_types = ko_data  # list of data types to knockout
-    if isinstance(peak_height, float):
+    if isinstance(peak_height, float) and deletion_starts is not None:
         peak_height = [peak_height] * len(deletion_starts)
-    elif len(peak_height) != len(deletion_starts):
-        raise ValueError('Length of peak_height must be 1 or equal to length of deletion_starts')
-    if len(ko_data) != len(ko_mode):
-        if len(ko_mode) == 1:
-            ko_mode = ko_mode * len(ko_data)
-        else:
-            raise ValueError('Length of ko_mode must be 1 or equal to length of ko_data')
     tmp_ko_data = []
     for ko_data_type in ko_data:
         if ko_data_type not in tmp_ko_data:
