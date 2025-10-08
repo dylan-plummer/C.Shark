@@ -430,6 +430,15 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         plot_pred_bigwigs = []
     diploid = seq2_path is not None
     ko_data_types = ko_data  # list of data types to knockout
+    if isinstance(peak_height, float):
+        peak_height = [peak_height] * len(deletion_starts)
+    elif len(peak_height) != len(deletion_starts):
+        raise ValueError('Length of peak_height must be 1 or equal to length of deletion_starts')
+    if len(ko_data) != len(ko_mode):
+        if len(ko_mode) == 1:
+            ko_mode = ko_mode * len(ko_data)
+        else:
+            raise ValueError('Length of ko_mode must be 1 or equal to length of ko_data')
     tmp_ko_data = []
     for ko_data_type in ko_data:
         if ko_data_type not in tmp_ko_data:
@@ -489,7 +498,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             plot_track_names.append(plot_track)
             plot_track_paths.append(input_track_paths[0].replace(input_track_names[0], plot_track))
     for plot_track in plot_pred_bigwigs:
-        if plot_track not in input_track_names and plot_track not in plot_track_names:  # only plot additional tracks
+        #if plot_track not in input_track_names and plot_track not in plot_track_names:  # only plot additional tracks
+        if plot_track not in plot_track_names:  # only plot additional tracks
             plot_track_names.append(plot_track)
             plot_track_paths.append(input_track_paths[0].replace(input_track_names[0], plot_track))
     # get indices of the input tracks for KO
@@ -503,7 +513,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
     # Delete inputs
     if deletion_starts is not None and deletion_widths is not None:
-        for deletion_start, deletion_width, ko_data_type, knockout_mode in zip(deletion_starts, deletion_widths, ko_data_types, ko_mode):
+        for deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height in zip(deletion_starts, deletion_widths, ko_data_types, ko_mode, peak_height):
             if ko_data_type in input_track_names:
                 ko_channel = input_track_names.index(ko_data_type)
             else:
@@ -516,7 +526,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                     deletion_start, deletion_width, seq_region, ctcf_region, 
                     atac_region, other_regions, ko_data=[ko_data_type], ko_channels=[ko_channel], channel_offset=channel_offset,
-                    ko_mode=[knockout_mode], peak_height=peak_height)
+                    ko_mode=[knockout_mode], peak_height=ko_height)
     
     # perturb sequence if var_pos is not None
     if var_pos is not None and alt_bp is not None:
@@ -628,12 +638,12 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool', res=res)
     if deletion_starts is not None and deletion_widths is not None:
         one_perturb_already_done = {}
-        for deletion_start, deletion_width, ko_data_type, knockout_mode in zip(deletion_starts, deletion_widths, ko_data_types, ko_mode):
+        for deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height in zip(deletion_starts, deletion_widths, ko_data_types, ko_mode, peak_height):
             if ko_data_type in input_track_names:
                 ko_path = input_track_paths[input_track_names.index(ko_data_type)]
                 if ko_data_type in one_perturb_already_done:
                     ko_path = f'tmp/{ko_data_type}_ko.bw'
-                write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=knockout_mode, peak_height=peak_height)
+                write_tmp_chipseq_ko(ko_path, ko_data_type, chr_name, start, deletion_start, deletion_width, ko_mode=knockout_mode, peak_height=ko_height)
                 one_perturb_already_done[ko_data_type] = True
             else:
                 if ko_data_type != 'seq':
