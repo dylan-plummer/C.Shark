@@ -290,7 +290,8 @@ def main():
             pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                                   num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                                   mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
-                                                  recon_1d=args.recon_1d, undo_log=args.hic_log_transform)
+                                                  recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
+                                                  other_feat_names=input_track_names[2:])
             pred_before = pred_before_output['hic']
             pred_before_1d = pred_before_output['1d']
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
@@ -299,7 +300,8 @@ def main():
             pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                            num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                            mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
-                                           recon_1d=args.recon_1d, undo_log=args.hic_log_transform)
+                                           recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
+                                           other_feat_names=input_track_names[2:])
             pred = pred_output['hic']
             pred_1d = pred_output['1d']
             write_tmp_cooler(pred, chr_name, start, res=res)
@@ -432,6 +434,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     ko_data_types = ko_data  # list of data types to knockout
     if isinstance(peak_height, float) and deletion_starts is not None:
         peak_height = [peak_height] * len(deletion_starts)
+    print(peak_height)
     tmp_ko_data = []
     for ko_data_type in ko_data:
         if ko_data_type not in tmp_ko_data:
@@ -447,19 +450,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             num_genomic_features -= 1
     if ctcf_region is None:
             num_genomic_features -= 1
-    # do baseline prediction for comparison
-    pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
-                                          num_genomic_features=num_genomic_features, mat_size=image_scale, 
-                                          diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
-                                          recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform)
-    pred_before = pred_before_output['hic']
-    if not no_plots:
-        plt.imshow(pred_before, cmap='Reds')
-        plt.colorbar()
-        plt.title('Prediction before perturbation')
-        plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred_before.png'), dpi=300)
-        plt.close()
-    pred_before_1d = pred_before_output['1d']
 
     input_track_names = []
     input_track_paths = []
@@ -473,6 +463,22 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         for other_feat in other_feats:
             input_track_names.append(os.path.basename(other_feat).split('.')[0])
             input_track_paths.append(other_feat)
+    # do baseline prediction for comparison
+    pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
+                                          num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                          diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
+                                          recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform,
+                                          other_feat_names=input_track_names[2:])
+    pred_before = pred_before_output['hic']
+    if not no_plots:
+        plt.imshow(pred_before, cmap='Reds')
+        plt.colorbar()
+        plt.title('Prediction before perturbation')
+        plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred_before.png'), dpi=300)
+        plt.close()
+    pred_before_1d = pred_before_output['1d']
+
+    
 
     if len(input_track_paths) == 0:
         print('No input tracks found. Using plot_bigwigs only.')

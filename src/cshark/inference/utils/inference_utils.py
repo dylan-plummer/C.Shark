@@ -404,7 +404,6 @@ def prediction(seq_region, ctcf_region, atac_region, model_path,
                 if isinstance(pred_1d, dict):
                     tmp_1d = [v.detach().cpu().numpy() for v in pred_1d.values()]
                     pred_1d = np.concatenate(tmp_1d, axis=0).transpose()
-                    print(pred_1d.shape)
                 else:
                     pred_1d = pred_1d[0].detach().cpu().numpy()
                 if bigwig_log:
