@@ -151,7 +151,8 @@ class VizCallback(Callback):
                             other_paths.append(self.rad21[celltype])
                     #other_paths = [self.h3k27me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
-                        start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2)
+                        start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2,
+                        bigwig_log=pl_module.hparams.bigwig_log_transform)
                     inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
                     pl_module.model.eval()
                     print('inputs shape:', inputs.shape)
@@ -359,6 +360,12 @@ def init_parser():
   parser.add_argument('--no-bigwig-log-transform', dest='bigwig_log_transform',
                         action='store_false',
                         help='Whether to apply log transformation to BigWig tracks')
+  parser.add_argument('--masking-prob', dest='training_masking_prob', type=float, default=0.1,
+                        help='Probability of masking an input 1D track during training (0.0 to disable). Recommended: 0.15')
+  parser.add_argument('--masking-min-chunk', dest='training_masking_min_chunk', type=int, default=256,
+                    help='Minimum size (in bp) of a random mask chunk. Default is one output bin size.')
+  parser.add_argument('--masking-max-chunk', dest='training_masking_max_chunk', type=int, default=10240,
+                    help='Maximum size (in bp) of a random mask chunk. (e.g., 10kb)')
 
 
 
@@ -456,7 +463,10 @@ def init_training(args):
             if target_1d_tracks.shape[1] == 1:
                 axs = [axs]
             for i in range(target_1d_tracks.shape[1]):
-                track = np.exp(target_1d_tracks[:, i]) - 1  # inverse log transformation
+                if args.bigwig_log_transform:
+                    track = np.exp(target_1d_tracks[:, i]) - 1  # inverse log transformation
+                else:
+                    track = target_1d_tracks[:, i]
                 axs[i].plot(track, color=colors[i % len(colors)])
                 axs[i].fill_between(range(len(target_1d_tracks)), track, color=colors[i % len(colors)], alpha=0.5)
             plt.title('Target 1D Tracks')
@@ -508,6 +518,7 @@ class TrainModule(pl.LightningModule):
             target_1d_length=args.target_1d_size,
             recon_1d=args.recon_1d,
             seq_filter_size=args.seq_filter_size,
+            activation_1d='softplus' if not self.hparams.bigwig_log_transform else None
             # Add other necessary model args from hparams if they exist
         )
         #print(model)
@@ -558,8 +569,8 @@ class TrainModule(pl.LightningModule):
             for i, feature in enumerate(self.hparams.output_features):
                 track_loss = loss_1d[:, i].mean()
                 self.log(f'train_loss_1d_{feature}', track_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-            # Mask out the 0 values in the target_1d_tracks
-            mask = target_1d_tracks != 0
+            # Mask out the 0 and -1 values in the target_1d_tracks
+            mask = (target_1d_tracks != 0) & (target_1d_tracks != -1)
             loss_1d = (loss_1d * mask).sum() / mask.sum()
         return loss_hic, loss_1d if target_1d_tracks is not None else None
 
@@ -568,45 +579,19 @@ class TrainModule(pl.LightningModule):
         loss_hic = 0.0
         loss_1d = 0.0
         inputs, mat, target_1d_tracks = self.proc_batch(batch)
+
         input_dict = {'seq': inputs[:, :, :5]}
         # sample a random subset of input features
         if len(self.hparams.input_features) > 0:
-            n_input_tracks = random.randint(1, len(self.hparams.input_features))
-            input_tracks = random.sample(self.hparams.input_features, n_input_tracks)
+            n_input_tracks_extra = random.randint(0, 1) # only one extra track for now
+            input_tracks = [random.choice(['ctcf', 'atac'])]  # always include either CTCF or ATAC
+            extra_features = [track for track in self.hparams.input_features if track not in input_tracks]
+            input_tracks += random.sample(extra_features, n_input_tracks_extra)
             for track in input_tracks:
                 input_dict[track] = inputs[:, :, 5 + self.hparams.input_features.index(track):6 + self.hparams.input_features.index(track)]
         loss_hic_default, loss_1d_default = self.process_batch(input_dict, mat, target_1d_tracks)
         loss_hic += loss_hic_default
         loss_1d += loss_1d_default if target_1d_tracks is not None else 0.0
-
-        # do a batch without CTCF 
-        # input_dict = {'seq': inputs[:, :, :5], 'atac': inputs[:, :, 6:7]}
-        # loss_hic_no_ctcf, loss_1d_no_ctcf = self.process_batch(input_dict, mat, target_1d_tracks)
-        # loss_hic += loss_hic_no_ctcf
-        # loss_1d += loss_1d_no_ctcf if target_1d_tracks is not None else 0.0
-        # self.log('train_loss_1d_no_ctcf', loss_1d_no_ctcf, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        # self.log('train_loss_hic_no_ctcf', loss_hic_no_ctcf, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-
-        # do a batch without ATAC
-        # input_dict = {'seq': inputs[:, :, :5], 'ctcf': inputs[:, :, 5:6]}
-        # loss_hic_no_atac, loss_1d_no_atac = self.process_batch(input_dict, mat, target_1d_tracks)
-        # loss_hic += loss_hic_no_atac
-        # loss_1d += loss_1d_no_atac if target_1d_tracks is not None else 0.0
-        # self.log('train_loss_1d_no_atac', loss_1d_no_atac, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        # self.log('train_loss_hic_no_atac', loss_hic_no_atac, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-
-        # input_dict = {'seq': inputs[:, :, :5], 'ctcf': inputs[:, :, 5:6], 'atac': inputs[:, :, 6:7]}
-        # randomly include other genomic features if they are present
-        # for track in self.hparams.input_features:
-        #     if track not in input_dict:
-        #         if random.random() < 0.5:  # 50% chance to include each feature
-        #             input_dict[track] = inputs[:, :, 5 + self.hparams.input_features.index(track):6 + self.hparams.input_features.index(track)]
-        
-        # loss_hic_other, loss_1d_other = self.process_batch(input_dict, mat, target_1d_tracks)
-        # loss_hic += loss_hic_other
-        # loss_1d += loss_1d_other if target_1d_tracks is not None else 0.0
-        # self.log('train_loss_1d_other', loss_1d_other, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        # self.log('train_loss_hic_other', loss_hic_other, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
         total_loss = loss_hic * self.hparams.training_loss_weight_hic + loss_1d * self.hparams.training_loss_weight_1d if target_1d_tracks is not None else loss_hic * self.hparams.training_loss_weight_hic
        
@@ -624,6 +609,8 @@ class TrainModule(pl.LightningModule):
 
         pred_hic = outputs.get('hic')
         loss_hic = self.criterion(pred_hic, mat)
+        hic_corr = torch.corrcoef(torch.stack([pred_hic.flatten(), mat.flatten()]))[0, 1]
+        self.log('val_hic_corr', hic_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         total_loss += loss_hic * self.hparams.training_loss_weight_hic
 
         if target_1d_tracks is not None:
@@ -643,8 +630,8 @@ class TrainModule(pl.LightningModule):
                     target_track = target_1d_tracks[..., i]
                 corr = torch.corrcoef(torch.stack([pred_track.flatten(), target_track.flatten()]))[0, 1]
                 self.log(f'val_corr_1d_{feature}', corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-            # Mask out the 0 values in the target_1d_tracks
-            mask = target_1d_tracks != 0
+            # Mask out the 0 and -1 values in the target_1d_tracks
+            mask = (target_1d_tracks != 0) & (target_1d_tracks != -1)
             loss_1d = (loss_1d * mask).sum() / mask.sum()
             total_loss += loss_1d * self.hparams.training_loss_weight_1d
             self.log('val_loss_1d', loss_1d, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
@@ -672,8 +659,8 @@ class TrainModule(pl.LightningModule):
                 track_loss = loss_1d[:, i].mean()
                 self.log(f'test_loss_1d_{feature}', track_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
      
-            # Mask out the 0 values in the target_1d_tracks
-            mask = target_1d_tracks != 0
+            # Mask out the 0 and -1 values in the target_1d_tracks
+            mask = (target_1d_tracks != 0) & (target_1d_tracks != -1)   
             loss_1d = (loss_1d * mask).sum() / mask.sum()
             total_loss += loss_1d * self.hparams.training_loss_weight_1d
             self.log('test_loss_1d', loss_1d, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)

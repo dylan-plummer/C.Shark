@@ -65,6 +65,14 @@ class GenomicFeatureSingleThread(Feature):
         self.path = path
         self.load(path)
         self.norm = norm
+        # check if path is valid
+        self.track_present = True  # used to load mask values
+        try:
+            with pbw.open(path) as bw_file:
+                bw_file.close()
+        except:
+            self.track_present = False
+        print(f'{path} track present: {self.track_present}')
         #print(f'Feature path: {path} \n Normalization status: {norm}')
 
     def load(self, path):
@@ -72,15 +80,16 @@ class GenomicFeatureSingleThread(Feature):
 
     def get(self, chr_name, start, end):
         feature = self.feature_to_npy(chr_name, start, end)
-        feature = np.nan_to_num(feature, 0) # Important! replace nan with 0
-        if self.norm == 'log':
-            feature = np.log(feature + 1)
-        elif self.norm == 'log2':
-            feature = np.log2(feature + 1)
-        elif self.norm is None:
-            feature = feature
-        else:
-            raise Exception(f'Norm type {self.norm} undefined')
+        if self.track_present:
+            feature = np.nan_to_num(feature, 0) # Important! replace nan with 0
+            if self.norm == 'log':
+                feature = np.log(feature + 1)
+            elif self.norm == 'log2':
+                feature = np.log2(feature + 1)
+            elif self.norm is None:
+                feature = feature
+            else:
+                raise Exception(f'Norm type {self.norm} undefined')
         return feature
 
     def read_feature(self, path):
@@ -102,20 +111,35 @@ class GenomicFeature(GenomicFeatureSingleThread):
     def __init__(self, path, norm):
         self.path = path
         self.norm = norm
+        # check if path is valid
+        self.track_present = True  # used to load mask values
+        try:
+            with pbw.open(path) as bw_file:
+                bw_file.close()
+        except:
+            self.track_present = False
+        print(f'{path} track present: {self.track_present}')
         #print(f'Feature path: {path} \n Normalization status: {norm}')
 
     def load(self, path):
         raise Exception('Left blank')
 
     def feature_to_npy(self, chr_name, start, end):
-        with pbw.open(self.path) as bw_file:
-            signals = bw_file.values(chr_name, int(start), int(end))
-        return np.array(signals)
+        if self.track_present:
+            with pbw.open(self.path) as bw_file:
+                signals = bw_file.values(chr_name, int(start), int(end))
+            return np.array(signals)
+        else:
+            length = end - start
+            return np.array([-1] * length)
 
     def length(self, chr_name):
-        with pbw.open(self.path) as bw_file:
-            length = bw_file.chroms(chr_name)
-        return length
+        if self.track_present:
+            with pbw.open(self.path) as bw_file:
+                length = bw_file.chroms(chr_name)
+            return length
+        else:
+            return 0
 
 class SequenceFeature(Feature):
 
