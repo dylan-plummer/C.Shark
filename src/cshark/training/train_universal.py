@@ -425,7 +425,7 @@ def init_training(args):
     valloader = pl_module.get_dataloader(args, 'val')
     testloader = pl_module.get_dataloader(args, 'test')
 
-    for test_batch_i in range(10):
+    for test_batch_i in range(5):
         # load a batch and visualize it for debugging
         batch = next(iter(trainloader))
         inputs, mat, target_1d_tracks = pl_module.proc_batch(batch)
@@ -541,7 +541,7 @@ class TrainModule(pl.LightningModule):
     def forward(self, x, predict_tracks=None):
         if predict_tracks is None:
             predict_tracks = self.hparams.output_features + ['hic'] if self.predict_1d else ['hic']
-        return self.model(x, predict_tracks=self.hparams.output_features + ['hic'])
+        return self.model(x, predict_tracks=predict_tracks)
 
     def proc_batch(self, batch):
         target_1d_tracks = None
@@ -590,14 +590,33 @@ class TrainModule(pl.LightningModule):
         # sample a random subset of input features
         if len(self.hparams.input_features) > 0:
             n_input_tracks_extra = random.randint(0, 1) # only one extra track for now
-            input_tracks = [random.choice(['ctcf', 'atac'])]  # always include either CTCF or ATAC
+            input_tracks = ['ctcf', 'atac']  # always include both CTCF and ATAC
             extra_features = [track for track in self.hparams.input_features if track not in input_tracks]
             input_tracks += random.sample(extra_features, n_input_tracks_extra)
             for track in input_tracks:
                 input_dict[track] = inputs[:, :, 5 + self.hparams.input_features.index(track):6 + self.hparams.input_features.index(track)]
-        loss_hic_default, loss_1d_default = self.process_batch(input_dict, mat, target_1d_tracks)
-        loss_hic += loss_hic_default
-        loss_1d += loss_1d_default if target_1d_tracks is not None else 0.0
+        
+        # split into groups based on which input tracks are present (look for mask value -1)
+        # so that we can do a single forward pass for each group
+        unique_combinations = {}
+        for i in range(inputs.shape[0]):
+            present_tracks = tuple(sorted([track for track in input_dict.keys() if track != 'seq' and (inputs[i, :100, 5 + self.hparams.input_features.index(track):6 + self.hparams.input_features.index(track)] != -1).any()]))
+            if present_tracks not in unique_combinations:
+                unique_combinations[present_tracks] = []
+            unique_combinations[present_tracks].append(i)
+        loss_hic = 0.0
+        loss_1d = 0.0
+        for present_tracks, indices in unique_combinations.items():
+            batch_input = {'seq': inputs[indices, :, :5]}
+            for track in present_tracks:
+                if track != 'seq':
+                    batch_input[track] = inputs[indices, :, 5 + self.hparams.input_features.index(track):6 + self.hparams.input_features.index(track)]
+            batch_mat = mat[indices]
+            batch_target_1d = target_1d_tracks[indices] if target_1d_tracks is not None else None
+            loss_hic_batch, loss_1d_batch = self.process_batch(batch_input, batch_mat, batch_target_1d)
+            loss_hic += loss_hic_batch * len(indices) / inputs.shape[0]
+            if target_1d_tracks is not None:
+                loss_1d += loss_1d_batch * len(indices) / inputs.shape[0]
 
         total_loss = loss_hic * self.hparams.training_loss_weight_hic + loss_1d * self.hparams.training_loss_weight_1d if target_1d_tracks is not None else loss_hic * self.hparams.training_loss_weight_hic
        
