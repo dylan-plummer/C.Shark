@@ -570,10 +570,10 @@ class TrainModule(pl.LightningModule):
             pred_1d_dict = outputs.get('1d')
             pred_1d = torch.stack([pred_1d_dict[feature] for feature in self.hparams.output_features], dim=2)
             #loss_1d = self.criterion(pred_1d, target_1d_tracks)
-            loss_1d = torch.nn.functional.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
+            loss_1d = torch.nn.functional.mse_loss(pred_1d, target_1d_tracks, reduction='none')
             # log each 1D track loss separately
             for i, feature in enumerate(self.hparams.output_features):
-                track_loss = loss_1d[:, i].mean()
+                track_loss = loss_1d[..., i].mean()
                 self.log(f'train_loss_1d_{feature}', track_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             # Mask out the 0 and -1 values in the target_1d_tracks
             mask = (target_1d_tracks != 0) & (target_1d_tracks != -1)
