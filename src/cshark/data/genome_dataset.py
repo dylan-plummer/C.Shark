@@ -23,7 +23,9 @@ class GenomeDataset(Dataset):
                        target_mat_size=256,
                        target_1d_size=512,
                        hic_log_transform=True,
-                       use_aug = True):
+                       use_aug = True,
+                       ctcf_ko=False):
+        print('CTCF KO:', ctcf_ko)
         self.data_root = celltype_root
         self.include_sequence = include_sequence
         self.include_genomic_features = include_genomic_features
@@ -44,6 +46,7 @@ class GenomeDataset(Dataset):
         if not predict_hic and not predict_1d:
              raise ValueError("Must predict at least Hi-C or 1D tracks.")
         self.use_aug = use_aug
+        self.ctcf_ko = ctcf_ko
 
         if mode != 'train': self.use_aug = False # Set augmentation
 
@@ -137,7 +140,8 @@ class GenomeDataset(Dataset):
                                                         target_mat_size=self.target_mat_size,
                                                         target_1d_size=self.target_1d_size,
                                                         hic_log_transform=self.hic_log_transform,
-                                                        use_aug=self.use_aug)
+                                                        use_aug=self.use_aug,
+                                                        ctcf_ko=self.ctcf_ko)
             lengths.append(len(chr_data_dict[chr_name]))
         print('Chromosome datasets loaded')
         return chr_data_dict, lengths
@@ -152,11 +156,12 @@ class GenomeDataset(Dataset):
             feature_list: a list of genomic features (bigwig files)
         '''
         feat_list = []
-        for feat_item in list(feat_dicts.values()):
+        for feature in feat_dicts.keys():
+            feat_item = feat_dicts[feature]
             file_name = feat_item['file_name']
             file_path = f'{root_dir}/{file_name}'
             norm = feat_item['norm']
-            feat_list.append(data_feature.GenomicFeature(file_path, norm))
+            feat_list.append(data_feature.GenomicFeature(file_path, norm, knockout=self.ctcf_ko and feature == 'ctcf'))
         return feat_list
         
     def get_chr_names(self, assembly):

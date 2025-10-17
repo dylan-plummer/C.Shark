@@ -37,9 +37,10 @@ class VizCallback(Callback):
         self.assembly2 = assembly2
         self.image_scale = image_scale  # size of each heatmap (fixed by model)
         self.resolution = resolution
-        self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000',
-                     'chr11:1500000', 'chr2:162000000',
-                     'chr10:122700000', 'chr15:59100000', 'chr12:89300000']
+        # self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000',
+        #              'chr11:1500000', 'chr2:162000000',
+        #              'chr10:122700000', 'chr15:59100000', 'chr12:89300000']
+        self.loci = ['chr11:31000000', 'chr1:66000000']
         self.chr_names = [s.split(':')[0] for s in self.loci]
         self.starts = [int(s.split(':')[1]) for s in self.loci]
         self.seq = f"{self.data_root}/{self.assembly}/dna_sequence"
@@ -84,7 +85,10 @@ class VizCallback(Callback):
                     os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
                     pred_1d_tracks = []
                     for i, feature in enumerate(pl_module.hparams.output_features):
-                        bw = data_feature.GenomicFeature(path = f'{self.data_root}/{self.assembly}/{celltype}/genomic_features/{feature}.bw', norm=None)
+                        knockout = feature == 'ctcf' and (pl_module.hparams.ctcf_ko_celltypes is not None and celltype in pl_module.hparams.ctcf_ko_celltypes)
+                        bw = data_feature.GenomicFeature(path = f'{self.data_root}/{self.assembly}/{celltype}/genomic_features/{feature}.bw', 
+                                                         norm=None,
+                                                         knockout=knockout)
                         pred_1d = bw.get(chr_name, start, start + pl_module.window)
                         #pred_1d = resize(pred_1d, (pl_module.hparams.target_1d_size,), anti_aliasing=True, preserve_range=True)
                         bin_size = int(len(pred_1d) / pl_module.hparams.target_1d_size)
@@ -295,6 +299,8 @@ def init_parser():
   # list of celltypes
   parser.add_argument('--celltypes', dest='dataset_celltypes', default=['alpha', 'beta'], nargs='+',
                         help='Cell types to train on')
+  parser.add_argument('--ctcf-ko-celltypes', dest='ctcf_ko_celltypes', default=None, nargs='+',
+                        help='Specify which celltypes to perform simulated CTCF knockout during training')
 
   # Model parameters
   parser.add_argument('--model-type', dest='model_type', default='CSharkUniversalModel',
@@ -419,7 +425,7 @@ def init_training(args):
     valloader = pl_module.get_dataloader(args, 'val')
     testloader = pl_module.get_dataloader(args, 'test')
 
-    for test_batch_i in range(1):
+    for test_batch_i in range(10):
         # load a batch and visualize it for debugging
         batch = next(iter(trainloader))
         inputs, mat, target_1d_tracks = pl_module.proc_batch(batch)
@@ -695,7 +701,7 @@ class TrainModule(pl.LightningModule):
         self.log_dict(norms)
 
     def get_dataset(self, args, mode, celltype):
-
+        print(celltype, args.ctcf_ko_celltypes)
         celltype_root = f'{args.dataset_data_root}/{args.dataset_assembly}/{celltype}'
         genomic_features = {}
         for feature in args.input_features:
@@ -706,6 +712,7 @@ class TrainModule(pl.LightningModule):
             for feature in args.output_features:
                 target_features[feature] = {'file_name' : f'{feature}.bw',
                                             'norm' : 'log' if args.bigwig_log_transform else None }
+        knockout = celltype in args.ctcf_ko_celltypes if args.ctcf_ko_celltypes is not None else False
         dataset = genome_dataset.GenomeDataset(celltype_root, 
                                 args.dataset_assembly,
                                 input_feat_dicts = genomic_features, 
@@ -719,7 +726,8 @@ class TrainModule(pl.LightningModule):
                                 mode = mode,
                                 hic_log_transform = args.hic_log_transform,
                                 include_sequence = True,
-                                include_genomic_features = True)
+                                include_genomic_features = True,
+                                ctcf_ko=knockout,)
 
         # Record length for printing validation image
         if mode == 'val':

@@ -31,8 +31,10 @@ class ChromosomeDataset(Dataset):
                  target_mat_size=256,
                  target_1d_size=512,
                  hic_log_transform=True,
-                 use_aug = True):
+                 use_aug = True,
+                 ctcf_ko=False):
         self.use_aug = use_aug
+        self.ctcf_ko = ctcf_ko
         self.res = target_res # 10kb resolution
         self.target_1d_len = target_1d_size
         self.bins = 2097152 / self.res # 2M bins
@@ -243,7 +245,7 @@ class ChromosomeDataset(Dataset):
         if self.predict_hic and self.mat:
              assert abs(len(self.seq) / self.res -  len(self.mat)) < 2, f'Sequence {len(self.seq) / self.res} and Hi-C {len(self.mat)} have different length.' 
 
-def get_feature_list(root_dir, feat_dicts):
+def get_feature_list(root_dir, feat_dicts, ctcf_ko=False):
     '''
     Args:
         features: a list of dicts with 
@@ -257,7 +259,7 @@ def get_feature_list(root_dir, feat_dicts):
         file_name = feat_item['file_name']
         file_path = f'{root_dir}/{file_name}'
         norm = feat_item['norm']
-        feat_list.append(data_feature.GenomicFeature(file_path, norm))
+        feat_list.append(data_feature.GenomicFeature(file_path, norm, knockout=ctcf_ko))
     return feat_list
 
 def proc_centrotelo(bed_dir):

@@ -2,6 +2,90 @@ import gzip
 import numpy as np
 import pyBigWig as pbw
 
+
+def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor=3.0, background_q=0.1, increase_factor=None):
+    """
+    Simulates knockout of peaks in a signal array by replacing peak regions with background values.
+    
+    Args:
+        signal_array (numpy.ndarray): 1D array containing signal values.
+        threshold (float): Minimum signal value to be considered part of a peak.
+        min_peak_width (int): Minimum width for a region to be called a peak.
+        padding_factor (float): Fraction of peak width to use for background calculation.
+            
+    Returns:
+        numpy.ndarray: Copy of input array with peaks knocked out (replaced with background).
+    """
+    # Create a copy of the input array to modify
+    result = np.copy(signal_array)
+    array_length = len(signal_array)
+    
+    # Find regions above threshold
+    above_threshold = signal_array >= threshold
+    
+    # Track peak regions
+    in_peak = False
+    peak_start = None
+    peaks = []  # Will store (start, end) tuples
+    
+    # Find peaks
+    for i in range(array_length):
+        if above_threshold[i]:
+            if not in_peak:
+                # Start of a new peak
+                peak_start = i
+                in_peak = True
+        else:
+            if in_peak:
+                # End of current peak
+                peak_end = i
+                if peak_end - peak_start >= min_peak_width:
+                    peaks.append((peak_start, peak_end))
+                in_peak = False
+    
+    # Handle case where array ends during a peak
+    if in_peak and array_length - peak_start >= min_peak_width:
+        peaks.append((peak_start, array_length))
+    
+    # Process each peak
+    for peak_start, peak_end in peaks:
+        peak_width = peak_end - peak_start
+        
+        # Calculate padding for background, but don't exceed array bounds
+        padding = min(int(peak_width * padding_factor), 5)
+        
+        # Calculate regions before and after peak for background
+        pre_start = max(0, peak_start - padding)
+        pre_end = peak_start - peak_width
+        
+        post_start = peak_end + peak_width
+        post_end = min(array_length, peak_end + padding)
+        
+        # Calculate mean of surrounding regions as background
+        pre_values = signal_array[pre_start:pre_end]
+        post_values = signal_array[post_start:post_end]
+        
+        # Handle empty regions
+        # pre_mean = np.quantile(pre_values, q=background_q) if len(pre_values) > 0 else 0.0
+        # post_mean = np.quantile(post_values, q=background_q) if len(post_values) > 0 else 0.0
+        pre_mean = np.mean(pre_values) if len(pre_values) > 0 else 0.0
+        post_mean = np.mean(post_values) if len(post_values) > 0 else 0.0
+        
+        # Calculate background value as average of pre and post regions
+        background_val = (pre_mean + post_mean) / 2.0
+
+        background_val = min(background_val, 1.0)  # Cap background value to 1.0
+        
+        if increase_factor is not None:
+            # Increase peak value by the specified factor
+            result[peak_start:peak_end] = signal_array[peak_start:peak_end] * increase_factor
+        else:
+            # Replace peak with background value
+            result[peak_start:peak_end] = background_val
+            #result[peak_start:peak_end] = 1
+    
+    return result
+
 class Feature():
 
     def __init__(self, **kwargs):
@@ -61,10 +145,11 @@ class HiCFeature(Feature):
 
 class GenomicFeatureSingleThread(Feature):
 
-    def __init__(self, path, norm):
+    def __init__(self, path, norm, knockout=False):
         self.path = path
         self.load(path)
         self.norm = norm
+        self.knockout = knockout
         # check if path is valid
         self.track_present = True  # used to load mask values
         try:
@@ -72,7 +157,7 @@ class GenomicFeatureSingleThread(Feature):
                 bw_file.close()
         except:
             self.track_present = False
-        print(f'{path} track present: {self.track_present}')
+        #print(f'{path} track present: {self.track_present}')
         #print(f'Feature path: {path} \n Normalization status: {norm}')
 
     def load(self, path):
@@ -90,6 +175,8 @@ class GenomicFeatureSingleThread(Feature):
                 feature = feature
             else:
                 raise Exception(f'Norm type {self.norm} undefined')
+        if self.knockout:
+            feature = knockout_peaks(feature, threshold=0.5)
         return feature
 
     def read_feature(self, path):
@@ -108,9 +195,10 @@ class GenomicFeatureSingleThread(Feature):
 
 class GenomicFeature(GenomicFeatureSingleThread):
 
-    def __init__(self, path, norm):
+    def __init__(self, path, norm, knockout=False):
         self.path = path
         self.norm = norm
+        self.knockout = knockout
         # check if path is valid
         self.track_present = True  # used to load mask values
         try:
@@ -118,7 +206,7 @@ class GenomicFeature(GenomicFeatureSingleThread):
                 bw_file.close()
         except:
             self.track_present = False
-        print(f'{path} track present: {self.track_present}')
+        #print(f'{path} track present: {self.track_present}')
         #print(f'Feature path: {path} \n Normalization status: {norm}')
 
     def load(self, path):
