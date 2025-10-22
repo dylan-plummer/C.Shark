@@ -175,7 +175,7 @@ class GenomicFeatureSingleThread(Feature):
                 feature = feature
             else:
                 raise Exception(f'Norm type {self.norm} undefined')
-        if self.knockout:
+        if self.knockout and self.track_present:
             feature = knockout_peaks(feature, threshold=0.5)
         return feature
 

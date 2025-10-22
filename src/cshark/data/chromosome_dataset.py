@@ -103,8 +103,8 @@ class ChromosomeDataset(Dataset):
             seq = self.gaussian_noise(seq, 0.1)
             # Genomic features
             features = [self.gaussian_noise(item, 0.1) for item in features]
-            if self.predict_1d:
-                target_1d_tracks = [self.gaussian_noise(item, 0.1) for item in target_1d_tracks]
+            #if self.predict_1d:
+            #    target_1d_tracks = [self.gaussian_noise(item, 0.1) for item in target_1d_tracks]
             # Reverse complement all data
             if self.seq2:
                 seq2 = self.gaussian_noise(seq2, 0.1)

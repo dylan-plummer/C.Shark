@@ -92,7 +92,7 @@ class GenomeDataset(Dataset):
         # Unpack the tuple based on predict_hic and predict_1d flags
         # Order: seq, features, [mat], [target_1d_tracks], start, end
         seq, features, mat, target_1d_tracks, start, end = data_tuple
-
+        
         # Construct the output tuple, setting optional components to None if not included
         if self.predict_1d:
             outputs = [
