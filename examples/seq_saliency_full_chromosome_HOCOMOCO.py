@@ -154,6 +154,7 @@ def _process_motif_gpu(motif, chromosome_gradient_pwms_gpu, score_threshold=5.0)
     scores_fw_tensor = F.conv1d(chromosome_gradient_pwms_gpu, kernel_fw)
     scores_rc_tensor = F.conv1d(chromosome_gradient_pwms_gpu, kernel_rc)
 
+    # convert to cosine similarity
     scores_fw = scores_fw_tensor.squeeze() / len_pwm
     scores_rc = scores_rc_tensor.squeeze() / len_pwm
     
@@ -177,58 +178,6 @@ def _process_motif_gpu(motif, chromosome_gradient_pwms_gpu, score_threshold=5.0)
         
     return rows
 
-from numpy.lib.stride_tricks import as_strided
-
-def _process_motif_vectorized(motif, chromosome_gradient_pwms, score_threshold=5.0):
-    """Worker function to scan for a single motif using vectorized numpy operations."""
-    try:
-        matrix_dict = motif.counts.normalize()
-    except Exception:
-        return []
-
-    # The internal order for gradients and PWMs is A, T, C, G, N
-    bases = ['A', 'T', 'C', 'G', 'N']
-    matrix = np.array([matrix_dict.get(b, [0.0]*motif.length) for b in bases]).T # Shape: (MotifLength, 5)
-    
-    len_pwm = matrix.shape[0]
-    seq_len = chromosome_gradient_pwms.shape[0]
-    
-    if len_pwm > seq_len:
-        return []
-
-    # Flatten the PWMs for dot product
-    pwm_flat = matrix.flatten()
-    pwm_rc_flat = reverse_complement(matrix).flatten()
-
-    # --- Vectorization with stride_tricks ---
-    n_windows = seq_len - len_pwm + 1
-    itemsize = chromosome_gradient_pwms.itemsize
-    window_view = as_strided(chromosome_gradient_pwms,
-                             shape=(n_windows, len_pwm, 5),
-                             strides=(5 * itemsize, 5 * itemsize, itemsize))
-    
-    all_windows_flat = window_view.reshape(n_windows, -1)
-
-    # Perform all dot products in a single matrix-vector multiplication
-    scores_fw = np.abs(all_windows_flat @ pwm_flat / len_pwm)
-    scores_rc = np.abs(all_windows_flat @ pwm_rc_flat / len_pwm)
-    # ----------------------------------------------------
-
-    # Find positions where either score exceeds the threshold
-    passing_indices = np.where((scores_fw > score_threshold) | (scores_rc > score_threshold))[0]
-
-    if len(passing_indices) == 0:
-        return []
-
-    # Efficiently create the results
-    rows = [{
-        'motif': motif.name,
-        'pos': int(pos),
-        'score_fw': float(scores_fw[pos]),
-        'score_rc': float(scores_rc[pos])
-    } for pos in passing_indices]
-
-    return rows
 
 def _process_motif(motif, chromosome_gradient_pwms, score_threshold=5.0):
     """Worker function to scan for a single motif across the entire chromosome's gradients."""
@@ -317,7 +266,7 @@ def main():
     parser = argparse.ArgumentParser(description='C.Shark Gradient Attribution across a full chromosome.')
     parser.add_argument('--model', dest='model_path', required=True, help='Path to the model checkpoint.')
     parser.add_argument('--chr', dest='chr_name', required=True, help='Chromosome for prediction (e.g., chr1).')
-    parser.add_argument('--step-size', dest='step_size', type=int, default=WINDOW_SIZE // 4, help='Step size for the sliding window.')
+    parser.add_argument('--step-size', dest='step_size', type=int, default=WINDOW_SIZE // 2, help='Step size for the sliding window.')
     parser.add_argument('--seq', dest='seq_path', required=True, help='Path to the folder with sequence .fa.gz files.')
     parser.add_argument('--out-file', dest='out_file', required=True, help='Output path for the attribution scores BigWig file.')
     
@@ -330,7 +279,7 @@ def main():
     parser.add_argument('--resolution', dest='resolution', type=int, default=8192, help='Resolution of the Hi-C map used by the model.')
     parser.add_argument('--matrix-size', dest='mat_size', type=int, default=256, help='Matrix size used by the model.')
     parser.add_argument('--latent_size', dest='mid_hidden', type=int, default=256, help='Latent size of the model.')
-    parser.add_argument('--motif-score-threshold', dest='motif_score_threshold', type=float, default=5.0, help='Threshold for motif correlation scores.')
+    parser.add_argument('--motif-score-threshold', dest='motif_score_threshold', type=float, default=3.0, help='Threshold for motif correlation scores.')
     parser.add_argument('--num-procs', dest='num_procs', type=int, default=10, help='Number of processes for parallel motif scanning.')
 
     args = parser.parse_args()
