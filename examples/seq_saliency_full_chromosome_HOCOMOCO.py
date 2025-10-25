@@ -303,8 +303,12 @@ def main():
 
     chromosome_gradient_pwms = np.zeros((chr_length, 5), dtype=np.float32)
     chromosome_counts = np.zeros(chr_length, dtype=np.int16)
-
-    all_tracks, _, input_tracks = get_all_track_names(args.model_path)
+    
+    try:
+        all_tracks, _, input_tracks = get_all_track_names(args.model_path)
+    except Exception as e:
+        input_tracks = list(args.bigwigs.keys())
+        all_tracks = input_tracks + ['hic']
     model = load_default(
         args.model_path, 
         num_genomic_features=len(input_tracks),
@@ -339,8 +343,12 @@ def main():
         except Exception as e:
             input_dict = {'seq': inputs[..., :5], 'ctcf': inputs[..., 5:6], 'atac': inputs[..., 6:7]}
             outputs = model(input_dict, predict_tracks=all_tracks + ['hic'])
-        pred_hic = (outputs.get('hic') + outputs.get('hic').transpose(1, 2)) / 2
-        pred_hic = torch.expm1(pred_hic)
+        try:
+            pred_hic = (outputs.get('hic') + outputs.get('hic').transpose(1, 2)) / 2
+            pred_hic = torch.expm1(pred_hic)
+        except AttributeError as e:  # corigami base model
+            pred_hic = (outputs + outputs.transpose(1, 2)) / 2
+            pred_hic = torch.expm1(pred_hic)
 
         score = pred_hic.sum()
         
