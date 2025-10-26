@@ -34,9 +34,10 @@ class VizCallback(Callback):
         self.assembly2 = assembly2
         self.image_scale = image_scale  # size of each heatmap (fixed by model)
         self.resolution = resolution
-        self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000',
-                     'chr11:1500000', 'chr2:162000000',
-                     'chr10:122700000', 'chr15:59100000', 'chr12:89300000']
+        # self.loci = ['chr1:66000000', 'chr2:500000', 'chr3:145500000',
+        #              'chr11:1500000', 'chr2:162000000',
+        #              'chr10:122700000', 'chr15:59100000', 'chr12:89300000']
+        self.loci = ['chr11:31000000', 'chr1:66000000', 'chr1:36000000', 'chr1:38000000']
         self.chr_names = [s.split(':')[0] for s in self.loci]
         self.starts = [int(s.split(':')[1]) for s in self.loci]
         self.seq = f"{self.data_root}/{self.assembly}/dna_sequence"
@@ -139,7 +140,12 @@ class VizCallback(Callback):
                     inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
                     pl_module.model.eval()
                     print('inputs shape:', inputs.shape)
-                    outputs = pl_module.model(inputs)
+                    if pl_module.hparams.conditioning_vec is not None:
+                        condition_vec_str = pl_module.hparams.conditioning_vec[self.celltypes.index(celltype)]
+                        condition_vec = torch.tensor([float(x) for x in condition_vec_str.split(',')]).unsqueeze(0).to(inputs.device)
+                        outputs = pl_module.model(inputs, condition_vec)
+                    else:
+                        outputs = pl_module.model(inputs)
                     pred = outputs.get('hic')[0].detach().cpu().numpy()
                     print('pred shape:', pred.shape)
                     pred = (pred + pred.T) * 0.5
@@ -218,6 +224,9 @@ def init_parser():
   # list of celltypes
   parser.add_argument('--celltypes', dest='dataset_celltypes', default=['alpha', 'beta'], nargs='+',
                         help='Cell types to train on')
+
+  parser.add_argument('--conditions', dest='conditioning_vec', default=None, nargs='+',
+                        help='Conditioning vector values for each cell type')
 
   # Model parameters
   parser.add_argument('--model-type', dest='model_type', default='MultiTaskConvTransModel',
@@ -345,7 +354,7 @@ def init_training(args):
     for test_batch_i in range(1):
         # load a batch and visualize it for debugging
         batch = next(iter(trainloader))
-        inputs, mat, target_1d_tracks = pl_module.proc_batch(batch)
+        inputs, mat, target_1d_tracks, _ = pl_module.proc_batch(batch)
         print('inputs shape:', inputs.shape) # (batch, window, 5 + num_genomic_features)
         print('mat shape:', mat.shape)  # (batch, image_scale, image_scale)
         print('target_1d_tracks shape:', target_1d_tracks.shape if target_1d_tracks is not None else None)
@@ -428,6 +437,7 @@ class TrainModule(pl.LightningModule):
         model = ModelClass(
             num_genomic_features=num_input_features, # Input features
             num_target_tracks=num_target_tracks,    # Target 1D tracks
+            conditioning_vec_size=len(self.hparams.conditioning_vec[0].split(',')) if self.hparams.conditioning_vec is not None else None,
             mid_hidden=self.hparams.model_latent_dim,
             predict_hic=True,
             diploid=args.dataset_assembly2 is not None,
@@ -449,15 +459,15 @@ class TrainModule(pl.LightningModule):
             model.load_state_dict(model_weights)
         return model
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x, conditioning_vec=None):
+        return self.model(x, conditioning_vec=conditioning_vec)
 
     def proc_batch(self, batch):
         target_1d_tracks = None
         if self.predict_1d:
-            seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx = batch
+            seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx, condition_vec = batch
         else:
-            seq, features, mat, start, end, chr_name, chr_idx = batch
+            seq, features, mat, start, end, chr_name, chr_idx, condition_vec = batch
         if len(features) > 0:
             features = torch.cat([feat.unsqueeze(2) for feat in features], dim = 2)
             inputs = torch.cat([seq, features], dim = 2)
@@ -467,11 +477,12 @@ class TrainModule(pl.LightningModule):
         if target_1d_tracks is not None:
             target_1d_tracks = torch.stack(target_1d_tracks, dim = 2)
         target_1d_tracks = target_1d_tracks.float() if target_1d_tracks is not None else None
-        return inputs, mat, target_1d_tracks
+        condition_vec = condition_vec.float() if condition_vec is not None else None
+        return inputs, mat, target_1d_tracks, condition_vec
     
     def training_step(self, batch, batch_idx):
         total_loss = 0.0
-        inputs, mat, target_1d_tracks = self.proc_batch(batch)
+        inputs, mat, target_1d_tracks, condition_vec = self.proc_batch(batch)
         if self.hparams.training_masking_prob > 0.0 and len(self.hparams.input_features) > 0:
             # Clone the inputs to avoid modifying the original tensor if it's needed elsewhere
             # (though in this training_step, it's safe to modify in-place)
@@ -503,12 +514,14 @@ class TrainModule(pl.LightningModule):
                         genomic_features[b, start_idx : start_idx + chunk_size, c] = 0.0
                         
                         masked_length_so_far += chunk_size
-        outputs = self(inputs)
+        if condition_vec is not None:
+            outputs = self(inputs, conditioning_vec=condition_vec)
+        else:
+            outputs = self(inputs)
 
         pred_hic = outputs.get('hic')
         loss_hic = self.criterion(pred_hic, mat)
         total_loss += loss_hic * self.hparams.training_loss_weight_hic
-
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
             #loss_1d = self.criterion(pred_1d, target_1d_tracks)
@@ -530,13 +543,17 @@ class TrainModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         total_loss = 0.0
-        inputs, mat, target_1d_tracks = self.proc_batch(batch)
-        outputs = self(inputs)
+        inputs, mat, target_1d_tracks, condition_vec = self.proc_batch(batch)
+        if condition_vec is not None:
+            outputs = self(inputs, conditioning_vec=condition_vec)
+        else:
+            outputs = self(inputs)
 
         pred_hic = outputs.get('hic')
         loss_hic = self.criterion(pred_hic, mat)
         total_loss += loss_hic * self.hparams.training_loss_weight_hic
-
+        hic_corr = torch.corrcoef(torch.stack([pred_hic.flatten(), mat.flatten()]))[0, 1]
+        self.log('val_hic_corr', hic_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
             loss_1d = torch.nn.functional.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
@@ -563,8 +580,11 @@ class TrainModule(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         total_loss = 0.0
-        inputs, mat, target_1d_tracks = self.proc_batch(batch)
-        outputs = self(inputs)
+        inputs, mat, target_1d_tracks, condition_vec = self.proc_batch(batch)
+        if condition_vec is not None:
+            outputs = self(inputs, conditioning_vec=condition_vec)
+        else:
+            outputs = self(inputs)
 
         pred_hic = outputs.get('hic')
         loss_hic = self.criterion(pred_hic, mat)
@@ -631,6 +651,11 @@ class TrainModule(pl.LightningModule):
                 raise ValueError('Number of alt assemblies must match number of celltypes')
             alt_assembly = alt_assemblies[args.dataset_celltypes.index(celltype)]
 
+        if args.conditioning_vec is not None:
+            conditioning_value = args.conditioning_vec[args.dataset_celltypes.index(celltype)]
+            conditioning_value = np.array([float(x) for x in conditioning_value.split(',')])
+            print(f'Using conditioning value {conditioning_value} for cell type {celltype}')
+
         dataset = genome_dataset.GenomeDataset(celltype_root, 
                                 args.dataset_assembly,
                                 input_feat_dicts = genomic_features, 
@@ -645,7 +670,9 @@ class TrainModule(pl.LightningModule):
                                 mode = mode,
                                 hic_log_transform = args.hic_log_transform,
                                 include_sequence = True,
-                                include_genomic_features = True)
+                                include_genomic_features = True,
+                                conditioning_vec = conditioning_value if args.conditioning_vec is not None else None
+                                )
 
         # Record length for printing validation image
         if mode == 'val':

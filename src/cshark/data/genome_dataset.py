@@ -24,7 +24,8 @@ class GenomeDataset(Dataset):
                        target_1d_size=512,
                        hic_log_transform=True,
                        use_aug = True,
-                       ctcf_ko=False):
+                       ctcf_ko=False,
+                       conditioning_vec=None):
         print('CTCF KO:', ctcf_ko)
         self.data_root = celltype_root
         self.include_sequence = include_sequence
@@ -47,6 +48,7 @@ class GenomeDataset(Dataset):
              raise ValueError("Must predict at least Hi-C or 1D tracks.")
         self.use_aug = use_aug
         self.ctcf_ko = ctcf_ko
+        self.conditioning_vec = conditioning_vec
 
         if mode != 'train': self.use_aug = False # Set augmentation
 
@@ -103,7 +105,8 @@ class GenomeDataset(Dataset):
                 start,
                 end,
                 chr_name,
-                chr_idx
+                chr_idx,
+                self.conditioning_vec
             ]
         else:
             outputs = [
@@ -113,7 +116,8 @@ class GenomeDataset(Dataset):
                 start,
                 end,
                 chr_name,
-                chr_idx
+                chr_idx,
+                self.conditioning_vec
             ]
         
 

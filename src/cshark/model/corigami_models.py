@@ -202,6 +202,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
     """
     def __init__(self, num_genomic_features,
                  num_target_tracks=0, # Number of 1D tracks to predict
+                 conditioning_vec_size=0, # Size of conditioning vector to concatenate
                  mid_hidden = 256,    # Latent dimension size
                  predict_hic = True,  # Whether to include the Hi-C prediction head
                  predict_1d = False,  # Whether to include the 1D prediction head
@@ -234,12 +235,15 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         self.predict_1d = predict_1d
         self.recon_1d = recon_1d
         self.num_target_tracks = num_target_tracks
+        self.conditioning_vec_size = conditioning_vec_size
         self.record_attn = record_attn
         self.encoder_downsample_factor = encoder_downsample_factor
         self.use_seq_attn = use_seq_attn
         self.target_mat_size = target_mat_size
         self.target_1d_length = target_1d_length
-        self.num_blocks = 11 if target_mat_size == 512 else 12 # Number of blocks in the encoder
+        # 512 -> 11 256 -> 12 128 -> 13
+        self.num_blocks = 11 if target_mat_size == 512 else (12 if target_mat_size == 256 else 12)
+        print(f"Using {self.num_blocks} encoder blocks based on target_mat_size={target_mat_size}.")
 
         # --- Encoder ---
         # Takes sequence (5) + genomic features
@@ -248,6 +252,14 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                                            epi_filter_size=epi_filter_size,
                                            seq_filter_size=seq_filter_size,)
         # Output: [batch, mid_hidden, reduced_length]
+
+        if conditioning_vec_size > 0:
+            print(f"Using conditioning vector of size {conditioning_vec_size}.")
+            self.condition_mlp = nn.Sequential(
+                nn.Linear(conditioning_vec_size, 2048),
+                nn.GELU(),
+                nn.Linear(2048, mid_hidden)
+            )
 
         # --- Optional Transformer ---
         # Operates on the latent sequence
@@ -302,7 +314,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
             else:
                 raise ValueError(f"Unsupported activation_1d: {activation_1d}")
 
-    def forward(self, x):
+    def forward(self, x, conditioning_vec=None):
         '''
         Input feature x: [batch_size, length, feature_dim (5 + num_genomic_features)]
         '''
@@ -317,6 +329,11 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
             latent_seq, seq_feats = self.encoder(x, return_seq_feats=True)
 
         # Shape: [batch, mid_hidden, reduced_length]
+
+        # If conditioning vector is provided, integrate it
+        if conditioning_vec is not None:
+            conditioning_vec = self.condition_mlp(conditioning_vec)
+            latent_seq = latent_seq + conditioning_vec.unsqueeze(2)
 
         # 3. Optional Transformer (Attention)
         # Needs input as [batch, seq_len, features] if batch_first=True in AttnModule
