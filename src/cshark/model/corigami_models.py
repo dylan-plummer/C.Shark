@@ -253,7 +253,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                                            seq_filter_size=seq_filter_size,)
         # Output: [batch, mid_hidden, reduced_length]
 
-        if conditioning_vec_size > 0:
+        if conditioning_vec_size is not None and conditioning_vec_size > 0:
             print(f"Using conditioning vector of size {conditioning_vec_size}.")
             self.condition_mlp = nn.Sequential(
                 nn.Linear(conditioning_vec_size, 2048),

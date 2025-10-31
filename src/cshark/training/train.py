@@ -464,10 +464,17 @@ class TrainModule(pl.LightningModule):
 
     def proc_batch(self, batch):
         target_1d_tracks = None
-        if self.predict_1d:
-            seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx, condition_vec = batch
+        if self.hparams.conditioning_vec is not None:
+            if self.predict_1d:
+                seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx, condition_vec = batch
+            else:
+                seq, features, mat, start, end, chr_name, chr_idx, condition_vec = batch
         else:
-            seq, features, mat, start, end, chr_name, chr_idx, condition_vec = batch
+            condition_vec = None
+            if self.predict_1d:
+                seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx = batch
+            else:
+                seq, features, mat, start, end, chr_name, chr_idx = batch
         if len(features) > 0:
             features = torch.cat([feat.unsqueeze(2) for feat in features], dim = 2)
             inputs = torch.cat([seq, features], dim = 2)

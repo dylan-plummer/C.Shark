@@ -105,8 +105,7 @@ class GenomeDataset(Dataset):
                 start,
                 end,
                 chr_name,
-                chr_idx,
-                self.conditioning_vec
+                chr_idx
             ]
         else:
             outputs = [
@@ -116,9 +115,10 @@ class GenomeDataset(Dataset):
                 start,
                 end,
                 chr_name,
-                chr_idx,
-                self.conditioning_vec
+                chr_idx
             ]
+        if self.conditioning_vec is not None:
+            outputs.append(self.conditioning_vec)
         
 
         return tuple(outputs)
