@@ -577,7 +577,8 @@ class TrainModule(pl.LightningModule):
                 self.log(f'train_loss_1d_{feature}', track_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             # Mask out the 0 and -1 values in the target_1d_tracks
             mask = (target_1d_tracks != 0) & (target_1d_tracks != -1)
-            loss_1d = (loss_1d * mask).sum() / mask.sum()
+            mask_sum = mask.sum()
+            loss_1d = (loss_1d * mask).sum() / mask_sum if mask_sum > 0 else torch.tensor(0.0, device=loss_1d.device)
         return loss_hic, loss_1d if target_1d_tracks is not None else None
 
     
@@ -589,7 +590,9 @@ class TrainModule(pl.LightningModule):
         input_dict = {'seq': inputs[:, :, :5]}
         # sample a random subset of input features
         if len(self.hparams.input_features) > 0:
-            n_input_tracks_extra = random.randint(0, 1) # only one extra track for now
+            #n_input_tracks_extra = random.randint(0, 1) # only one extra track for now
+            n_input_tracks_extra = np.random.poisson(lam=1)  # average of 1 extra track
+            n_input_tracks_extra = min(n_input_tracks_extra, len(self.hparams.input_features) - 2)
             input_tracks = ['ctcf', 'atac']  # always include both CTCF and ATAC
             extra_features = [track for track in self.hparams.input_features if track not in input_tracks]
             input_tracks += random.sample(extra_features, n_input_tracks_extra)
