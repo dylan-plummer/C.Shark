@@ -229,7 +229,9 @@ def main():
     # Argument for the target locus
     parser.add_argument('--target-locus', dest='target_locus', required=True, 
                         help='The region in the Hi-C map to maximize, format: chr1:start1-end1_chr1:start2-end2')
-    
+    parser.add_argument('--plot-locus', dest='plot_locus', required=True, 
+                        help='The region in the Hi-C map to plot, format: chr1:start1-end1')
+
     parser.add_argument('--resolution', dest='resolution', type=int, default=8192, help='Resolution of the Hi-C map used by the model.')
     parser.add_argument('--matrix-size', dest='mat_size', type=int, default=256, help='Matrix size used by the model.')
     parser.add_argument('--latent_size', dest='mid_hidden', type=int, default=256, help='Latent size of the model.')
@@ -326,6 +328,24 @@ def main():
 
     except ValueError as e:
         print(f"Error parsing --target-locus. Please use format 'chr:start-end_chr:start-end'. Details: {e}")
+        sys.exit(1)
+
+    # parse the plot locus if provided, otherwise use the full matrix
+    try:
+        plot_locus_str = args.plot_locus
+        _, plot_region = plot_locus_str.split(':')
+        plot_start, plot_end = map(int, plot_region.split('-'))
+        # Convert genomic coordinates to pixel coordinates relative to the window
+        plot_p_start = (plot_start - args.start) // args.resolution
+        plot_p_end = (plot_end - args.start) // args.resolution
+        # Ensure coordinates are within the matrix bounds
+        plot_p_start, plot_p_end = max(0, plot_p_start), min(args.mat_size, plot_p_end)
+
+        if plot_p_start >= plot_p_end:
+            raise ValueError("Invalid plot locus coordinates after mapping to pixels.")
+
+    except ValueError as e:
+        print(f"Error parsing --plot-locus. Please use format 'chr:start-end'. Details: {e}")
         sys.exit(1)
 
     print(f"Maximizing score for pixel region: rows[{p_start1}:{p_end1}], cols[{p_start2}:{p_end2}]")
@@ -603,13 +623,15 @@ def main():
 
         # visualize the difference in the Hi-C map
         diff_hic = modified_pred_hic - baseline_pred_hic
+        # crop to plot locus
+        diff_hic = diff_hic[:, plot_p_start:plot_p_end, plot_p_start:plot_p_end]
         fig, ax = plt.subplots(figsize=(12, 6))
         im = ax.imshow(diff_hic[0].detach().cpu().numpy(), cmap='bwr', norm=plt.Normalize(vmin=-np.percentile(np.abs(diff_hic.detach().cpu().numpy()), 99), vmax=np.percentile(np.abs(diff_hic.detach().cpu().numpy()), 99)))
         ax.set_title(f'Change in Hi-C Map After Inserting Motif {matched_motif} at Pos {pos}')
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        # plot motif insertion position lines
-        ax.axvline(x=insert_start // args.resolution, color='green', linestyle='--', label='Motif Insertion Position')
-        ax.axhline(y=insert_start // args.resolution, color='green', linestyle='--')
+        # plot motif insertion position lines, converting to plot locus coordinates
+        ax.axvline(x= (insert_start // (args.resolution)) - plot_p_start, color='green', linestyle='--', label='Motif Insertion Pos')
+        ax.axhline(y= (insert_start // (args.resolution)) - plot_p_start, color='green', linestyle='--')
         ax.legend()
         plt.savefig(f"{args.out_dir}/hic_change_after_inserting_{matched_motif}_{pos}.png", dpi=300, bbox_inches='tight')
         plt.close(fig)
