@@ -459,9 +459,9 @@ def main():
     filter_df['corr_max'] = filter_df[['score_fw', 'score_rc']].max(axis=1)
     filter_df['corr_min'] = filter_df[['score_fw', 'score_rc']].min(axis=1)
     # across each 100bp position, only keep the motif with the highest correlation (positive and negative)
-    filter_df_max = filter_df.loc[filter_df.groupby('pos_100bp')['corr_max'].idxmax()].reset_index(drop=True)
-    filter_df_min = filter_df.loc[filter_df.groupby('pos_100bp')['corr_min'].idxmin()].reset_index(drop=True)
-    filter_df = pd.concat([filter_df_max, filter_df_min]).drop_duplicates().reset_index(drop=True)
+    # filter_df_max = filter_df.loc[filter_df.groupby('pos_100bp')['corr_max'].idxmax()].reset_index(drop=True)
+    # filter_df_min = filter_df.loc[filter_df.groupby('pos_100bp')['corr_min'].idxmin()].reset_index(drop=True)
+    # filter_df = pd.concat([filter_df_max, filter_df_min]).drop_duplicates().reset_index(drop=True)
     # get top motifs
     top_motifs = filter_df.nlargest(args.n_motifs, 'corr_max')
     top_motifs = pd.concat([top_motifs, filter_df.nsmallest(args.n_motifs, 'corr_min')]).reset_index(drop=True)
@@ -623,6 +623,7 @@ def main():
 
         # visualize the difference in the Hi-C map
         diff_hic = modified_pred_hic - baseline_pred_hic
+        mean_loop_change = diff_hic[0, p_start1:p_end1, p_start2:p_end2].mean().item()
         # crop to plot locus
         diff_hic = diff_hic[:, plot_p_start:plot_p_end, plot_p_start:plot_p_end]
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -633,10 +634,17 @@ def main():
         ax.axvline(x= (insert_start // (args.resolution)) - plot_p_start, color='green', linestyle='--', label='Motif Insertion Pos')
         ax.axhline(y= (insert_start // (args.resolution)) - plot_p_start, color='green', linestyle='--')
         ax.legend()
+        # highlight target locus as a dashed box
+        rect = plt.Rectangle((p_start2 - plot_p_start, p_start1 - plot_p_start), 
+                             p_end2 - p_start2, 
+                             p_end1 - p_start1, 
+                             linewidth=2, edgecolor='yellow', facecolor='none', linestyle='--', label='Target Locus')
+        ax.add_patch(rect)
+        ax.legend()
         plt.savefig(f"{args.out_dir}/hic_change_after_inserting_{matched_motif}_{pos}.png", dpi=300, bbox_inches='tight')
         plt.close(fig)
 
-        mean_loop_change = diff_hic[0, p_start1:p_end1, p_start2:p_end2].mean().item()
+        
         print(f"Mean change in target locus after inserting motif {matched_motif} at pos {pos}: {mean_loop_change:.2f}")
         hic_diffs.append(mean_loop_change)
 
@@ -687,6 +695,9 @@ def main():
         ax.text(row['corr_max'], row['mean_hic_change'], row['motif'])
         if i >= 20:
             break  # only label top 20 for clarity
+    # divide x and y axes into quadrants
+    ax.axhline(0, color='gray', linestyle='--')
+    ax.axvline(0, color='gray', linestyle='--')
     plt.savefig(f"{args.out_dir}/motif_correlation_vs_hic_change.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
     
