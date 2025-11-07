@@ -243,7 +243,6 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         self.target_1d_length = target_1d_length
         # 512 -> 11 256 -> 12 128 -> 13
         self.num_blocks = 11 if target_mat_size == 512 else (12 if target_mat_size == 256 else 12)
-        print(f"Using {self.num_blocks} encoder blocks based on target_mat_size={target_mat_size}.")
 
         # --- Encoder ---
         # Takes sequence (5) + genomic features
@@ -254,7 +253,7 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         # Output: [batch, mid_hidden, reduced_length]
 
         if conditioning_vec_size is not None and conditioning_vec_size > 0:
-            print(f"Using conditioning vector of size {conditioning_vec_size}.")
+            #print(f"Using conditioning vector of size {conditioning_vec_size}.")
             self.condition_mlp = nn.Sequential(
                 nn.Linear(conditioning_vec_size, 2048),
                 nn.GELU(),

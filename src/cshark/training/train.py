@@ -57,25 +57,26 @@ class VizCallback(Callback):
         self.rad21 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/rad21.bw" for celltype in celltypes}
 
     def on_train_start(self, trainer, pl_module):
-        print("Saving ground truth Hi-C example loci for reference")
+        print("Saving ground truth loci for reference")
         for celltype in self.celltypes:
             for chr_name, start in zip(self.chr_names, self.starts):
                 locus = f"{chr_name}:{start}"
-                hic = data_feature.HiCFeature(path = f'{self.data_root}/{self.assembly}/{celltype}/hic_matrix/{chr_name}.npz')
-                mat = hic.get(start, res=self.resolution)
-                mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
-                os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
-                plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), mat, 'ground_truth', celltype, 
-                                    chr_name, start, res=self.resolution)
-                plot.plot()
-                tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'ground_truth', 'imgs', f"{chr_name}_{start}.png")
-                new_plot_path = os.path.join(self.out_dir, locus, celltype, f"ground_truth.png")
-                try:
-                    os.rename(tmp_plot_path, new_plot_path)
-                    if pl_module.hparams.use_wandb:
-                        wandb.log({locus + '_experimental_' + celltype: wandb.Image(new_plot_path)})
-                except Exception as e:
-                    print(e)
+                if pl_module.hparams.predict_hic:
+                    hic = data_feature.HiCFeature(path = f'{self.data_root}/{self.assembly}/{celltype}/hic_matrix/{chr_name}.npz')
+                    mat = hic.get(start, res=self.resolution)
+                    mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
+                    os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
+                    plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), mat, 'ground_truth', celltype, 
+                                        chr_name, start, res=self.resolution)
+                    plot.plot()
+                    tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'ground_truth', 'imgs', f"{chr_name}_{start}.png")
+                    new_plot_path = os.path.join(self.out_dir, locus, celltype, f"ground_truth.png")
+                    try:
+                        os.rename(tmp_plot_path, new_plot_path)
+                        if pl_module.hparams.use_wandb:
+                            wandb.log({locus + '_experimental_' + celltype: wandb.Image(new_plot_path)})
+                    except Exception as e:
+                        print(e)
 
                 # plot the ground truth 1D tracks
                 if pl_module.hparams.output_features is not None:
@@ -146,21 +147,22 @@ class VizCallback(Callback):
                         outputs = pl_module.model(inputs, condition_vec)
                     else:
                         outputs = pl_module.model(inputs)
-                    pred = outputs.get('hic')[0].detach().cpu().numpy()
-                    print('pred shape:', pred.shape)
-                    pred = (pred + pred.T) * 0.5
-                    os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
-                    plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'prediction', celltype, 
-                                        chr_name, start, res=self.resolution)
-                    plot.plot()
-                    tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'prediction', 'imgs', f"{chr_name}_{start}.png")
-                    new_plot_path = os.path.join(self.out_dir, locus, celltype, f"{pl_module.current_epoch}.png")
-                    try:
-                        os.rename(tmp_plot_path, new_plot_path)
-                        if pl_module.hparams.use_wandb:
-                            wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
-                    except Exception as e:
-                        print(e)
+                    if pl_module.hparams.predict_hic:
+                        pred = outputs.get('hic')[0].detach().cpu().numpy()
+                        print('pred shape:', pred.shape)
+                        pred = (pred + pred.T) * 0.5
+                        os.makedirs(os.path.join(self.out_dir, locus), exist_ok=True)
+                        plot = plot_utils.MatrixPlot(os.path.join(self.out_dir, locus), pred, 'prediction', celltype, 
+                                            chr_name, start, res=self.resolution)
+                        plot.plot()
+                        tmp_plot_path = os.path.join(self.out_dir, locus, celltype, 'prediction', 'imgs', f"{chr_name}_{start}.png")
+                        new_plot_path = os.path.join(self.out_dir, locus, celltype, f"{pl_module.current_epoch}.png")
+                        try:
+                            os.rename(tmp_plot_path, new_plot_path)
+                            if pl_module.hparams.use_wandb:
+                                wandb.log({locus + '_' + celltype: wandb.Image(new_plot_path)})
+                        except Exception as e:
+                            print(e)
 
                     pred_1d_tracks = outputs.get('1d')[0].permute(1, 0).detach().cpu().numpy()
                     print(pred_1d_tracks.shape)
@@ -283,6 +285,9 @@ def init_parser():
                       help='Weight for Hi-C loss term')
   parser.add_argument('--loss-weight-1d', dest='training_loss_weight_1d', type=float, default=0.1,
                       help='Weight for 1D track loss term')
+  parser.add_argument('--no-hic', dest='predict_hic',
+                        action='store_false',
+                        help='Whether to predict Hi-C matrices or only 1D tracks')
   parser.add_argument('--no-recon', dest='recon_1d',
                         action='store_false',
                         help='Whether to reconstruct 1D tracks from full features or from sequence only')
@@ -355,9 +360,9 @@ def init_training(args):
         # load a batch and visualize it for debugging
         batch = next(iter(trainloader))
         inputs, mat, target_1d_tracks, _ = pl_module.proc_batch(batch)
-        print('inputs shape:', inputs.shape) # (batch, window, 5 + num_genomic_features)
-        print('mat shape:', mat.shape)  # (batch, image_scale, image_scale)
-        print('target_1d_tracks shape:', target_1d_tracks.shape if target_1d_tracks is not None else None)
+        #print('inputs shape:', inputs.shape) # (batch, window, 5 + num_genomic_features)
+        #print('mat shape:', mat.shape)  # (batch, image_scale, image_scale)
+        #print('target_1d_tracks shape:', target_1d_tracks.shape if target_1d_tracks is not None else None)
 
         colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
         if len(args.input_features) > 0:
@@ -379,13 +384,14 @@ def init_training(args):
             plt.close()
 
         # visualize the target Hi-C matrix
-        mat = mat[0].detach().cpu().numpy()
-        mat = resize(mat, (pl_module.hparams.target_1d_size, pl_module.hparams.target_1d_size), anti_aliasing=True, preserve_range=True)
-        plt.imshow(mat, cmap='Reds', interpolation='none')
-        plt.colorbar()
-        plt.title('Target Hi-C Matrix')
-        plt.savefig(f'target_hic_matrix.png_{test_batch_i}.png')
-        plt.close()
+        if args.predict_hic:
+            mat = mat[0].detach().cpu().numpy()
+            mat = resize(mat, (pl_module.hparams.target_1d_size, pl_module.hparams.target_1d_size), anti_aliasing=True, preserve_range=True)
+            plt.imshow(mat, cmap='Reds', interpolation='none')
+            plt.colorbar()
+            plt.title('Target Hi-C Matrix')
+            plt.savefig(f'target_hic_matrix.png_{test_batch_i}.png')
+            plt.close()
 
         # visualize the target 1D tracks
         if target_1d_tracks is not None:
@@ -439,7 +445,7 @@ class TrainModule(pl.LightningModule):
             num_target_tracks=num_target_tracks,    # Target 1D tracks
             conditioning_vec_size=len(self.hparams.conditioning_vec[0].split(',')) if self.hparams.conditioning_vec is not None else None,
             mid_hidden=self.hparams.model_latent_dim,
-            predict_hic=True,
+            predict_hic=self.hparams.predict_hic,
             diploid=args.dataset_assembly2 is not None,
             predict_1d=self.predict_1d,
             target_mat_size=args.mat_size,
@@ -471,16 +477,25 @@ class TrainModule(pl.LightningModule):
                 seq, features, mat, start, end, chr_name, chr_idx, condition_vec = batch
         else:
             condition_vec = None
-            if self.predict_1d:
-                seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx = batch
+            if self.hparams.predict_hic:
+                if self.predict_1d:
+                    seq, features, mat, target_1d_tracks, start, end, chr_name, chr_idx = batch
+                else:
+                    seq, features, mat, start, end, chr_name, chr_idx = batch
             else:
-                seq, features, mat, start, end, chr_name, chr_idx = batch
+                if self.predict_1d:
+                    seq, features, target_1d_tracks, start, end, chr_name, chr_idx = batch
+                else:
+                    seq, features, start, end, chr_name, chr_idx = batch
         if len(features) > 0:
             features = torch.cat([feat.unsqueeze(2) for feat in features], dim = 2)
             inputs = torch.cat([seq, features], dim = 2)
         else:
             inputs = seq
-        mat = mat.float()
+        if self.hparams.predict_hic:
+            mat = mat.float()
+        else:
+            mat = None
         if target_1d_tracks is not None:
             target_1d_tracks = torch.stack(target_1d_tracks, dim = 2)
         target_1d_tracks = target_1d_tracks.float() if target_1d_tracks is not None else None
@@ -490,45 +505,17 @@ class TrainModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         total_loss = 0.0
         inputs, mat, target_1d_tracks, condition_vec = self.proc_batch(batch)
-        if self.hparams.training_masking_prob > 0.0 and len(self.hparams.input_features) > 0:
-            # Clone the inputs to avoid modifying the original tensor if it's needed elsewhere
-            # (though in this training_step, it's safe to modify in-place)
-            genomic_features = inputs[:, :, 5:] # Shape: [Batch, Length, Num_Tracks]
-            
-            B, L, C = genomic_features.shape
 
-            # Iterate over each sample and each track to apply chunk masking
-            for b in range(B):
-                for c in range(C):
-                    masked_length_so_far = 0
-                    target_mask_length = int(L * self.hparams.training_masking_prob)
-                    
-                    # Keep adding chunks until we've masked the target fraction of the sequence
-                    while masked_length_so_far < target_mask_length:
-                        # Determine the size of the next chunk
-                        chunk_size = random.randint(
-                            self.hparams.training_masking_min_chunk,
-                            self.hparams.training_masking_max_chunk
-                        )
-                        # Don't overshoot the target length
-                        chunk_size = min(chunk_size, target_mask_length - masked_length_so_far)
-                        
-                        # Determine the starting position of the chunk
-                        if L - chunk_size <= 0: continue # Skip if chunk is larger than sequence
-                        start_idx = random.randint(0, L - chunk_size)
-                        
-                        # Apply the mask (set the region to 0.0)
-                        genomic_features[b, start_idx : start_idx + chunk_size, c] = 0.0
-                        
-                        masked_length_so_far += chunk_size
         if condition_vec is not None:
             outputs = self(inputs, conditioning_vec=condition_vec)
         else:
             outputs = self(inputs)
 
-        pred_hic = outputs.get('hic')
-        loss_hic = self.criterion(pred_hic, mat)
-        total_loss += loss_hic * self.hparams.training_loss_weight_hic
+        loss_hic = 0.0
+        if self.hparams.predict_hic:
+            pred_hic = outputs.get('hic')
+            loss_hic = self.criterion(pred_hic, mat)
+            total_loss += loss_hic * self.hparams.training_loss_weight_hic
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
             #loss_1d = self.criterion(pred_1d, target_1d_tracks)
@@ -556,11 +543,13 @@ class TrainModule(pl.LightningModule):
         else:
             outputs = self(inputs)
 
-        pred_hic = outputs.get('hic')
-        loss_hic = self.criterion(pred_hic, mat)
-        total_loss += loss_hic * self.hparams.training_loss_weight_hic
-        hic_corr = torch.corrcoef(torch.stack([pred_hic.flatten(), mat.flatten()]))[0, 1]
-        self.log('val_hic_corr', hic_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        loss_hic = 0.0
+        if self.hparams.predict_hic:
+            pred_hic = outputs.get('hic')
+            loss_hic = self.criterion(pred_hic, mat)
+            total_loss += loss_hic * self.hparams.training_loss_weight_hic
+            hic_corr = torch.corrcoef(torch.stack([pred_hic.flatten(), mat.flatten()]))[0, 1]
+            self.log('val_hic_corr', hic_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
             loss_1d = torch.nn.functional.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
@@ -593,9 +582,11 @@ class TrainModule(pl.LightningModule):
         else:
             outputs = self(inputs)
 
-        pred_hic = outputs.get('hic')
-        loss_hic = self.criterion(pred_hic, mat)
-        total_loss += loss_hic * self.hparams.training_loss_weight_hic
+        loss_hic = 0.0
+        if self.hparams.predict_hic:
+            pred_hic = outputs.get('hic')
+            loss_hic = self.criterion(pred_hic, mat)
+            total_loss += loss_hic * self.hparams.training_loss_weight_hic
 
         if target_1d_tracks is not None:
             pred_1d = outputs.get('1d')
@@ -667,7 +658,7 @@ class TrainModule(pl.LightningModule):
                                 args.dataset_assembly,
                                 input_feat_dicts = genomic_features, 
                                 target_feat_dicts = target_features,
-                                predict_hic = True,
+                                predict_hic = args.predict_hic,
                                 predict_1d = (args.output_features is not None),
                                 genome_assembly2 = args.dataset_assembly2,
                                 alt_assembly= alt_assembly if args.alt_assemblies is not None else None,

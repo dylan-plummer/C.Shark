@@ -40,7 +40,7 @@ class ChromosomeDataset(Dataset):
         self.bins = 2097152 / self.res # 2M bins
         self.image_scale = target_mat_size # IMPORTANT, scale output to image scale (e.g 210 to 256)
         self.sample_bins = 500
-        self.stride = 50 # bins
+        self.stride = 150 # bins
         self.chr_name = chr_name
         self.predict_hic = predict_hic
         self.predict_1d = predict_1d
@@ -103,8 +103,8 @@ class ChromosomeDataset(Dataset):
             seq = self.gaussian_noise(seq, 0.1)
             # Genomic features
             features = [self.gaussian_noise(item, 0.1) for item in features]
-            #if self.predict_1d:
-            #    target_1d_tracks = [self.gaussian_noise(item, 0.1) for item in target_1d_tracks]
+            if self.predict_1d:
+               target_1d_tracks = [self.gaussian_noise(item, 0.1) for item in target_1d_tracks]
             # Reverse complement all data
             if self.seq2:
                 seq2 = self.gaussian_noise(seq2, 0.1)

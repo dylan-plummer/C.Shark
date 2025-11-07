@@ -99,8 +99,10 @@ class GenomeDataset(Dataset):
         if self.predict_1d:
             outputs = [
                 seq if self.include_sequence else None,
-                features if self.include_genomic_features else None,
-                mat if self.predict_hic else None,
+                features if self.include_genomic_features else None]
+            if self.predict_hic:
+                outputs.append(mat)
+            outputs += [
                 target_1d_tracks if self.predict_1d else None,
                 start,
                 end,
@@ -110,8 +112,10 @@ class GenomeDataset(Dataset):
         else:
             outputs = [
                 seq if self.include_sequence else None,
-                features if self.include_genomic_features else None,
-                mat if self.predict_hic else None,
+                features if self.include_genomic_features else None]
+            if self.predict_hic:
+                outputs.append(mat)
+            outputs += [
                 start,
                 end,
                 chr_name,
