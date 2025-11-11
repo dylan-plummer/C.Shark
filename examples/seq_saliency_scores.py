@@ -221,10 +221,12 @@ def main():
     parser.add_argument('--out-dir', dest='out_dir', required=True, help='Output directory')
     parser.add_argument('--meme-file', dest='meme_file', required=False, help='Path to the HOCOMOCO MEME file for motif scanning.')
     parser.add_argument('--tf', dest='tf', required=False, help='Name of the transcription factor for motif scanning.')
+    parser.add_argument('--viz-bp', dest='viz_bp', type=int, default=20, help='Base pair range(+/-) for visualization.')
     
     # Optional arguments for other epigenetic features
     parser.add_argument('--bigwigs', nargs='*', help='Paths to the bigwig files for genomic features, specified as key=value pairs (e.g., ctcf=path/to/ctcf.bw).', 
                         action=ParseKwargs)
+    parser.add_argument('--snp-file', dest='snp_file', required=False, help='Path to the SNP file in BED format.')
 
     # Argument for the target locus
     parser.add_argument('--target-locus', dest='target_locus', required=True, 
@@ -364,6 +366,7 @@ def main():
     # --- 5. Calculate Saliency Scores for Sequence ---
     # We only care about the first 5 channels, which correspond to the one-hot encoded sequence
     seq_gradients = gradients[:, :5]
+    seq_gradients = seq_gradients * seq_region[:, :5]  # Mask gradients by the actual sequence
     saliency_scores = (seq_gradients).sum(dim=-1)
 
     # Take the absolute value as we care about the magnitude of the effect
@@ -415,17 +418,22 @@ def main():
                 'score_rc': [],}
     saliency_scores = saliency_scores.detach().cpu().numpy()
     gradient_pwms = seq_gradients.detach().cpu().numpy()
-    
+    gradient_pwms = gradient_pwms * seq_region[:, :5]
+    # normalize gradient_pwms
+    #gradient_pwms = gradient_pwms / (np.linalg.norm(gradient_pwms, axis=-1, keepdims=True) + 1e-8)
 
     motifs_list = list(motifs)
     worker = partial(_process_motif_vectorized, gradient_pwms=gradient_pwms, seq_start=args.start, score_threshold=0.05)
 
     # Use a Pool to parallelize motif scanning
     results = []
-    with mp.Pool(processes=min( 10 or 1, len(motifs_list) )) as pool:
+    with mp.Pool(processes=min(5, len(motifs_list))) as pool:
         for motif_rows in tqdm(pool.imap_unordered(worker, motifs_list), total=len(motifs_list)):
             if motif_rows:
                 results.extend(motif_rows)
+
+    # multiply by reference sequence one-hot to zero out non-base positions
+    #gradient_pwms = gradient_pwms * seq_region[:, :5]
 
     # Populate motif_df from aggregated results
     for r in results:
@@ -456,15 +464,28 @@ def main():
 
         
     filter_df = pd.DataFrame(motif_df)
-    filter_df['corr_max'] = filter_df[['score_fw', 'score_rc']].max(axis=1)
-    filter_df['corr_min'] = filter_df[['score_fw', 'score_rc']].min(axis=1)
+    filter_df['score_max'] = filter_df[['score_fw', 'score_rc']].max(axis=1)
+    filter_df['score_min'] = filter_df[['score_fw', 'score_rc']].min(axis=1)
+    # first we will find the top indices overall in the saliency scores and include them and their motifs no matter what
+    n_top_locs = args.n_motifs * 2
+    top_locs = np.argsort(saliency_scores)[-n_top_locs:]
+    top_locs_100bp = (top_locs // 100) * 100
+    top_motif_rows = filter_df[filter_df['pos_100bp'].isin(top_locs_100bp)].copy()
+    filter_df_max = top_motif_rows.loc[top_motif_rows.groupby('pos_100bp')['score_max'].idxmax()].reset_index(drop=True)
+    filter_df_min = top_motif_rows.loc[top_motif_rows.groupby('pos_100bp')['score_min'].idxmin()].reset_index(drop=True)
+    top_motif_rows = pd.concat([filter_df_max, filter_df_min]).drop_duplicates().reset_index(drop=True)
+    print("Including top saliency score locations and their motifs:")
+    print(top_motif_rows)
+
     # across each 100bp position, only keep the motif with the highest correlation (positive and negative)
-    # filter_df_max = filter_df.loc[filter_df.groupby('pos_100bp')['corr_max'].idxmax()].reset_index(drop=True)
-    # filter_df_min = filter_df.loc[filter_df.groupby('pos_100bp')['corr_min'].idxmin()].reset_index(drop=True)
-    # filter_df = pd.concat([filter_df_max, filter_df_min]).drop_duplicates().reset_index(drop=True)
+    filter_df_max = filter_df.loc[filter_df.groupby('pos_100bp')['score_max'].idxmax()].reset_index(drop=True)
+    filter_df_min = filter_df.loc[filter_df.groupby('pos_100bp')['score_min'].idxmin()].reset_index(drop=True)
+    filter_df = pd.concat([filter_df_max, filter_df_min]).drop_duplicates().reset_index(drop=True)
     # get top motifs
-    top_motifs = filter_df.nlargest(args.n_motifs, 'corr_max')
-    top_motifs = pd.concat([top_motifs, filter_df.nsmallest(args.n_motifs, 'corr_min')]).reset_index(drop=True)
+    top_motifs = filter_df.nlargest(args.n_motifs, 'score_max')
+    top_motifs = pd.concat([top_motifs, filter_df.nsmallest(args.n_motifs, 'score_min')]).reset_index(drop=True)
+    # ensure top motif rows are included
+    top_motifs = pd.concat([top_motifs, top_motif_rows]).drop_duplicates().reset_index(drop=True)
     print("Top motifs correlated with saliency scores:")
     print(top_motifs.head(10))
     print(top_motifs.tail(10))
@@ -476,39 +497,104 @@ def main():
         print("Error: A reference BigWig (--bigwigs ctcf=...) is required to save the output.")
         sys.exit(1)
 
+    # load SNP file for reference
+    # 
+    if args.snp_file:
+        snps = pd.read_csv(args.snp_file, sep='\t', names=['chrom', 'start', 'name', 'ref', 'alt'])
+        snps['start'] += 1 
+        print(snps)
+
     # plot top 10 positions as sequence logos with the reference sequence logo below
     print(gradient_pwms.shape)
-    window_size = 30
+    window_size = args.viz_bp * 2
     hic_diffs = []
     rad21_diffs = []
     for idx, row in top_motifs.iterrows():
-        pos = row['pos_100bp']
+        pos = row['pos']
         matched_motif = row['motif']
-        seq_start = pos - window_size // 2
-        seq_end = seq_start + window_size
-        seq_slice = gradient_pwms[seq_start:seq_end, :]
-        if seq_slice.shape[0] < window_size:
-            # pad with Ns
-            pad_len = window_size - seq_slice.shape[0]
-            pad_array = np.zeros((pad_len, 5))
-            pad_array[:, 4] = 1  # N
-            if seq_start == 0:
-                seq_slice = np.vstack([pad_array, seq_slice])
-            else:
-                seq_slice = np.vstack([seq_slice, pad_array])
+        
+        # Find motif length
+        motif_length = 0
+        for m in motifs:
+            if m.name == matched_motif:
+                motif_length = m.length
+                break
+        if motif_length == 0:
+            continue # Skip if we can't find the motif length
+    
+        # These are 0-based indices into your gradient_pwms array
+        seq_start_idx = pos - window_size // 2
+        seq_end_idx = seq_start_idx + window_size
+
+
+        # Boundary checks (this logic is good)
+        if seq_start_idx < 0:
+            seq_start_idx = 0
+            seq_end_idx = window_size
+        if seq_end_idx > len(gradient_pwms):
+            seq_end_idx = len(gradient_pwms)
+            seq_start_idx = seq_end_idx - window_size
+            
+         # Genomic coordinates for querying the SNP file
+        locus_start_genomic = args.start + seq_start_idx
+        locus_end_genomic = args.start + seq_end_idx
+
+        # --- Plotting the Saliency Logo ---
+        # Extract the gradient data for the plotting window
+        seq_slice = np.abs(gradient_pwms[seq_start_idx:seq_end_idx, :])
+        # also get the reference sequence for verification
+        ref_slice = seq_region[seq_start_idx:seq_end_idx, :5] # Get one-hot encoded ref
+
         df_seq = pd.DataFrame(seq_slice, columns=['A', 'T', 'C', 'G', 'N'])
-        df_seq = df_seq[['A', 'C', 'G', 'T']]  # logomaker expects this order
-        logo = logomaker.Logo(df_seq, color_scheme='classic')
-        logo.ax.set_title(f'Motif: {matched_motif} at Pos: {row["pos"]}')
+        df_seq = df_seq[['A', 'C', 'G', 'T']]
+        logo = logomaker.Logo(df_seq, figsize=(12, 2.5), color_scheme='classic')
+        
+        locus_str = f"{args.chr_name}:{locus_start_genomic + 1}-{locus_end_genomic}" # Display as 1-based
+        logo.ax.set_title(f'Saliency near {matched_motif} ({locus_str})')
+        
+        highlight_start = pos - seq_start_idx
+        highlight_end = highlight_start + motif_length
+        logo.ax.axvspan(highlight_start - 0.5, highlight_end - 0.5, color='red', alpha=0.2)
+
+        # indicate if forward or reverse strand
+        if row['score_fw'] >= row['score_rc']:
+            strand = 'Forward'
+        else:
+            strand = 'Reverse'
+        logo.ax.set_xlabel(f'match: {strand}')
+        if args.snp_file:
+            # check for SNPs in this region
+            # The BED file 'start' is 0-based, so this query works correctly.
+            snps_in_region = snps[(snps['chrom'] == args.chr_name) &
+                                (snps['start'] >= locus_start_genomic) &
+                                (snps['start'] < locus_end_genomic)].copy() # Use .copy() to avoid SettingWithCopyWarning
+
+            if not snps_in_region.empty:
+                print(f"Found SNPs in region {locus_str}:")
+                print(snps_in_region)
+
+                ref_seq_str = ''.join([['A', 'T', 'C', 'G', 'N'][np.argmax(base)] for base in ref_slice])
+                print(f"Reference sequence in region: {ref_seq_str}")
+                for _, snp_row in snps_in_region.iterrows():
+                    snp_plot_pos = snp_row['start'] - locus_start_genomic
+                    
+                    # Defensive check
+                    if 0 <= snp_plot_pos < len(ref_seq_str):
+                        ref_base_at_snp = ref_seq_str[snp_plot_pos]
+                        # print(f"SNP {snp_row['name']} at plot position {snp_plot_pos}: "
+                        #     f"Genome Reference = {snp_row['ref']}, "
+                        #     f"Sequence File Reference = {ref_base_at_snp}")
+
+                        # Add a visual indicator if the reference bases don't match
+                        line_color = 'green'
+                        if ref_base_at_snp.upper() != snp_row['ref'].upper():
+                            line_color = 'purple'
+
+                        logo.ax.axvline(snp_plot_pos, color=line_color, linestyle='--', alpha=0.7)
+                        snp_label = f"{snp_row['name']} ({snp_row['ref']}>{snp_row['alt']})"
+                        logo.ax.text(snp_plot_pos, logo.ax.get_ylim()[1] * 0.9, snp_label, color=line_color, fontsize=8)
+
         plt.savefig(f"{args.out_dir}/motif_logo_{matched_motif}_{pos}.png", dpi=300, bbox_inches='tight')
-        plt.close()
-        # also plot the reference sequence logo
-        ref_seq_array = seq_region[seq_start:seq_end, :5]
-        df_ref_seq = pd.DataFrame(ref_seq_array, columns=['A', 'T', 'C', 'G', 'N'])
-        df_ref_seq = df_ref_seq[['A', 'C', 'G', 'T']]  # logomaker expects this order
-        logo = logomaker.Logo(df_ref_seq, color_scheme='classic')
-        logo.ax.set_title(f'Reference Sequence at Pos: {pos}')
-        plt.savefig(f"{args.out_dir}/reference_logo_{matched_motif}_{pos}.png", dpi=300, bbox_inches='tight')
         plt.close()
 
         # and finally the motif PWM logo
@@ -543,7 +629,7 @@ def main():
             continue
         bases = ['A', 'T', 'C', 'G', 'N']
         matrix = np.array([matrix_dict.get(b, [0]*motif.length) for b in bases]).T # Shape: (MotifLength, 5)
-        df_motif = pd.DataFrame(matrix, columns=['A', 'C', 'G', 'T', 'N'])
+        df_motif = pd.DataFrame(matrix, columns=['A', 'T', 'C', 'G', 'N'])
         df_motif = df_motif[['A', 'C', 'G', 'T']]  # logomaker expects this order
         fig, ax = plt.subplots(figsize=(10, 4))
         logomaker.Logo(df_motif, ax=ax, color_scheme='classic')
@@ -551,54 +637,43 @@ def main():
         plt.savefig(f"{args.out_dir}/motif_pwm_logo_{matched_motif}_{pos}.png", dpi=300, bbox_inches='tight')
         plt.close(fig)
 
-        # overlay the motif PWM logo on the gradient logo 
-        fig, ax = plt.subplots(figsize=(10, 4))
-        logo = logomaker.Logo(df_seq, ax=ax, color_scheme='classic')
-        ax.set_title(f'Motif: {matched_motif} at Pos: {row["pos"]} with PWM Overlay')
-        # overlay motif PWM as a smaller logo at the aligned position above the gradient logo
-        motif_logo_ax = fig.add_axes([0.52, 1.2, len(df_motif) / len(df_seq), 0.5])
-        logomaker.Logo(df_motif, ax=motif_logo_ax, color_scheme='classic')
-        motif_logo_ax.set_xticks([])
-        motif_logo_ax.set_yticks([])
-        plt.savefig(f"{args.out_dir}/motif_logo_with_pwm_{matched_motif}_{pos}.png", dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
         # insert the motif into the input sequence at the position and see effect on prediction
-        # get one-hot encoded motif sequence
-        motif_seq = []
-        for i in range(motif.length):
-            col = []
-            for base in ['A', 'T', 'C', 'G', 'N']:
-                col.append(matrix_dict.get(base, [0]*motif.length)[i])
-            motif_seq.append(col)
-        motif_seq = np.array(motif_seq)  # Shape: (motif.length, 5)
-        # create a copy of the original sequence
-        modified_seq = seq_region.copy()
-        # insert motif at the position
         insert_start = pos
         insert_end = insert_start + motif.length
-        if insert_end > modified_seq.shape[0]:
-            print(f"Cannot insert motif {matched_motif} at position {pos} due to length constraints.")
-            continue
-        modified_seq[insert_start:insert_end, :5] = motif_seq
-        # prepare modified input tensor
-        modified_inputs = infer.preprocess_default(modified_seq, ctcf_region, atac_region, other_regions)
-        modified_inputs = modified_inputs.to(device)
-        # forward pass
-        with torch.no_grad():
-            try:
-                modified_outputs = model(modified_inputs)
-            except Exception as e:
-                input_dict = {'seq': modified_inputs[..., :5], 'ctcf': modified_inputs[..., 5:6], 'atac': modified_inputs[..., 6:7]}
-                modified_outputs = model(input_dict, predict_tracks=all_tracks + ['hic'])
-            try:
-                modified_pred_hic = (modified_outputs.get('hic') + modified_outputs.get('hic').transpose(1, 2)) / 2
-                modified_pred_hic = torch.expm1(modified_pred_hic)
-            except AttributeError as e:  # corigami base model
-                modified_pred_hic = (modified_outputs + modified_outputs.transpose(1, 2)) / 2
-                modified_pred_hic = torch.expm1(modified_pred_hic)
-        # compare the score in the target region
-        modified_score = modified_pred_hic[0, p_start1:p_end1, p_start2:p_end2].sum()  
+        # get one-hot encoded motif sequence
+        # motif_seq = []
+        # for i in range(motif.length):
+        #     col = []
+        #     for base in ['A', 'T', 'C', 'G', 'N']:
+        #         col.append(matrix_dict.get(base, [0]*motif.length)[i])
+        #     motif_seq.append(col)
+        # motif_seq = np.array(motif_seq)  # Shape: (motif.length, 5)
+        # # create a copy of the original sequence
+        # modified_seq = seq_region.copy()
+        # # insert motif at the position
+        
+        # if insert_end > modified_seq.shape[0]:
+        #     print(f"Cannot insert motif {matched_motif} at position {pos} due to length constraints.")
+        #     continue
+        # modified_seq[insert_start:insert_end, :5] = motif_seq
+        # # prepare modified input tensor
+        # modified_inputs = infer.preprocess_default(modified_seq, ctcf_region, atac_region, other_regions)
+        # modified_inputs = modified_inputs.to(device)
+        # # forward pass
+        # with torch.no_grad():
+        #     try:
+        #         modified_outputs = model(modified_inputs)
+        #     except Exception as e:
+        #         input_dict = {'seq': modified_inputs[..., :5], 'ctcf': modified_inputs[..., 5:6], 'atac': modified_inputs[..., 6:7]}
+        #         modified_outputs = model(input_dict, predict_tracks=all_tracks + ['hic'])
+        #     try:
+        #         modified_pred_hic = (modified_outputs.get('hic') + modified_outputs.get('hic').transpose(1, 2)) / 2
+        #         modified_pred_hic = torch.expm1(modified_pred_hic)
+        #     except AttributeError as e:  # corigami base model
+        #         modified_pred_hic = (modified_outputs + modified_outputs.transpose(1, 2)) / 2
+        #         modified_pred_hic = torch.expm1(modified_pred_hic)
+        # # compare the score in the target region
+        # modified_score = modified_pred_hic[0, p_start1:p_end1, p_start2:p_end2].sum()  
 
         # generate baseline prediction with random sequence insertion at the same position
         random_seq = np.random.rand(motif.length, 5)
@@ -622,8 +697,13 @@ def main():
         baseline_score = baseline_pred_hic[0, p_start1:p_end1, p_start2:p_end2].sum()
 
         # visualize the difference in the Hi-C map
-        diff_hic = modified_pred_hic - baseline_pred_hic
+        # diff_hic = modified_pred_hic - baseline_pred_hic
+        diff_hic = pred_hic - baseline_pred_hic
         mean_loop_change = diff_hic[0, p_start1:p_end1, p_start2:p_end2].mean().item()
+        if abs(mean_loop_change) < 0.001:
+            print(f"Mean change in target locus after inserting motif {matched_motif} at pos {pos} is negligible ({mean_loop_change:.4f}), skipping visualization.")
+            hic_diffs.append(mean_loop_change)
+            continue
         # crop to plot locus
         diff_hic = diff_hic[:, plot_p_start:plot_p_end, plot_p_start:plot_p_end]
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -652,7 +732,8 @@ def main():
         if 'rad21' in input_tracks:
             rad21_idx = input_tracks.index('rad21') + 5  # +5 for the sequence channels
             pred_1d = outputs.get('1d')
-            modified_pred_1d = modified_outputs.get('1d')
+            #modified_pred_1d = modified_outputs.get('1d')
+            modified_pred_1d = baseline_outputs.get('1d')
             original_rad21 = pred_1d['rad21'][0].detach().cpu().numpy().flatten()
             modified_rad21 = modified_pred_1d['rad21'][0].detach().cpu().numpy().flatten()
             # undo log1p
@@ -679,6 +760,8 @@ def main():
     # summarize the effects
     summary_df = top_motifs.copy()
     summary_df['mean_hic_change'] = hic_diffs
+    # only keep motifs with mean_hic_change magnitude > 0.001
+    summary_df = summary_df[summary_df['mean_hic_change'].abs() > 0.001].reset_index(drop=True)
     if rad21_diffs:
         summary_df['mean_rad21_change'] = rad21_diffs
     summary_df.to_csv(f"{args.out_dir}/motif_insertion_effects_summary.tsv", sep='\t', index=False)
@@ -686,31 +769,48 @@ def main():
     summary_df = summary_df.sort_values(by=['mean_hic_change', 'mean_rad21_change'] if rad21_diffs else ['mean_hic_change'], ascending=False).reset_index(drop=True)
 
     fig, ax = plt.subplots(figsize=(8,6))
-    ax.scatter(summary_df['corr_max'], summary_df['mean_hic_change'])
-    ax.set_xlabel('Motif Correlation with Saliency Score')
-    ax.set_ylabel('Mean Hi-C Change After Insertion')
-    ax.set_title('Motif Correlation vs Hi-C Change After Insertion')
-    # label points with motif names
+    ax.scatter(summary_df['mean_hic_change'], summary_df['score_max'])
+    ax.set_ylabel('Motif Score')
+    ax.set_xlabel('Mean Hi-C Change After Insertion')
+    ax.set_title('Motif Score vs Hi-C Change After Insertion')
+    # label top positive points with motif names
     for i, row in summary_df.iterrows():
-        ax.text(row['corr_max'], row['mean_hic_change'], row['motif'])
+        ax.text(row['mean_hic_change'], row['score_max'], row['motif'])
+        if i >= 20:
+            break  # only label top 20 for clarity
+    # label top negative points with motif names
+    for i, row in summary_df.iloc[::-1].iterrows():
+        ax.text(row['mean_hic_change'], row['score_max'], row['motif'])
         if i >= 20:
             break  # only label top 20 for clarity
     # divide x and y axes into quadrants
     ax.axhline(0, color='gray', linestyle='--')
     ax.axvline(0, color='gray', linestyle='--')
+    # if motifs are at the same 100bp position, draw a line between them
+    for pos, group in summary_df.groupby('pos_100bp'):
+        if len(group) > 1:
+            for i in range(len(group)-1):
+                ax.plot([group.iloc[i]['mean_hic_change'], group.iloc[i+1]['mean_hic_change']],
+                        [group.iloc[i]['score_max'], group.iloc[i+1]['score_max']],
+                        color='lightgray', linestyle='--', linewidth=0.5)
     plt.savefig(f"{args.out_dir}/motif_correlation_vs_hic_change.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
     
     if rad21_diffs:
         fig, ax = plt.subplots(figsize=(8,6))
-        ax.scatter(summary_df['corr_max'], summary_df['mean_rad21_change'])
+        ax.scatter(summary_df['score_max'], summary_df['mean_rad21_change'])
         ax.set_ylabel('Mean Rad21 Change After Insertion')
-        ax.set_title('Motif Correlation vs Rad21 Change After Insertion')
+        ax.set_title('Motif Score vs Rad21 Change After Insertion')
         # label points with motif names
         for i, row in summary_df.iterrows():
-            ax.text(row['corr_max'], row['mean_rad21_change'], row['motif'])
+            ax.text(row['score_max'], row['mean_rad21_change'], row['motif'])
             if i >= 20:
                 break
+        # label top negative points with motif names
+        for i, row in summary_df.iloc[::-1].iterrows():
+            ax.text(row['score_max'], row['mean_rad21_change'], row['motif'])
+            if i >= 20:
+                break  # only label top 20 for clarity
         plt.savefig(f"{args.out_dir}/motif_correlation_vs_rad21_change.png", dpi=300, bbox_inches='tight')
         plt.close(fig)
 
@@ -724,6 +824,11 @@ def main():
             ax.text(row['mean_rad21_change'], row['mean_hic_change'], row['motif'])
             if i >= 20:
                 break
+        # label top negative points with motif names
+        for i, row in summary_df.iloc[::-1].iterrows():
+            ax.text(row['mean_rad21_change'], row['mean_hic_change'], row['motif'])
+            if i >= 20:
+                break  # only label top 20 for clarity
         plt.savefig(f"{args.out_dir}/rad21_change_vs_hic_change.png", dpi=300, bbox_inches='tight')
         plt.close(fig)
             
