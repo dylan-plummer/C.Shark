@@ -223,6 +223,8 @@ def main():
     parser.add_argument('--meme-file', dest='meme_file', required=False, help='Path to the HOCOMOCO MEME file for motif scanning.')
     parser.add_argument('--tf', dest='tf', required=False, help='Name of the transcription factor for motif scanning.')
     parser.add_argument('--viz-bp', dest='viz_bp', type=int, default=50, help='Base pair range(+/-) for visualization.')
+    # add KO mode (shuffle, zero, N)
+    parser.add_argument('--ko-mode', dest='ko_mode', choices=['shuffle', 'zero', 'N', 'n'], help='Knockout mode for input features.')
     
     # Optional arguments for other epigenetic features
     parser.add_argument('--bigwigs', nargs='*', help='Paths to the bigwig files for genomic features, specified as key=value pairs (e.g., ctcf=path/to/ctcf.bw).', 
@@ -239,7 +241,11 @@ def main():
     parser.add_argument('--matrix-size', dest='mat_size', type=int, default=256, help='Matrix size used by the model.')
     parser.add_argument('--latent_size', dest='mid_hidden', type=int, default=256, help='Latent size of the model.')
     parser.add_argument('--ctcf-ko', dest='ctcf_ko', action='store_true', help='Whether to knockout CTCF peaks in the input.')
+    parser.add_argument('--no-abs', dest='abs', action='store_false', help='Whether to use absolute values for saliency scores.')
     parser.add_argument('--n-loci', dest='n_motifs', type=int, default=10, help='Number of top saliency peaks to visualize.')
+    parser.add_argument('--target-1d-length', dest='target_1d_length', type=int, default=8192, help='Length of the 1D targets used by the model.')
+    parser.add_argument('--vmin', dest='vmin', type=float, default=0, help='Minimum value for Hi-C plotting.')
+    parser.add_argument('--vmax', dest='vmax', type=float, default=None, help='Maximum value for Hi-C plotting.')
 
 
     args = parser.parse_args()
@@ -272,14 +278,27 @@ def main():
         ctcf_region = knockout_peaks(ctcf_region, threshold=0.5)
     
     print("Loading model...")
-    model = load_default(
-        args.model_path, 
-        num_genomic_features=len(input_tracks),
-        mat_size=args.mat_size,
-        mid_hidden=args.mid_hidden,
-        seq_filter_size=15,
-        recon_1d=False
-    ).to(device)
+    try:
+        model = load_default(
+            args.model_path, 
+            num_genomic_features=len(input_tracks),
+            mat_size=args.mat_size,
+            mid_hidden=args.mid_hidden,
+            seq_filter_size=15,
+            target_1d_length=args.target_1d_length,
+            recon_1d=True
+        ).to(device)
+    except Exception as e:
+        model = load_default(
+            args.model_path, 
+            num_genomic_features=len(input_tracks),
+            mat_size=args.mat_size,
+            mid_hidden=args.mid_hidden,
+            seq_filter_size=15,
+            target_1d_length=args.target_1d_length,
+            recon_1d=False
+        ).to(device)
+
     model.eval() # Set model to evaluation mode
 
     # --- 2. Prepare Input Tensor ---
@@ -474,7 +493,10 @@ def main():
         locus_end_genomic = args.start + seq_end_idx
         
         # --- Plotting the Saliency Logo ---
-        seq_slice = np.abs(gradient_pwms[seq_start_idx:seq_end_idx, :])
+        if args.abs:
+            seq_slice = np.abs(gradient_pwms[seq_start_idx:seq_end_idx, :])
+        else:
+            seq_slice = gradient_pwms[seq_start_idx:seq_end_idx, :]
         df_seq = pd.DataFrame(seq_slice, columns=['A', 'T', 'C', 'G', 'N'])
         df_seq = df_seq[['A', 'C', 'G', 'T']]
         logo = logomaker.Logo(df_seq, figsize=(15, 3), color_scheme='classic')
@@ -552,29 +574,45 @@ def main():
         motif = next((m for m in motifs if m.name == matched_motif), None)
         if motif is None: continue
 
-        # generate baseline prediction with random sequence insertion at the same position
-        random_seq = np.random.rand(motif.length, 5)
-        random_seq = random_seq / random_seq.sum(axis=1, keepdims=True)
-        baseline_seq = seq_region.copy()
-        insert_start, insert_end = pos, pos + motif.length
-        if insert_end > baseline_seq.shape[0]: continue
-        
-        baseline_seq[insert_start:insert_end, :5] = random_seq
-        baseline_inputs = infer.preprocess_default(baseline_seq, ctcf_region, atac_region, other_regions).to(device)
+        if args.ko_mode == 'zero':
+            # generate baseline prediction with zeroing out the motif region
+            baseline_seq = seq_region.copy()
+            insert_start, insert_end = pos, pos + motif.length
+            if insert_end > baseline_seq.shape[0]: continue
+            
+            baseline_seq[insert_start:insert_end, :5] = 0
+            perturb_inputs = infer.preprocess_default(baseline_seq, ctcf_region, atac_region, other_regions).to(device)
+        elif args.ko_mode.lower() == 'n':
+            # generate baseline prediction with 'N' insertion at the motif region
+            baseline_seq = seq_region.copy()
+            insert_start, insert_end = pos, pos + motif.length
+            if insert_end > baseline_seq.shape[0]: continue
+            
+            baseline_seq[insert_start:insert_end, :5] = np.array([0, 0, 0, 0, 1])  # 'N' encoding
+            perturb_inputs = infer.preprocess_default(baseline_seq, ctcf_region, atac_region, other_regions).to(device)
+        else:
+            # generate baseline prediction with random sequence insertion at the same position
+            random_seq = np.random.rand(motif.length, 5)
+            random_seq = random_seq / random_seq.sum(axis=1, keepdims=True)
+            baseline_seq = seq_region.copy()
+            insert_start, insert_end = pos, pos + motif.length
+            if insert_end > baseline_seq.shape[0]: continue
+            baseline_seq[insert_start:insert_end, :5] = random_seq
+            perturb_inputs = infer.preprocess_default(baseline_seq, ctcf_region, atac_region, other_regions).to(device)
 
         with torch.no_grad():
             try:
-                baseline_outputs = model(baseline_inputs)
-                baseline_pred_hic = (baseline_outputs.get('hic') + baseline_outputs.get('hic').transpose(1, 2)) / 2
+                perturb_outputs = model(perturb_inputs)
+                perturb_hic_pred = (perturb_outputs.get('hic') + perturb_outputs.get('hic').transpose(1, 2)) / 2
             except Exception:
-                input_dict = {'seq': baseline_inputs[..., :5], 'ctcf': baseline_inputs[..., 5:6], 'atac': baseline_inputs[..., 6:7]}
-                baseline_outputs = model(input_dict, predict_tracks=all_tracks + ['hic'])
-                baseline_pred_hic = (baseline_outputs.get('hic') + baseline_outputs.get('hic').transpose(1, 2)) / 2
+                input_dict = {'seq': perturb_inputs[..., :5], 'ctcf': perturb_inputs[..., 5:6], 'atac': perturb_inputs[..., 6:7]}
+                perturb_outputs = model(input_dict, predict_tracks=all_tracks + ['hic'])
+                perturb_hic_pred = (perturb_outputs.get('hic') + perturb_outputs.get('hic').transpose(1, 2)) / 2
 
-            baseline_pred_hic = torch.expm1(baseline_pred_hic)
+            perturb_hic_pred = torch.expm1(perturb_hic_pred)
 
         # visualize the difference in the Hi-C map
-        diff_hic = pred_hic - baseline_pred_hic
+        diff_hic = pred_hic - perturb_hic_pred
         mean_loop_change = diff_hic[0, p_start1:p_end1, p_start2:p_end2].mean().item()
 
         summary_data = top_motif_in_window.to_dict()
@@ -591,7 +629,7 @@ def main():
         
         fig, ax = plt.subplots(figsize=(8, 7))
         im = ax.imshow(diff_hic_cropped[0].detach().cpu().numpy(), cmap='bwr', norm=plt.Normalize(vmin=-vmax, vmax=vmax))
-        ax.set_title(f'Hi-C Change (Original - Random) from Motif {matched_motif} at Peak {peak_pos}')
+        ax.set_title(f'Hi-C Change (Original - Perturb {args.ko_mode}) from Motif {matched_motif} at Peak {peak_pos}')
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Change in Hi-C score")
         
         insert_pixel = (insert_start // args.resolution) - plot_p_start
@@ -606,16 +644,44 @@ def main():
         plt.savefig(f"{args.out_dir}/hic_change_peak_{peak_pos}_motif_{matched_motif}.png", dpi=300, bbox_inches='tight')
         plt.close(fig)
 
+        # visualize the hic before and after
+        fig, axs = plt.subplots(1, 2, figsize=(14, 6))
+        if args.vmax is not None:
+            vmax = args.vmax
+        else:
+            vmax_orig = np.max(pred_hic[0, plot_p_start:plot_p_end, plot_p_start:plot_p_end].detach().cpu().numpy())
+            vmax_baseline = np.max(perturb_hic_pred[0, plot_p_start:plot_p_end, plot_p_start:plot_p_end].detach().cpu().numpy())
+            vmax = max(vmax_orig, vmax_baseline)
+        im0 = axs[0].imshow(pred_hic[0, plot_p_start:plot_p_end, plot_p_start:plot_p_end].detach().cpu().numpy(), cmap='Reds', norm=plt.Normalize(vmin=args.vmin, vmax=vmax))
+        axs[0].set_title('Original Hi-C Prediction')
+        axs[0].set_xticks([])
+        axs[0].set_yticks([])
+        plt.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04, label="Hi-C score")
+        im1 = axs[1].imshow(perturb_hic_pred[0, plot_p_start:plot_p_end, plot_p_start:plot_p_end].detach().cpu().numpy(), cmap='Reds', norm=plt.Normalize(vmin=0, vmax=vmax))
+        axs[1].set_title(f'Perturb {args.ko_mode} Hi-C Prediction')
+        axs[1].set_xticks([])
+        axs[1].set_yticks([])
+        axs[1].axvline(x=insert_pixel, color='green', linestyle='--', label=f'Motif Pos ({pos})')
+        axs[1].axhline(y=insert_pixel, color='green', linestyle='--')
+        rect = plt.Rectangle((p_start2 - plot_p_start, p_start1 - plot_p_start), 
+                             p_end2 - p_start2, p_end1 - p_start1, 
+                             linewidth=2, edgecolor='yellow', facecolor='none', linestyle='--', label='Target Locus')
+        axs[1].add_patch(rect)
+        axs[1].legend()
+        plt.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04, label="Hi-C score")
+        plt.savefig(f"{args.out_dir}/hic_comparison_peak_{peak_pos}_motif_{matched_motif}.png", dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
         mean_rad21_change = 0
         try:
             if 'rad21' in all_tracks and outputs.get('1d') is not None:
                 try:
                     original_rad21 = np.expm1(outputs.get('1d')['rad21'][0].detach().cpu().numpy().flatten())
-                    modified_rad21 = np.expm1(baseline_outputs.get('1d')['rad21'][0].detach().cpu().numpy().flatten())
+                    modified_rad21 = np.expm1(perturb_outputs.get('1d')['rad21'][0].detach().cpu().numpy().flatten())
                 except IndexError:
                     rad21_index = all_tracks.index('rad21')
                     original_rad21 = np.expm1(outputs.get('1d')[0, ..., rad21_index].detach().cpu().numpy().flatten())
-                    modified_rad21 = np.expm1(baseline_outputs.get('1d')[0, ..., rad21_index].detach().cpu().numpy().flatten())
+                    modified_rad21 = np.expm1(perturb_outputs.get('1d')[0, ..., rad21_index].detach().cpu().numpy().flatten())
                 rad21_diff = original_rad21 - modified_rad21
                 mean_rad21_change = rad21_diff.mean().item()
         except Exception as e:
