@@ -58,6 +58,8 @@ def main():
     # Location related params
     parser.add_argument('--celltype', dest='celltype', 
                         help='Sample cell type for prediction, used for output separation', required=True)
+    parser.add_argument('--assembly', dest='assembly', default='hg19',
+                        help='Genome assembly version (hg19, hg38, mm10)')
     parser.add_argument('--outname', dest='outname', default='',
                                 help='Output prefix for saving plots and predictions')
     parser.add_argument('--chr', dest='chr_name', 
@@ -68,6 +70,8 @@ def main():
                         help='Path to the model checkpoint', required=True)
     parser.add_argument('--resolution', dest='resolution', type=int, default=8192,
                       help='Resolution (bp) of output Hi-C matrix')
+    parser.add_argument('--resolution-1d', dest='resolution_1d', type=int, default=256,
+                      help='Resolution (bp) of output 1D tracks')
     parser.add_argument('--matrix-size', dest='mat_size', type=int, default=256,
                       help='Size of output Hi-C matrix')
     parser.add_argument('--latent_size', dest='mid_hidden', type=int, default=256,
@@ -205,7 +209,8 @@ def main():
                     args.var_pos, args.alt_bp, 
                     args.model_path,
                     args.seq_path, args.ctcf_path, args.atac_path, other_feats, 
-                    seq2_path=args.seq2_path,
+                    args,
+                    seq2_path=args.seq2_path, assembly=args.assembly,
                     ko_data=args.ko_data, ko_mode=args.ko_mode,
                     region = args.region,
                     mid_hidden=args.mid_hidden, 
@@ -289,6 +294,7 @@ def main():
                 num_genomic_features -= 1
             pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                                   num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                                  target_1d_length=int(window / args.resolution_1d),
                                                   mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
                                                   recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
                                                   other_feat_names=input_track_names[2:])
@@ -299,6 +305,7 @@ def main():
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=args.peak_height)
             pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                            num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                           target_1d_length=int(window / args.resolution_1d),
                                            mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
                                            recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
                                            other_feat_names=input_track_names[2:])
@@ -412,7 +419,8 @@ def main():
 def single_deletion(output_path, outname, celltype, chr_name, start, deletion_starts, deletion_widths, 
                     var_pos, alt_bp,
                     model_path, seq_path, ctcf_path, atac_path, other_feats, 
-                    seq2_path=None,
+                    args,
+                    seq2_path=None, assembly='hg19',
                     ko_data=['ctcf'], ko_mode=['zero'], region=None, mid_hidden=256, seq_filter_size=3, recon_1d=True,
                     bigwig_log_transform=True,
                     plot_bigwigs=[], plot_pred_bigwigs=[], plot_pred_log2fc=False,
@@ -434,7 +442,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     ko_data_types = ko_data  # list of data types to knockout
     if isinstance(peak_height, float) and deletion_starts is not None:
         peak_height = [peak_height] * len(deletion_starts)
-    print(peak_height)
     tmp_ko_data = []
     for ko_data_type in ko_data:
         if ko_data_type not in tmp_ko_data:
@@ -467,6 +474,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                           num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                           diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
+                                          target_1d_length=int(window / args.resolution_1d),
                                           recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform,
                                           other_feat_names=input_track_names[2:])
     pred_before = pred_before_output['hic']
@@ -543,6 +551,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     # Prediction
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                    num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                      target_1d_length=int(window / args.resolution_1d),
                                    diploid=diploid, mid_hidden=mid_hidden, seq_filter_size=seq_filter_size, 
                                    recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform,
                                    other_feat_names=input_track_names[2:])
@@ -717,7 +726,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         if mat[i, j] > ground_truth_cutoff and pixel_start_i > region_start and pixel_end_i < region_end and pixel_start_j > region_start and pixel_end_j < region_end:
                             f.write(f'{chr_name}\t{pixel_start_i}\t{pixel_end_i}\t{chr_name}\t{pixel_start_j}\t{pixel_end_j}\t{mat[i, j]}\n')
 
-    assembly = 'hg19'
     if '/mm10/' in ctcf_path:
         assembly = 'mm10'
     elif '/hg38/' in ctcf_path:
