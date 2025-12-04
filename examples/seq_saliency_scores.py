@@ -214,6 +214,7 @@ def main():
     parser.add_argument('--start', dest='start', type=int, required=True, help=f'Starting point for the {WINDOW_SIZE}bp input window.')
     parser.add_argument('--seq', dest='seq_path', required=True, help='Path to the folder with sequence .fa.gz files.')
     parser.add_argument('--out-dir', dest='out_dir', required=True, help='Output directory')
+    parser.add_argument('--bw-out', dest='bw_out', required=False, help='Output file for bigwig files')
     parser.add_argument('--meme-file', dest='meme_file', required=False, help='Path to the HOCOMOCO MEME file for motif scanning.')
     parser.add_argument('--tf', dest='tf', required=False, help='Name of the transcription factor for motif scanning.')
     parser.add_argument('--viz-bp', dest='viz_bp', type=int, default=50, help='Base pair range(+/-) for visualization.')
@@ -350,7 +351,8 @@ def main():
     peak_df.to_csv(f"{args.out_dir}/sequence_peaks.tsv", sep='\t', index=False)
 
     # save saliency scores as bigwig
-    save_scores_as_bigwig(saliency_scores, bigwig_paths[0] if bigwig_paths else None, args.chr_name, args.start, f"{args.out_dir}/saliency_scores.bw")
+    bw_outfile = f"{args.out_dir}/{args.bw_out}" if args.bw_out else f"{args.out_dir}/saliency_scores.bw"
+    save_scores_as_bigwig(saliency_scores, bigwig_paths[0] if bigwig_paths else None, args.chr_name, args.start, bw_outfile)
 
     if not args.ignore_motifs:
         # --- 3. Scan for all potential motifs ---
