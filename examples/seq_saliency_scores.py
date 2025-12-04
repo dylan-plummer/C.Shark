@@ -349,6 +349,9 @@ def main():
                             'sequence': peak_seq})
     peak_df.to_csv(f"{args.out_dir}/sequence_peaks.tsv", sep='\t', index=False)
 
+    # save saliency scores as bigwig
+    save_scores_as_bigwig(saliency_scores, bigwig_paths[0] if bigwig_paths else None, args.chr_name, args.start, f"{args.out_dir}/saliency_scores.bw")
+
     if not args.ignore_motifs:
         # --- 3. Scan for all potential motifs ---
         if args.meme_file is None:
