@@ -277,6 +277,11 @@ def main():
                 ko_channels.append(input_track_names.index(ko))
             elif ko != 'seq':
                 print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
+        channel_offset = 0
+        if 'ctcf' in input_track_names:
+            channel_offset += 1
+        if 'atac' in input_track_names:
+            channel_offset += 1
         # get track_names from ctcf_path, atac_path, other_feats
         # track_names = model_utils.get_1d_track_names(model_path)
         track_names = []
@@ -302,7 +307,9 @@ def main():
             pred_before_1d = pred_before_output['1d']
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                 start, window, seq_region, ctcf_region, 
-                atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=args.peak_height)
+                atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, 
+                channel_offset=channel_offset,
+                ko_mode=ko_mode, peak_height=args.peak_height)
             pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                            num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                            target_1d_length=int(window / args.resolution_1d),
