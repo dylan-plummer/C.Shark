@@ -24,27 +24,34 @@ def get_1d_track_names(model_path):
 def get_all_track_names(model_path):
     checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     try:
-        target_tracks = checkpoint['hyper_parameters']['output_features'].copy()
-        all_tracks = checkpoint['hyper_parameters']['input_features'].copy()
-        input_tracks = checkpoint['hyper_parameters']['input_features'].copy()
-        for track in target_tracks:
-            if track not in all_tracks:
-                all_tracks.append(track)
+        target_tracks = checkpoint['hyper_parameters']['output_features']
+        all_tracks = checkpoint['hyper_parameters']['input_features']
+        input_tracks = checkpoint['hyper_parameters']['input_features']
+        
         if target_tracks is not None:
+            for track in target_tracks:
+                if track not in all_tracks:
+                    all_tracks.append(track)
             if isinstance(target_tracks, list):
                 target_tracks = [track.replace('_norm', '') for track in target_tracks]
             else:
                 target_tracks = [target_tracks.replace('_norm', '')]
+        else:
+            target_tracks = []
         if all_tracks is not None:
             if isinstance(all_tracks, list):
                 all_tracks = [track.replace('_norm', '') for track in all_tracks]
             else:
                 all_tracks = [all_tracks.replace('_norm', '')]
+        else:
+            all_tracks = []
         if input_tracks is not None:
             if isinstance(input_tracks, list):
                 input_tracks = [track.replace('_norm', '') for track in input_tracks]
             else:
                 input_tracks = [input_tracks.replace('_norm', '')]
+        else:
+            input_tracks = []
         return all_tracks, target_tracks, input_tracks
     except KeyError:
         return []
@@ -141,7 +148,10 @@ def load_default(model_path, record_attn=False,
                 except Exception as e:  # fallback to older 1D track model
                     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-                    num_target_tracks = len(checkpoint['hyper_parameters']['output_features'])
+                    if checkpoint['hyper_parameters']['output_features'] is None:
+                        num_target_tracks = 0
+                    else:
+                        num_target_tracks = len(checkpoint['hyper_parameters']['output_features'])
                     model = get_model('MultiTaskConvTransModelOld', mid_hidden, 
                                     num_genomic_features=num_genomic_features, 
                                     mat_size=mat_size,
@@ -149,10 +159,10 @@ def load_default(model_path, record_attn=False,
                                     diploid=diploid,
                                     num_target_tracks=num_target_tracks, 
                                     seq_filter_size=seq_filter_size,
-                                    epi_filter_size=3,
+                                    epi_filter_size=5,
                                     target_1d_length=2048,
                                     recon_1d=recon_1d,
-                                    predict_1d=True)
+                                    predict_1d=num_target_tracks>0)
                     #print(model)
                     load_checkpoint(model, model_path)
     return model
