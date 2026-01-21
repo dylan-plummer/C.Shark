@@ -10,7 +10,7 @@ from tqdm import tqdm
 from importlib.resources import files
 from skimage.transform import resize
 
-from cshark.data.data_feature import GenomicFeature, HiCFeature
+from cshark.data.data_feature import GenomicFeature, HiCFeature, SequenceFeature
 import cshark.inference.utils.inference_utils as infer
 from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_chipseq_ko, knockout_peaks, get_axis_range_from_bigwig, chunk_shuffle, write_tmp_pred_bigwig
 from cshark.inference.utils import plot_utils, model_utils
@@ -229,8 +229,18 @@ def main():
     else:  # full chromosome prediction
         # use the step-size arg to do predictions for the whole chromosome
         # load one of the bigwigs to get the chromosome length
-        bw = GenomicFeature(args.ctcf_path, 'bw')
         chr_name = args.chr_name
+        print(args.ctcf_path)
+        if args.ctcf_path is not None:
+            bw = GenomicFeature(args.ctcf_path, 'bw')
+            chr_length = bw.length(chr_name)
+        else:
+            # get length from sequence file
+            seq_file = os.path.join(args.seq_path, f'{chr_name}.fa.gz')
+            seq_feature = SequenceFeature(path=seq_file)
+            chr_length = len(seq_feature)
+        print(f'Chromosome length: {chr_length}')
+        
         seq_path = args.seq_path
         ctcf_path = args.ctcf_path
         atac_path = args.atac_path
@@ -239,8 +249,7 @@ def main():
         ko_data = args.ko_data
         ko_mode = args.ko_mode
         region = args.region
-        chr_length = bw.length(chr_name)
-        print(f'Chromosome length: {chr_length}')
+        
         step_size = int(window / args.n_overlap_preds)
         if region is not None:
             if ':' in region:
@@ -282,6 +291,7 @@ def main():
             channel_offset += 1
         if 'atac' in input_track_names:
             channel_offset += 1
+        diploid = args.seq2_path is not None
         # get track_names from ctcf_path, atac_path, other_feats
         # track_names = model_utils.get_1d_track_names(model_path)
         track_names = []
@@ -297,8 +307,11 @@ def main():
             num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
             if atac_region is None:
                 num_genomic_features -= 1
+            if ctcf_region is None:
+                num_genomic_features -= 1
             pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                                   num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                                  diploid=diploid,
                                                   target_1d_length=int(window / args.resolution_1d),
                                                   mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
                                                   recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
@@ -312,6 +325,7 @@ def main():
                 ko_mode=ko_mode, peak_height=args.peak_height)
             pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                            num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                           diploid=diploid,
                                            target_1d_length=int(window / args.resolution_1d),
                                            mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
                                            recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
