@@ -1,3 +1,4 @@
+from math import dist
 import os
 import re
 import numpy as np
@@ -12,7 +13,7 @@ from skimage.transform import resize
 
 from cshark.data.data_feature import GenomicFeature, HiCFeature, SequenceFeature
 import cshark.inference.utils.inference_utils as infer
-from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_chipseq_ko, knockout_peaks, get_axis_range_from_bigwig, chunk_shuffle, write_tmp_pred_bigwig
+from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_chipseq_ko, knockout_peaks, get_axis_range_from_bigwig, chunk_shuffle, write_tmp_pred_bigwig, oe_normalize_cooler
 from cshark.inference.utils import plot_utils, model_utils
 from cshark.inference.tracks_files import get_tracks
 
@@ -87,6 +88,9 @@ def main():
     parser.add_argument('--no-bigwig-log-transform', dest='bigwig_log_transform',
                         action='store_false',
                         help='Whether to apply log transformation to bigwig tracks')
+    parser.add_argument('--oe-norm', dest='oe_norm',
+                        action='store_true',
+                        help='Whether to apply observed/expected normalization to Hi-C matrices')
 
     parser.add_argument('--out-file', dest='out_file', 
                         help='Path to the output file if doing full chromosome prediction', required=False)
@@ -395,6 +399,67 @@ def main():
         # output the dataframe to a bed file
         res_df.to_csv(args.out_file, sep='\t', header=True, index=False)
         bins_df.to_csv(args.out_file.replace('.tsv', '_bins.tsv'), sep='\t', header=False, index=False)
+
+        # also create cooler file for full chromosome
+        wt_cooler_df = res_df[['a1', 'a2', 'WT']].rename(columns={'WT': 'count'})
+        ko_cooler_df = res_df[['a1', 'a2', 'KO']].rename(columns={'KO': 'count'})
+        # map a1 and a2 to bin_ids
+        wt_cooler_df['bin1_id'] = wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
+        wt_cooler_df['bin2_id'] = wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+        ko_cooler_df['bin1_id'] = ko_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
+        ko_cooler_df['bin2_id'] = ko_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+        wt_cooler_df = wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
+        ko_cooler_df = ko_cooler_df[['bin1_id', 'bin2_id', 'count']]
+        bins_cooler_df = bins_df[['chrom', 'start', 'end']].copy()
+        bins_cooler_df.reset_index(inplace=True)
+        cooler.create_cooler(args.out_file.replace('.tsv', '_WT.cool'), bins_cooler_df, wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
+        cooler.create_cooler(args.out_file.replace('.tsv', '_KO.cool'), bins_cooler_df, ko_cooler_df, ordered=True, dtypes={'count': 'float32'})
+        if args.oe_norm:
+            dist_norm_res_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')))
+            dist_norm_res_KO_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_KO.cool')))
+            dist_norm_res_df = dist_norm_res_WT_df.merge(dist_norm_res_KO_df, on=['bin1_id', 'bin2_id'], suffixes=('_WT', '_KO'))
+            # rename to just WT and KO
+            dist_norm_res_df = dist_norm_res_df.rename(columns={'count_WT': 'WT', 'count_KO': 'KO'})
+            # add back a1, a2, chrom1, chrom2, start1, start2, end1, end2
+            dist_norm_res_df['a1'] = res_df['a1']
+            dist_norm_res_df['a2'] = res_df['a2']
+            # round the WT and KO columns to 3 decimal places
+            dist_norm_res_df['WT'] = dist_norm_res_df['WT'].round(3)
+            dist_norm_res_df['KO'] = dist_norm_res_df['KO'].round(3)
+            dist_norm_res_df = dist_norm_res_df[['a1', 'a2', 'WT', 'KO']]
+            # add chrom start and end columns
+            dist_norm_res_df['chrom1'] = chr_name
+            dist_norm_res_df['chrom2'] = chr_name
+            dist_norm_res_df['start1'] = dist_norm_res_df['a1'].map(start_map)
+            dist_norm_res_df['end1'] = dist_norm_res_df['a1'].map(end_map)
+            dist_norm_res_df['start2'] = dist_norm_res_df['a2'].map(start_map)
+            dist_norm_res_df['end2'] = dist_norm_res_df['a2'].map(end_map)
+            dist_norm_res_df.dropna(inplace=True)
+            dist_norm_res_df = dist_norm_res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO']]
+            # set start and end to int
+            dist_norm_res_df['start1'] = dist_norm_res_df['start1'].astype(int)
+            dist_norm_res_df['end1'] = dist_norm_res_df['end1'].astype(int)
+            dist_norm_res_df['start2'] = dist_norm_res_df['start2'].astype(int)
+            dist_norm_res_df['end2'] = dist_norm_res_df['end2'].astype(int)
+            dist_norm_res_df = dist_norm_res_df[(dist_norm_res_df['WT'] >= 1e-4) & (dist_norm_res_df['KO'] >= 1e-4)].reset_index(drop=True)
+            dist_norm_res_df.to_csv(args.out_file.replace('.tsv', '_oe_norm.tsv'), sep='\t', header=True, index=False)
+
+            # write oe normalized coolers
+            cooler.create_cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool'), bins_cooler_df, dist_norm_res_WT_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
+            cooler.create_cooler(args.out_file.replace('.tsv', '_KO_oe_norm.cool'), bins_cooler_df, dist_norm_res_KO_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
+
+            # visualize a sample heatmap in raw and oe for checking
+            fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+            mat = cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')).matrix(balance=False).fetch(f'{chr_name}:10000000-20000000')
+            axs[0].imshow(mat, cmap='Reds')
+            axs[0].set_title('Raw Hi-C Heatmap (WT)')
+            mat_oe = cooler.Cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool')).matrix(balance=False).fetch(f'{chr_name}:10000000-40000000')
+            axs[1].imshow(mat_oe, cmap='Reds')
+            axs[1].set_title('OE Normalized Hi-C Heatmap (WT)')
+            plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_WT_oe_check.png'), dpi=300)
+            plt.close(fig)
+
+
         if pred_1d is not None:
             # convert the res_1d dict to a dataframe
             res_1d_df = pd.DataFrame(results_1d).groupby(['chrom', 'start', 'end']).mean().reset_index()

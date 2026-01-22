@@ -12,6 +12,65 @@ from cshark.data.data_feature import SequenceFeature, GenomicFeature
 from cshark.inference.utils.model_utils import load_default
 
 
+def oe_normalize_cooler(c, max_strata=512, dummy=1e-7):
+    """
+    Performs distance (strata) based observed/expected (O/E) ratio correction
+    on a matrix in a vectorized and efficient manner.
+
+    Args:
+        mat (np.ndarray): The input matrix.
+        max_strata (int): The maximum diagonal distance to normalize.
+        dummy (float): A small value to add to avoid division by zero.
+
+    Returns:
+        np.ndarray: The normalized matrix.
+    """
+    data = c.matrix(balance=False, sparse=True)
+    chrom = list(c.chromnames)[0]
+    # main loop
+    mat = data.fetch(chrom).toarray()
+    # Ensure input is a NumPy array and handle NaNs
+    mat = np.nan_to_num(np.asarray(mat))
+    mat[mat < 0] = 0  # Set negative values to zero
+    n = mat.shape[0]
+
+    # Ensure the matrix is square
+    if n != mat.shape[1]:
+        raise ValueError("Input matrix must be square.")
+
+    # Cap max_strata to the actual number of diagonals in the matrix
+    num_diags = min(max_strata, n)
+
+    # Calculate the mean of positive values for each diagonal up to num_diags
+    # A list comprehension is a clean way to do this
+    averages = np.array([
+        np.mean(diag[diag > 0]) if np.any(diag > 0) else 0
+        for diag in (np.diagonal(mat, offset=i) for i in range(num_diags))
+    ])
+
+    # Replace any calculated zeros with 1 to avoid division by zero
+    averages[averages == 0] = 1
+
+    # --- Vectorized creation of the 'expected' matrix ---
+    # Create an array of average values indexed by distance from the diagonal.
+    # For distances >= num_diags, we will not normalize (i.e., divide by 1).
+    avg_by_dist = np.ones(n)
+    avg_by_dist[:num_diags] = averages
+    # Calculate the distance from the main diagonal for each matrix element
+    rows, cols = np.indices(mat.shape)
+    dist = np.abs(rows - cols)
+    # Build the 'expected' matrix using advanced indexing
+    expected_mat = avg_by_dist[dist]
+    normalized_mat = (mat + dummy) / (expected_mat + dummy)
+    # only keep upper triangle
+    normalized_mat = np.triu(normalized_mat)
+    normalized_mat = coo_matrix(normalized_mat)
+    normalized_pixels = pd.DataFrame()
+    normalized_pixels['bin1_id'] = normalized_mat.row
+    normalized_pixels['bin2_id'] = normalized_mat.col
+    normalized_pixels['count'] = normalized_mat.data
+    return normalized_pixels
+
 
 def write_tmp_cooler(pred, chr_name, start, res=8192, window=2097152, out_file='tmp/tmp.cool'):
     bins = pd.DataFrame()
