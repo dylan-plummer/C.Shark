@@ -270,6 +270,8 @@ def main():
             starts = np.arange(0, chr_length - window, step_size)
         ends = starts + window
         results = {'a1': [], 'a2': [], 'WT': [], 'KO': []}
+        if args.oe_norm:  # we compute and store oe normalized results as well
+            results['exp_WT'] = []
         bins = []
         input_track_names = []
         input_track_paths = []
@@ -345,12 +347,37 @@ def main():
             ko_pixels = pred_cooler.pixels()[:]
             wt_pixels = wt_pixels.rename(columns={'count': 'WT'})
             ko_pixels = ko_pixels.rename(columns={'count': 'KO'})
-            # merge the two cooler files with WT and KO keys
-            pixels = wt_pixels.merge(ko_pixels, how='outer')
-            results['a1'].extend(pixels['bin1_id'].tolist())
-            results['a2'].extend(pixels['bin2_id'].tolist())
-            results['WT'].extend(pixels['WT'].tolist())
-            results['KO'].extend(pixels['KO'].tolist())
+            if args.oe_norm:
+                # load ground truth matrix for this region
+                ctcf_filename = os.path.basename(ctcf_path).split('.')[0]
+                hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace(f'/{ctcf_filename}.bw', '') + f'/{chr_name}.npz'
+                hic = HiCFeature(path = hic_path)
+                gt_res = res
+                if res == 8192:
+                    gt_res = 10000
+                if res == 4096:
+                    gt_res = 5000
+                mat = hic.get(start, window=int(window), res=gt_res)
+                mat = resize(mat, (int(image_scale), int(image_scale)), anti_aliasing=True, preserve_range=True)
+                mat += 0.01
+                write_tmp_cooler(mat, chr_name, start, window=(int(window * 2)), out_file='tmp/tmp_true.cool', res=res)
+                true_cooler = cooler.Cooler('tmp/tmp_true.cool')
+                true_pixels = true_cooler.pixels()[:]
+                true_pixels = true_pixels.rename(columns={'count': 'exp_WT'})
+                # merge wt_pixels and true_pixels
+                pixels = wt_pixels.merge(ko_pixels, how='outer').merge(true_pixels, how='outer')
+                results['a1'].extend(pixels['bin1_id'].tolist())
+                results['a2'].extend(pixels['bin2_id'].tolist())
+                results['WT'].extend(pixels['WT'].tolist())
+                results['KO'].extend(pixels['KO'].tolist())
+                results['exp_WT'].extend(pixels['exp_WT'].tolist())
+            else:
+                # merge the two cooler files with WT and KO keys
+                pixels = wt_pixels.merge(ko_pixels, how='outer')
+                results['a1'].extend(pixels['bin1_id'].tolist())
+                results['a2'].extend(pixels['bin2_id'].tolist())
+                results['WT'].extend(pixels['WT'].tolist())
+                results['KO'].extend(pixels['KO'].tolist())
             bins.append(pred_before_cooler.bins()[:])
 
             if pred_1d is not None:
@@ -364,6 +391,10 @@ def main():
                     results_1d[f'{track_name}_WT'].extend(pred_before_1d[:, track_idx].tolist())
                     results_1d[f'{track_name}_KO'].extend(pred_1d[:, track_idx].tolist())
                 bins_1d.append(pred_before_cooler.bins()[:])
+
+           
+                
+                
 
         # convert the res dict to a dataframe
         res_df = pd.DataFrame(results).groupby(['a1', 'a2']).mean().reset_index()
@@ -383,7 +414,7 @@ def main():
         res_df['start2'] = res_df['a2'].map(start_map)
         res_df['end1'] = res_df['a1'].map(end_map)
         res_df['end2'] = res_df['a2'].map(end_map)
-        res_df = res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO']]
+        res_df = res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO'] + (['exp_WT'] if args.oe_norm else [])]
         # remove predictions outside region
         if region is not None:
             res_df = res_df[(res_df['start1'] >= region_start) & (res_df['end1'] <= region_end) & (res_df['start2'] >= region_start) & (res_df['end2'] <= region_end)]
@@ -403,21 +434,29 @@ def main():
         # also create cooler file for full chromosome
         wt_cooler_df = res_df[['a1', 'a2', 'WT']].rename(columns={'WT': 'count'})
         ko_cooler_df = res_df[['a1', 'a2', 'KO']].rename(columns={'KO': 'count'})
+        exp_wt_cooler_df = res_df[['a1', 'a2', 'exp_WT']].rename(columns={'exp_WT': 'count'})
         # map a1 and a2 to bin_ids
         wt_cooler_df['bin1_id'] = wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
         wt_cooler_df['bin2_id'] = wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
         ko_cooler_df['bin1_id'] = ko_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
         ko_cooler_df['bin2_id'] = ko_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+        exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
+        exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
         wt_cooler_df = wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
         ko_cooler_df = ko_cooler_df[['bin1_id', 'bin2_id', 'count']]
+        exp_wt_cooler_df = exp_wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
         bins_cooler_df = bins_df[['chrom', 'start', 'end']].copy()
         bins_cooler_df.reset_index(inplace=True)
         cooler.create_cooler(args.out_file.replace('.tsv', '_WT.cool'), bins_cooler_df, wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
         cooler.create_cooler(args.out_file.replace('.tsv', '_KO.cool'), bins_cooler_df, ko_cooler_df, ordered=True, dtypes={'count': 'float32'})
+        cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT.cool'), bins_cooler_df, exp_wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
         if args.oe_norm:
             dist_norm_res_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')))
             dist_norm_res_KO_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_KO.cool')))
+            dist_norm_res_exp_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_exp_WT.cool')))
             dist_norm_res_df = dist_norm_res_WT_df.merge(dist_norm_res_KO_df, on=['bin1_id', 'bin2_id'], suffixes=('_WT', '_KO'))
+            dist_norm_res_df = dist_norm_res_df.merge(dist_norm_res_exp_WT_df, on=['bin1_id', 'bin2_id'])
+            dist_norm_res_df = dist_norm_res_df.rename(columns={'count': 'exp_WT'})
             # rename to just WT and KO
             dist_norm_res_df = dist_norm_res_df.rename(columns={'count_WT': 'WT', 'count_KO': 'KO'})
             # add back a1, a2, chrom1, chrom2, start1, start2, end1, end2
@@ -426,7 +465,7 @@ def main():
             # round the WT and KO columns to 3 decimal places
             dist_norm_res_df['WT'] = dist_norm_res_df['WT'].round(3)
             dist_norm_res_df['KO'] = dist_norm_res_df['KO'].round(3)
-            dist_norm_res_df = dist_norm_res_df[['a1', 'a2', 'WT', 'KO']]
+            dist_norm_res_df['exp_WT'] = dist_norm_res_df['exp_WT'].round(3)
             # add chrom start and end columns
             dist_norm_res_df['chrom1'] = chr_name
             dist_norm_res_df['chrom2'] = chr_name
@@ -435,27 +474,31 @@ def main():
             dist_norm_res_df['start2'] = dist_norm_res_df['a2'].map(start_map)
             dist_norm_res_df['end2'] = dist_norm_res_df['a2'].map(end_map)
             dist_norm_res_df.dropna(inplace=True)
-            dist_norm_res_df = dist_norm_res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO']]
+            dist_norm_res_df = dist_norm_res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO', 'exp_WT']]
             # set start and end to int
             dist_norm_res_df['start1'] = dist_norm_res_df['start1'].astype(int)
             dist_norm_res_df['end1'] = dist_norm_res_df['end1'].astype(int)
             dist_norm_res_df['start2'] = dist_norm_res_df['start2'].astype(int)
             dist_norm_res_df['end2'] = dist_norm_res_df['end2'].astype(int)
-            dist_norm_res_df = dist_norm_res_df[(dist_norm_res_df['WT'] >= 1e-4) & (dist_norm_res_df['KO'] >= 1e-4)].reset_index(drop=True)
+            dist_norm_res_df = dist_norm_res_df[(dist_norm_res_df['WT'] >= 1e-4) | (dist_norm_res_df['KO'] >= 1e-4) | (dist_norm_res_df['exp_WT'] >= 1e-4)].reset_index(drop=True)
             dist_norm_res_df.to_csv(args.out_file.replace('.tsv', '_oe_norm.tsv'), sep='\t', header=True, index=False)
 
             # write oe normalized coolers
             cooler.create_cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool'), bins_cooler_df, dist_norm_res_WT_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
             cooler.create_cooler(args.out_file.replace('.tsv', '_KO_oe_norm.cool'), bins_cooler_df, dist_norm_res_KO_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
+            cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT_oe_norm.cool'), bins_cooler_df, dist_norm_res_exp_WT_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
 
             # visualize a sample heatmap in raw and oe for checking
-            fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-            mat = cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')).matrix(balance=False).fetch(f'{chr_name}:10000000-20000000')
+            fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+            mat = cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
             axs[0].imshow(mat, cmap='Reds')
             axs[0].set_title('Raw Hi-C Heatmap (WT)')
-            mat_oe = cooler.Cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool')).matrix(balance=False).fetch(f'{chr_name}:10000000-40000000')
+            mat_oe = cooler.Cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
             axs[1].imshow(mat_oe, cmap='Reds')
             axs[1].set_title('OE Normalized Hi-C Heatmap (WT)')
+            mat_true_oe = cooler.Cooler(args.out_file.replace('.tsv', '_exp_WT_oe_norm.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
+            axs[2].imshow(mat_true_oe, cmap='Reds')
+            axs[2].set_title('OE Normalized Hi-C Heatmap (Expected WT)')
             plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_WT_oe_check.png'), dpi=300)
             plt.close(fig)
 
