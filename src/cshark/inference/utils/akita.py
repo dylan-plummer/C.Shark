@@ -45,6 +45,7 @@ target_length = data_stats['target_length']
 hic_diags =  data_stats['diagonal_offset']
 target_crop = data_stats['crop_bp'] // data_stats['pool_width']
 target_length1 = data_stats['seq_length'] // data_stats['pool_width']
+crop_bp = data_stats['crop_bp']
 
 target_length1_cropped = target_length1 - 2*target_crop
 
@@ -76,7 +77,7 @@ def akita_pred(seq, model=seqnn_model, akita_res=2048, target_res=4096, akita_id
         # Map predictions to final matrix
         hic_pred = pred_mat
         chunk_size = hic_pred.shape[0]
-        start_idx = int(start // akita_res)
+        start_idx = int((start + crop_bp) // akita_res)
         end_idx = start_idx + chunk_size
         mat[start_idx:end_idx, start_idx:end_idx] += hic_pred
         count_mat[start_idx:end_idx, start_idx:end_idx] += 1
