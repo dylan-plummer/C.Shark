@@ -384,8 +384,6 @@ def main():
             args.out_file += '.tsv'
         # output the dataframe to a bed file
         res_df.fillna(0, inplace=True)
-        res_df = res_df[res_df['WT'] > 0]
-        res_df = res_df[res_df['KO'] > 0].reset_index(drop=True)
         # round to 4 decimal places
         res_df['WT'] = res_df['WT'].round(4)
         res_df['KO'] = res_df['KO'].round(4)
