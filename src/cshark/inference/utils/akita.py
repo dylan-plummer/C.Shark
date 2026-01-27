@@ -74,6 +74,7 @@ def akita_pred(seq, model=seqnn_model, akita_res=2048, target_res=4096, akita_id
         seq_chunk = seq[:, start:end, :]
         pred_chunk = model.predict(tf.convert_to_tensor(seq_chunk, dtype=tf.float32), verbose=0)
         pred_mat = from_upper_triu(pred_chunk[:,:,akita_idx], target_length1_cropped, hic_diags)
+        pred_mat = np.nan_to_num(pred_mat, nan=0.0, posinf=0.0, neginf=0.0)
         # Map predictions to final matrix
         hic_pred = pred_mat
         chunk_size = hic_pred.shape[0]
