@@ -571,6 +571,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     ko_data_types = ko_data  # list of data types to knockout
     if isinstance(peak_height, float) and deletion_starts is not None:
         peak_height = [peak_height] * len(deletion_starts)
+    if len(peak_height) != len(deletion_starts):
+        peak_height = [peak_height[0]] * len(deletion_starts)
     tmp_ko_data = []
     for ko_data_type in ko_data:
         if ko_data_type not in tmp_ko_data:
@@ -775,7 +777,9 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool', res=res)
     if deletion_starts is not None and deletion_widths is not None:
         one_perturb_already_done = {}
+        print(len(deletion_starts), len(deletion_widths), len(ko_data_types), len(ko_mode), len(peak_height))
         for deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height in zip(deletion_starts, deletion_widths, ko_data_types, ko_mode, peak_height):
+            print(f'Writing KO for {ko_data_type} with mode {knockout_mode} at {deletion_start}-{deletion_start + deletion_width}')
             if ko_data_type in input_track_names:
                 ko_path = input_track_paths[input_track_names.index(ko_data_type)]
                 if ko_data_type in one_perturb_already_done:
