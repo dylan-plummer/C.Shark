@@ -1,3 +1,4 @@
+from calendar import c
 from math import dist
 import os
 import re
@@ -125,6 +126,8 @@ def main():
     parser.add_argument('--hide-line', dest='hide_deletion_line', 
                         action = 'store_true',
                         help='Remove the line showing deletion site (default: %(default)s)')
+    parser.add_argument('--whitespace', dest='whitespace', action = 'store_true',
+                        help='Add whitespace around the deletion site for better visualization (default: %(default)s)')
     parser.add_argument('--region', '--locus', dest='region', 
                                 help='specific region to visualize, otherwise full 2Mb window', required=False)
     
@@ -195,19 +198,7 @@ def main():
     image_scale = args.mat_size
     res = args.resolution
 
-    # ensure the user has provided either --del-start and --del-width or --screen-start, --screen-end, --perturb-width, --step-size
-    if args.screen_start is not None and args.screen_end is not None:
-        screening(args.output_path, args.outname, args.celltype, args.chr_name,
-                  args.screen_start, args.screen_end, args.deletion_width, args.step_size, 
-                    args.model_path,
-                    args.seq_path, args.ctcf_path, args.atac_path, other_feats, 
-                    ko_data=args.ko_data, ko_mode=args.ko_mode,
-                    region = args.region, n_top_sites=args.n_top_sites, plot_diff=args.plot_diff,
-                    min_val=args.min_val_pred, max_val=args.max_val_pred, 
-                    min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff,
-                    peak_height=args.peak_height,
-                    load_screen=args.load_screen)
-    elif args.start is not None:
+    if args.start is not None:
             single_deletion(args.output_path, args.outname, args.celltype, args.chr_name, args.start, 
                     args.deletion_start, args.deletion_width, 
                     args.var_pos, args.alt_bp, 
@@ -324,6 +315,9 @@ def main():
                                                   other_feat_names=input_track_names[2:])
             pred_before = pred_before_output['hic']
             pred_before_1d = pred_before_output['1d']
+            left_del_pad = None 
+            right_del_pad = None
+           
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                 start, window, seq_region, ctcf_region, 
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, 
@@ -571,8 +565,9 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     ko_data_types = ko_data  # list of data types to knockout
     if isinstance(peak_height, float) and deletion_starts is not None:
         peak_height = [peak_height] * len(deletion_starts)
-    if len(peak_height) != len(deletion_starts):
-        peak_height = [peak_height[0]] * len(deletion_starts)
+    if isinstance(peak_height, list):
+        if len(peak_height) != len(deletion_starts):
+            peak_height = [peak_height[0]] * len(deletion_starts)
     tmp_ko_data = []
     for ko_data_type in ko_data:
         if ko_data_type not in tmp_ko_data:
@@ -661,10 +656,27 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 channel_offset += 1
             if 'atac' in input_track_names:
                 channel_offset += 1
+            if knockout_mode == 'del' or knockout_mode == 'deletion' or knockout_mode == 'delete':
+                left_pad_bp = deletion_width // 2
+                right_pad_bp = deletion_width - left_pad_bp
+                left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other = infer.load_region(chr_name, 
+                    start - left_pad_bp, seq_path, ctcf_path, atac_path, other_feats, 
+                    seq2_path=seq2_path,
+                    window = left_pad_bp, 
+                    ctcf_log2=ctcf_log2,
+                    bigwig_log=bigwig_log_transform)
+                left_del_pad = (left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other)
+                right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other = infer.load_region(chr_name, 
+                    start + window + right_pad_bp, seq_path, ctcf_path, atac_path, other_feats, 
+                    seq2_path=seq2_path,
+                    window = right_pad_bp, 
+                    ctcf_log2=ctcf_log2,
+                    bigwig_log=bigwig_log_transform)
+                right_del_pad = (right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other)
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                     deletion_start, deletion_width, seq_region, ctcf_region, 
                     atac_region, other_regions, ko_data=[ko_data_type], ko_channels=[ko_channel], channel_offset=channel_offset,
-                    ko_mode=[knockout_mode], peak_height=ko_height)
+                    ko_mode=[knockout_mode], peak_height=ko_height, left_del_pad=left_del_pad, right_del_pad=right_del_pad)
     
     # perturb sequence if var_pos is not None
     if var_pos is not None and alt_bp is not None:
@@ -687,6 +699,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                    recon_1d=recon_1d, undo_log=undo_log, bigwig_log=bigwig_log_transform,
                                    other_feat_names=input_track_names[2:])
     pred = pred_output['hic']
+    
     if not no_plots:
         plt.imshow(pred, cmap='Reds')
         plt.colorbar()
@@ -694,6 +707,25 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred.png'), dpi=300)
         plt.close()
     pred_1d = pred_output['1d']
+    if 'del' in ko_mode or 'deletion' in ko_mode or 'delete' in ko_mode and args.whitespace:  # add zeros for deleted region, crop edges to keep same size
+        deletion_start = deletion_starts[0]
+        left_pad_bp = deletion_widths[0] // 2
+        right_pad_bp = deletion_widths[0] - left_pad_bp
+        left_pad_px = left_pad_bp // res
+        right_pad_px = right_pad_bp // res
+        del_start_px = (deletion_start - start) // res
+        pred = np.concatenate((
+            pred[:, :del_start_px],
+            np.zeros((pred.shape[0], deletion_widths[0] // res)),
+            pred[:, del_start_px:]
+        ), axis=1)
+        pred = pred[:, left_pad_px:pred.shape[1]-right_pad_px]
+        pred_1d = np.concatenate((
+            pred_1d[:del_start_px],
+            np.zeros((deletion_widths[0] // res, pred_1d.shape[1])),
+            pred_1d[del_start_px:]
+        ), axis=0)
+        pred_1d = pred_1d[left_pad_px:pred_1d.shape[0]-right_pad_px]
 
     # get track_names from ctcf_path, atac_path, other_feats
     track_names = model_utils.get_1d_track_names(model_path)
@@ -1136,229 +1168,10 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             pass
 
 
-def screening(output_path, outname, celltype, chr_name, screen_start, screen_end, perturb_width, step_size, model_path, seq_path, ctcf_path, atac_path, other_paths, 
-              ko_data=['ctcf'], ko_mode=['zero'], region=None, n_top_sites=5, plot_diff=False,
-              min_val=0.1, max_val=None, 
-              min_val_diff=-0.5, max_val_diff=0.5,
-              peak_height=2.0,
-              save_pred = False, save_deletion = True, save_diff = True, save_impact_score = True, save_bedgraph = True, plot_impact_score = True, plot_frames = False,
-              load_screen=False):
-    if not outname.endswith('_') and outname != '':
-                outname += '_'
-    if type(perturb_width) is list:
-        perturb_width = perturb_width[0]
-        
-    # Store data and model in memory
-    seq, ctcf, atac = infer.load_data_default(chr_name, seq_path, ctcf_path, atac_path)
-    if other_paths is not None:
-        other_feats = []
-        for feat_path in other_paths:
-            print(f'Loading {feat_path}')
-            other_feats.append(GenomicFeature(path = feat_path, norm = 'log'))
-    num_genomic_features = 2 if other_feats is None else 2 + len(other_feats)
-    if atac is None:
-            num_genomic_features -= 1
-    print(f'Number of genomic features: {num_genomic_features}')
-    model = model_utils.load_default(model_path, num_genomic_features=num_genomic_features, mat_size=image_scale, seq_filter_size=seq_filter_size, mid_hidden=mid_hidden)
-    input_track_names = []
-    input_track_paths = []
-    if ctcf_path is not None:
-        input_track_names.append('ctcf')
-        input_track_paths.append(ctcf_path)
-    if atac_path is not None:
-        input_track_names.append('atac')
-        input_track_paths.append(atac_path)
-    if other_feats is not None:
-        for other_feat in other_paths:
-            input_track_names.append(os.path.basename(other_feat).split('.')[0])
-            input_track_paths.append(other_feat)
-    # get indices of the input tracks for KO
-    ko_channels = []
-    for ko in ko_data:
-        if ko in input_track_names:
-            ko_channels.append(input_track_names.index(ko))
-        elif ko != 'seq':
-            print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
-    # Generate pertubation windows
-    # Windows are centered. Thus, both sides have enough margins
-    windows = [w * step_size + screen_start for w in range(int((screen_end - screen_start) / step_size))]
-    from tqdm import tqdm
-    preds = np.empty((0, 256, 256))
-    preds_deletion = np.empty((0, 256, 256))
-    diff_maps = np.empty((0, 256, 256))
-    perturb_starts = []
-    perturb_ends = []
-    if load_screen:
-         # make sure that the bedgraph exists
-        if not os.path.exists(os.path.join(output_path, f"{celltype}/screening/bedgraph/{chr_name}_screen_{screen_start}_{screen_end}_width_{perturb_width}_step_{step_size}_impact_score.bedgraph")):
-            raise FileNotFoundError(f"Bedgraph file {os.path.join(output_path, f'{celltype}/screening/bedgraph/{chr_name}_screen_{screen_start}_{screen_end}_width_{perturb_width}_step_{step_size}_impact_score.bedgraph')} does not exist.")
-    else:
-        print('Screening...')
-        for w_start in tqdm(windows):
-            pred_start = int(w_start + perturb_width / 2 - 2097152 / 2)
-            pred, pred_deletion, diff_map = predict_difference(chr_name, pred_start, int(w_start), perturb_width, model, seq, ctcf, atac, other_feats=other_feats, 
-                                                               ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=peak_height)
-            preds = np.append(preds, np.expand_dims(pred, 0), axis = 0)
-            preds_deletion = np.append(preds_deletion, np.expand_dims(pred_deletion, 0), axis = 0)
-            diff_maps = np.append(diff_maps, np.expand_dims(diff_map, 0), axis = 0)
-            perturb_starts.append(w_start)
-            perturb_ends.append(w_start + perturb_width)
-        impact_scores = np.abs(diff_maps.mean(axis = (1, 2)))
-        plot = plot_utils.MatrixPlotScreen(output_path, perturb_starts, perturb_ends, impact_scores, diff_maps, preds, preds_deletion, 'screening', celltype, chr_name, screen_start, screen_end, perturb_width, step_size, plot_impact_score)
-        figure = plot.plot()
-        plot.save_data(figure, save_pred, save_deletion, save_diff, save_impact_score, save_bedgraph)
-
-    # load the locations of the top n impact scores
-    impact_scores = np.load(f'{os.path.join(output_path, f"{celltype}/screening/npy/{chr_name}_screen_{screen_start}_{screen_end}_width_{perturb_width}_step_{step_size}_impact_score.npy")}')
-    # load the locations of the top n impact scores
-    top_n = np.argsort(impact_scores)[-n_top_sites:]
-    top_n_starts = []
-    top_n_ends = []
-    for i in top_n:
-        top_n_starts.append(windows[i])
-        top_n_ends.append(windows[i] + perturb_width)
-
-    for i, (w_start, w_end) in enumerate(zip(top_n_starts, top_n_ends)):
-        print(f'Window start: {w_start}, Window end: {w_end}')
-        pred_start = int(w_start + perturb_width / 2 - 2097152 / 2)
-        pred, pred_deletion, diff_map = predict_difference(chr_name, pred_start, int(w_start), perturb_width, model, seq, ctcf, atac, other_feats=other_feats, 
-                                                           ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode)
-        write_tmp_cooler(pred, chr_name, pred_start, out_file=f'tmp/tmp.cool', res=res)
-        write_tmp_cooler(pred_deletion, chr_name, pred_start, out_file='tmp/tmp_deletion.cool', res=res)
-        write_tmp_cooler(diff_map, chr_name, pred_start, out_file='tmp/tmp_diff.cool', res=res)
-
-        # must first create bed file for deletion
-        with open('tmp/regions.bed', 'w') as f:
-            f.write(f'{chr_name}\t{w_start}\t{w_end}\n')
-        
-        # with open('tracks_screen.ini', 'r') as f:
-        #     lines = f.readlines()
-        assembly = 'hg19'
-        if '/mm10/' in ctcf_path:
-            assembly = 'mm10'
-        elif '/hg38/' in ctcf_path:
-            assembly = 'hg38'
-        # data root is path before /<assembly>
-        # e.g. cshark_data/data/mm10/ -> cshark_data/data
-        assembly_idx = ctcf_path.index(f'/{assembly}/')
-        data_root = ctcf_path[:assembly_idx]
-        tracks = get_tracks(data_root, celltype, assembly)
-        tracks_screen = tracks
-        lines = tracks_screen.split('\n')
-        lines = [line + '\n' for line in lines]
-        with open('tmp/tmp_tracks.ini', 'w') as f:
-            for line in lines:
-                if '[ctcf]' in line:
-                        # first write the bedgraph output track
-                        f.write('[screen score]\n')
-                        f.write('height = 2\n')
-                        f.write('title = screen score\n')
-                        # e.g chr11_screen_9733614_10791870_width_10000_step_10000_impact_score.bedgraph
-                        f.write(f'file = {os.path.join(output_path, f"{celltype}/screening/bedgraph/{chr_name}_screen_{screen_start}_{screen_end}_width_{perturb_width}_step_{step_size}_impact_score.bedgraph")}\n')
-                        f.write('file_type = bedgraph\n\n')
-                if '[Genes]' in line:
-                    if plot_diff:
-                        f.write('[Diff pred]\n')
-                        f.write('file = tmp/tmp_diff.cool\n')
-                        f.write(f'min_value = {min_val}\n')
-                        f.write(f'max_value = {max_val}\n')
-                        f.write('colormap = bwr\n')
-                        f.write('file_type = hic_matrix_square\n\n')
-                    else:
-                        f.write('[WT pred]\n')
-                        f.write('file = tmp/tmp.cool\n')
-                        f.write('title = WT pred\n')
-                        f.write(f'min_value = {min_val}\n')
-                        if max_val is not None:
-                            f.write(f'max_value = {max_val}\n')
-                        f.write('colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]\n')
-                        f.write('file_type = hic_matrix_square\n\n')
-                        f.write('[KO pred]\n')
-                        f.write('file = tmp/tmp_deletion.cool\n')
-                        f.write('title = KO pred\n')
-                        f.write(f'min_value = {min_val}\n')
-                        if max_val is not None:
-                            f.write(f'max_value = {max_val}\n')
-                        f.write('colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]\n')
-                        f.write('file_type = hic_matrix_square\n\n')
-                f.write(line)
-            # now add the deletion line
-            f.write('\n')
-            f.write('[deletion]\n')
-            f.write('# bed file with regions to highlight\n')
-            f.write('file = tmp/regions.bed\n')
-            f.write('# type:\n')
-            f.write('type = vhighlight\n')
-                
-              
-                
-
-        try:
-            if region is not None:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
-            else:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{pred_start}_ctcf_screen_tracks.png')} --region {chr_name}:{screen_start}-{screen_start + window} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction} "
-            os.system(tracks_cmd)
-        except Exception as e:
-            print(e)
-
-    # delete tmp files
-    # for file in os.listdir('tmp'):
-    #     try:
-    #         os.remove(os.path.join('tmp', file))
-    #     except Exception as e:
-    #         print(e)
-    #         pass
-    # # delete tmp folder
-    # try:
-    #     os.rmdir('tmp')
-    # except Exception as e:
-    #     print(e)
-    #     pass
-    
-
-def predict_difference(chr_name, start, deletion_start, deletion_width, model, seq, ctcf, atac, other_feats=None, 
-                       ko_data=['ctcf'], ko_channels=[0], ko_mode=['zero'], peak_height=2.0):
-    # Define window which accomodates deletion
-    end = start + 2097152
-    seq_region, ctcf_region, atac_region = infer.get_data_at_interval(chr_name, start, end, seq, ctcf, atac)
-    other_regions = None
-    if other_feats is not None:
-        other_regions = []
-        for feat in other_feats:
-            other_regions.append(feat.get(chr_name, start, end))
-    # Unmodified inputs
-    if other_regions is None:
-        inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region)
-    else:
-        inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
-    pred = model(inputs)[0].detach().cpu().numpy() # Prediction
-    # Inputs with deletion
-    inputs_deletion = preprocess_deletion(chr_name, start, deletion_start, 
-            deletion_width, seq_region, ctcf_region, atac_region, other_regions=other_regions, 
-            ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=2.0)
-    pred_deletion = model(inputs_deletion)[0].detach().cpu().numpy() # Prediction
-    # Compare inputs:
-    diff_map = pred_deletion - pred
-    return pred, pred_deletion, diff_map
-
-
-def preprocess_deletion(chr_name, start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
-                        other_regions=None, ko_data=['ctcf'], ko_channels=[0], ko_mode=['zero'], peak_height=2.0):
-    # Delete inputs
-    seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
-            deletion_start, deletion_width, seq_region, ctcf_region, 
-            atac_region, other_regions=other_regions, ko_data=ko_data, ko_channels=ko_channels, ko_mode=ko_mode, peak_height=peak_height)
-    # Process inputs
-    if other_regions is None:
-        inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region)
-    else:
-        inputs = infer.preprocess_default(seq_region, ctcf_region, atac_region, other_regions)
-    return inputs
-
 def deletion_with_padding(chr_name, start, deletion_start, deletion_width, seq_region, ctcf_region, atac_region, 
                           other_regions=None, ko_data=['ctcf'], ko_channels=[0], channel_offset=0, ko_mode=['zero'],
-                          peak_height=2.0):
+                          peak_height=2.0,
+                          left_del_pad=None, right_del_pad=None):
     ''' Delete all signals at a specfied location with corresponding padding at the end '''
     # if 'ctcf' in ko_data:
     #     channel_offset += 1
@@ -1379,6 +1192,22 @@ def deletion_with_padding(chr_name, start, deletion_start, deletion_width, seq_r
                 # replace all bases in seq_region with N
                 seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = 0
                 seq_region[deletion_start - start:deletion_start - start + deletion_width, 4] = 1
+            elif knockout_mode == 'del' or knockout_mode == 'deletion' or knockout_mode == 'delete':
+                # delete everything and pad using left and right padding data
+                left_seq_pad, left_ctcf_pad, left_atac_pad, left_other_pads = left_del_pad
+                right_seq_pad, right_ctcf_pad, right_atac_pad, right_other_pads = right_del_pad
+                print(left_seq_pad.shape, seq_region.shape, seq_region[:deletion_start - start, :].shape,)
+                seq_region = np.concatenate((left_seq_pad, seq_region[:deletion_start - start, :], 
+                                            seq_region[deletion_start - start + deletion_width:, :], right_seq_pad), axis=0)
+                ctcf_region = np.concatenate((left_ctcf_pad, ctcf_region[:deletion_start - start], 
+                                            ctcf_region[deletion_start - start + deletion_width:], right_ctcf_pad), axis=0)
+                atac_region = np.concatenate((left_atac_pad, atac_region[:deletion_start - start], 
+                                            atac_region[deletion_start - start + deletion_width:], right_atac_pad), axis=0)
+                if other_regions is not None:
+                    for i in range(len(other_regions)):
+                        other_regions[i] = np.concatenate((left_other_pads[i], other_regions[i][:deletion_start - start], 
+                                                    other_regions[i][deletion_start - start + deletion_width:], right_other_pads[i]), axis=0)
+                
             elif knockout_mode == 'shuffle':
                 # shuffle seq_region
                 idxs = np.arange(seq_region[deletion_start - start:deletion_start - start + deletion_width, :].shape[0])
