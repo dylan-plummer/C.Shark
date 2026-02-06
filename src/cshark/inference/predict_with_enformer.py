@@ -1105,6 +1105,9 @@ def main():
                     color = teal
                     min_value = 0
                     max_value = {ctcf_vmax if args.locus else 'auto'}
+                    """)
+            if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
+                f.write(f"""
                     [ko highlight]
                     file = {args.out_file.replace('.tsv', '') + f'_ko_regions.bed'}
                     type = vhighlight
