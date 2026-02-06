@@ -797,10 +797,10 @@ def main():
                     args.seq_ko_type
                 )
 
-                # predict new CTCF and ATAC using Enformer wrapper
-                pred_1d_inputs = module.enformer_predict_1d(inputs_wt)
-                # Replace all non-sequence channels with Enformer predictions
-                inputs_wt[:, :, 5:] = torch.log1p(pred_1d_inputs[:, :, :len(input_tracks)])
+            # predict new CTCF and ATAC using Enformer wrapper
+            pred_1d_inputs = module.enformer_predict_1d(inputs_wt)
+            # Replace all non-sequence channels with Enformer predictions
+            inputs_wt[:, :, 5:] = torch.log1p(pred_1d_inputs[:, :, :len(input_tracks)])
 
 
             output_wt = model(inputs_wt)
