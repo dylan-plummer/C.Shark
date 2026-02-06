@@ -1098,17 +1098,17 @@ def main():
                         if ko_end - ko_start < 10000:
                             pad = (10000 - (ko_end - ko_start)) // 2
                         bed_file.write(f"{args.chrom}\t{ko_start - pad}\t{ko_end + pad}\t{ko_type}\n")
-                f.write(f"""[enformer_ctcf]
-                        file = {bw_enformer_ctcf_path}
-                        title = Enformer CTCF
-                        height = {track_height_1d}
-                        color = teal
-                        min_value = 0
-                        max_value = {ctcf_vmax if args.locus else 'auto'}
-                        [ko highlight]
-                        file = {args.out_file.replace('.tsv', '') + f'_ko_regions.bed'}
-                        type = vhighlight
-                        """)
+            f.write(f"""[enformer_ctcf]
+                    file = {bw_enformer_ctcf_path}
+                    title = Enformer CTCF
+                    height = {track_height_1d}
+                    color = teal
+                    min_value = 0
+                    max_value = {ctcf_vmax if args.locus else 'auto'}
+                    [ko highlight]
+                    file = {args.out_file.replace('.tsv', '') + f'_ko_regions.bed'}
+                    type = vhighlight
+                    """)
             f.write(f"""[atac]
                         file = {args.atac}
                         title = ATAC
@@ -1116,13 +1116,12 @@ def main():
                         color = green   
                         """
             )
-            if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
-                f.write(f"""[enformer_atac]
-                        file = {bw_enformer_atac_path}
-                        title = Enformer ATAC
-                        height = {track_height_1d}
-                        color = darkgreen
-                        """)
+            f.write(f"""[enformer_atac]
+                    file = {bw_enformer_atac_path}
+                    title = Enformer ATAC
+                    height = {track_height_1d}
+                    color = darkgreen
+                    """)
             f.write(f"""[rad21]
                         file = {args.ctcf.replace('ctcf.bw', 'rad21.bw')}
                         title = RAD21
@@ -1132,15 +1131,14 @@ def main():
                         max_value = {rad21_vmax if args.locus else 'auto'}
                         """
             )
-            if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
-                f.write(f"""[enformer_rad21]
-                        file = {bw_enformer_rad21_path}
-                        title = Enformer RAD21
-                        height = {track_height_1d}
-                        color = darkblue
-                        min_value = 0
-                        max_value = {rad21_vmax if args.locus else 'auto'}
-                        """)
+            f.write(f"""[enformer_rad21]
+                    file = {bw_enformer_rad21_path}
+                    title = Enformer RAD21
+                    height = {track_height_1d}
+                    color = darkblue
+                    min_value = 0
+                    max_value = {rad21_vmax if args.locus else 'auto'}
+                    """)
             for track_path in other_paths:
                 track_name = os.path.basename(track_path).replace('.bw', '')
                 # check if it exists
@@ -1156,18 +1154,17 @@ def main():
                         """
                 )
 
-                if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
-                    enformer_track_path = args.out_file.replace('.tsv', f'_Enformer_{track_name}.bw')
-                    if os.path.exists(enformer_track_path):
-                        f.write(f"""[enformer_{track_name}]
-                                file = {enformer_track_path}
-                                title = Enformer {track_name}
-                                height = {track_height_1d}
-                                color = {colors[(other_paths.index(track_path)) % len(colors)]}
-                                """
-                        )
-                    else:
-                        print(f"Enformer predicted track for {track_name} not found at {enformer_track_path}, skipping.")
+                enformer_track_path = args.out_file.replace('.tsv', f'_Enformer_{track_name}.bw')
+                if os.path.exists(enformer_track_path):
+                    f.write(f"""[enformer_{track_name}]
+                            file = {enformer_track_path}
+                            title = Enformer {track_name}
+                            height = {track_height_1d}
+                            color = {colors[(other_paths.index(track_path)) % len(colors)]}
+                            """
+                    )
+                else:
+                    print(f"Enformer predicted track for {track_name} not found at {enformer_track_path}, skipping.")
             f.write(f"""[pred_hic]
                         file = {args.out_file.replace('.tsv', '') + '_wt.cool'}
                         title = Predicted Hi-C
