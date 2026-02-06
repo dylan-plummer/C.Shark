@@ -726,6 +726,10 @@ def main():
     model.eval()
     model.to(device)
 
+    if not args.out_file.endswith('.tsv'):
+        args.out_file += '.tsv'
+    # make out directory if it doesn't exist
+    os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
     # Get chromosome length from CTCF bigwig
     bw = pyBigWig.open(args.ctcf)
     chrom_len = bw.chroms(args.chrom)
@@ -842,25 +846,24 @@ def main():
                 })
                 ctcf_ko_dfs.append(ctcf_ko_df_window)
 
-            # save enformer predictions if seq KO was applied
-            if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
-                enformer_64bp_pred = F.interpolate(pred_1d_inputs.permute(0,2,1),
-                                                  size=pred_ko_rad21_64bp.shape[0],
-                                                  mode='linear', align_corners=True).squeeze().permute(1,0).cpu().numpy()
-                enformer_df_window = pd.DataFrame({
-                    'chrom': args.chrom,
-                    'start': abs_starts.astype(int),
-                    'end': abs_ends.astype(int),
-                    'Enformer_CTCF': enformer_64bp_pred[:,0],
-                    'Enformer_ATAC': enformer_64bp_pred[:,1],
-                    'Enformer_RAD21': enformer_64bp_pred[:,2],
-                    'Enformer_H3K27ac': enformer_64bp_pred[:,3],
-                    'Enformer_H3K4me3': enformer_64bp_pred[:,4],
-                    'Enformer_H3K9me3': enformer_64bp_pred[:,5],
-                    'Enformer_H3K36me3': enformer_64bp_pred[:,6],
-                    'Enformer_H3K27me3': enformer_64bp_pred[:,7],
-                })
-                enformer_preds_dfs.append(enformer_df_window)
+            # save enformer predictions for all 8 tracks
+            enformer_64bp_pred = F.interpolate(pred_1d_inputs.permute(0,2,1),
+                                                size=pred_ko_rad21_64bp.shape[0],
+                                                mode='linear', align_corners=True).squeeze().permute(1,0).cpu().numpy()
+            enformer_df_window = pd.DataFrame({
+                'chrom': args.chrom,
+                'start': abs_starts.astype(int),
+                'end': abs_ends.astype(int),
+                'Enformer_CTCF': enformer_64bp_pred[:,0],
+                'Enformer_ATAC': enformer_64bp_pred[:,1],
+                'Enformer_RAD21': enformer_64bp_pred[:,2],
+                'Enformer_H3K27ac': enformer_64bp_pred[:,3],
+                'Enformer_H3K4me3': enformer_64bp_pred[:,4],
+                'Enformer_H3K9me3': enformer_64bp_pred[:,5],
+                'Enformer_H3K36me3': enformer_64bp_pred[:,6],
+                'Enformer_H3K27me3': enformer_64bp_pred[:,7],
+            })
+            enformer_preds_dfs.append(enformer_df_window)
             
             output_ko = model(inputs_ko)
             pred_hic_ko = output_ko['hic'].squeeze().cpu().numpy()
@@ -965,26 +968,26 @@ def main():
         print(final_ctcf_ko_df)
         write_bigwig(final_ctcf_ko_df, args.chrom, bw_ctcf_ko_path, chrom_len, 'CTCF_KO')
         print(f"CTCF KO bigwig saved to {bw_ctcf_ko_path}")
-    if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
-        full_enformer_df = pd.concat(enformer_preds_dfs, ignore_index=True)
-        final_enformer_df = full_enformer_df.groupby(['chrom', 'start', 'end']).mean().reset_index()
-        bw_enformer_ctcf_path = args.out_file.replace('.tsv', '_Enformer_ctcf.bw')
-        bw_enformer_atac_path = args.out_file.replace('.tsv', '_Enformer_atac.bw')
-        bw_enformer_rad21_path = args.out_file.replace('.tsv', '_Enformer_rad21.bw')
-        bw_enformer_h3k27ac_path = args.out_file.replace('.tsv', '_Enformer_h3k27ac.bw')
-        bw_enformer_h3k4me3_path = args.out_file.replace('.tsv', '_Enformer_h3k4me3.bw')
-        bw_enformer_h3k9me3_path = args.out_file.replace('.tsv', '_Enformer_h3k9me3.bw')
-        bw_enformer_h3k36me3_path = args.out_file.replace('.tsv', '_Enformer_h3k36me3.bw')
-        bw_enformer_h3k27me3_path = args.out_file.replace('.tsv', '_Enformer_h3k27me3.bw')
-        write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_CTCF']], args.chrom, bw_enformer_ctcf_path, chrom_len, 'Enformer_CTCF')
-        write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_ATAC']], args.chrom, bw_enformer_atac_path, chrom_len, 'Enformer_ATAC')
-        write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_RAD21']], args.chrom, bw_enformer_rad21_path, chrom_len, 'Enformer_RAD21')
-        write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K27ac']], args.chrom, bw_enformer_h3k27ac_path, chrom_len, 'Enformer_H3K27ac')
-        write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K4me3']], args.chrom, bw_enformer_h3k4me3_path, chrom_len, 'Enformer_H3K4me3')
-        write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K9me3']], args.chrom, bw_enformer_h3k9me3_path, chrom_len, 'Enformer_H3K9me3')
-        write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K36me3']], args.chrom, bw_enformer_h3k36me3_path, chrom_len, 'Enformer_H3K36me3')
-        write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K27me3']], args.chrom, bw_enformer_h3k27me3_path, chrom_len, 'Enformer_H3K27me3') 
-        print(f"Enformer predicted CTCF and ATAC bigwigs saved to {bw_enformer_ctcf_path} and {bw_enformer_atac_path}")
+        
+    full_enformer_df = pd.concat(enformer_preds_dfs, ignore_index=True)
+    final_enformer_df = full_enformer_df.groupby(['chrom', 'start', 'end']).mean().reset_index()
+    bw_enformer_ctcf_path = args.out_file.replace('.tsv', '_Enformer_ctcf.bw')
+    bw_enformer_atac_path = args.out_file.replace('.tsv', '_Enformer_atac.bw')
+    bw_enformer_rad21_path = args.out_file.replace('.tsv', '_Enformer_rad21.bw')
+    bw_enformer_h3k27ac_path = args.out_file.replace('.tsv', '_Enformer_h3k27ac.bw')
+    bw_enformer_h3k4me3_path = args.out_file.replace('.tsv', '_Enformer_h3k4me3.bw')
+    bw_enformer_h3k9me3_path = args.out_file.replace('.tsv', '_Enformer_h3k9me3.bw')
+    bw_enformer_h3k36me3_path = args.out_file.replace('.tsv', '_Enformer_h3k36me3.bw')
+    bw_enformer_h3k27me3_path = args.out_file.replace('.tsv', '_Enformer_h3k27me3.bw')
+    write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_CTCF']], args.chrom, bw_enformer_ctcf_path, chrom_len, 'Enformer_CTCF')
+    write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_ATAC']], args.chrom, bw_enformer_atac_path, chrom_len, 'Enformer_ATAC')
+    write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_RAD21']], args.chrom, bw_enformer_rad21_path, chrom_len, 'Enformer_RAD21')
+    write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K27ac']], args.chrom, bw_enformer_h3k27ac_path, chrom_len, 'Enformer_H3K27ac')
+    write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K4me3']], args.chrom, bw_enformer_h3k4me3_path, chrom_len, 'Enformer_H3K4me3')
+    write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K9me3']], args.chrom, bw_enformer_h3k9me3_path, chrom_len, 'Enformer_H3K9me3')
+    write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K36me3']], args.chrom, bw_enformer_h3k36me3_path, chrom_len, 'Enformer_H3K36me3')
+    write_bigwig(final_enformer_df[['chrom', 'start', 'end', 'Enformer_H3K27me3']], args.chrom, bw_enformer_h3k27me3_path, chrom_len, 'Enformer_H3K27me3') 
+    print(f"Enformer predicted CTCF and ATAC bigwigs saved to {bw_enformer_ctcf_path} and {bw_enformer_atac_path}")
     
     # Get actual chrom length for header from bigwig (already fetched) or max coordinate
     # Re-using chrom_len calculated earlier from CTCF input
