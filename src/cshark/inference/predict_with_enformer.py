@@ -726,19 +726,6 @@ def main():
     model.eval()
     model.to(device)
 
-    # save the final model (without inner_model) as a standalone checkpoint for usage with our original scripts
-    checkpoint = torch.load(args.model_path, map_location='cpu')
-    model_weights = checkpoint['state_dict']
-    for key in list(model_weights):
-        if 'input_pred' in key:
-            # remove from state dict
-            model_weights.pop(key)
-    # Save standalone model checkpoint
-    standalone_ckpt_path = args.model_path.replace('.ckpt', '_standalone.ckpt')
-    checkpoint['state_dict'] = model_weights
-    torch.save(checkpoint, standalone_ckpt_path)
-    print(f"Standalone model checkpoint saved to {standalone_ckpt_path}")
-
     # Get chromosome length from CTCF bigwig
     bw = pyBigWig.open(args.ctcf)
     chrom_len = bw.chroms(args.chrom)
