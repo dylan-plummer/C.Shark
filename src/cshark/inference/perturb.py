@@ -315,8 +315,6 @@ def main():
                                                   other_feat_names=input_track_names[2:])
             pred_before = pred_before_output['hic']
             pred_before_1d = pred_before_output['1d']
-            left_del_pad = None 
-            right_del_pad = None
            
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                 start, window, seq_region, ctcf_region, 
@@ -656,6 +654,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 channel_offset += 1
             if 'atac' in input_track_names:
                 channel_offset += 1
+            left_del_pad = None 
+            right_del_pad = None
             if knockout_mode == 'del' or knockout_mode == 'deletion' or knockout_mode == 'delete':
                 left_pad_bp = deletion_width // 2
                 right_pad_bp = deletion_width - left_pad_bp
@@ -1214,10 +1214,10 @@ def deletion_with_padding(chr_name, start, deletion_start, deletion_width, seq_r
                 seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = seq_region[deletion_start - start:deletion_start - start + deletion_width, :][idxs, :]
             elif knockout_mode == 'random':
                 # Generate random one-hot sequence
-                rand_bases = np.random.choice(4, size=(seq_region.shape[0], deletion_width))
-                rand_seq = np.zeros((seq_region.shape[0], deletion_width, 5), dtype=np.float32)
+                rand_bases = np.random.choice(4, size=(deletion_width,))  # 0, 1, 2, 3 for A, C, G, T
+                rand_seq = np.zeros((deletion_width, 5), dtype=np.float32)
                 for i in range(4):
-                    rand_seq[:, :, i] = (rand_bases == i).astype(np.float32)
+                    rand_seq[:, i] = (rand_bases == i).astype(np.float32)
                 # if within range, apply
                 if deletion_start - start >= 0 and deletion_start - start + deletion_width <= seq_region.shape[0]:
                     seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = rand_seq
