@@ -1,10 +1,7 @@
 import os
-# use CPU
-# os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import argparse
 import numpy as np
 import pandas as pd
-from requests import get
 import torch
 import torch.nn.functional as F
 import lightning as pl
@@ -23,7 +20,6 @@ from cshark.inference.utils.model_utils import get_all_track_names
 from cshark.inference.utils.inference_utils import write_tmp_cooler, knockout_peaks, get_axis_range_from_bigwig
 
 from enformer_pytorch import from_pretrained
-from enformer_pytorch.modeling_enformer import poisson_loss
 
 font_size = 15
 plot_width = 17
@@ -32,6 +28,23 @@ track_height_1d = 1.5
 ENFORMER_CONTEXT_LENGTH = 196_608
 ENFORMER_TARGET_LEN = 896 * 128  # 114,688 bp
 ENFORMER_TRIM = (ENFORMER_CONTEXT_LENGTH - ENFORMER_TARGET_LEN) // 2  # 40,960 bp to skip on left/right
+track_colors = {
+    'ctcf': 'red',
+    'atac': 'blue',
+    'rad21': 'green',
+    'h3k27ac': 'orange',
+    'h3k4me3': 'purple',
+    'h3k9me3': 'pink',
+    'h3k36me3': 'brown',
+    'h3k27me3': 'gray'
+}
+
+def _fix_ini_whitespace(path):
+    """Strip leading whitespace from each line in an .ini file (pyGenomeTracks requires no indentation)."""
+    with open(path) as f:
+        lines = f.readlines()
+    with open(path, 'w') as f:
+        f.writelines(line.lstrip() for line in lines)
 
 
 def write_full_cooler(pred_pixels, chr_name, start, res=8192, window=2097152, out_file='tmp/tmp.cool'):
@@ -1075,19 +1088,19 @@ def main():
         colors = ['red', 'purple', 'brown', 'pink', 'cyan', 'magenta', 'lime']
         ctcf_vmax = get_axis_range_from_bigwig(args.ctcf, args.chrom, locus_start)
         rad21_vmax = get_axis_range_from_bigwig(args.ctcf.replace('ctcf.bw', 'rad21.bw'), args.chrom, locus_start)
+
         
         with open(tracks_wt_ini, 'w') as f:
             f.write(f"""[spacer]
-                        height = 0.1
-                        color = white
-                        [ctcf]
-                        file = {args.ctcf}
-                        title = CTCF
-                        height = {track_height_1d}
-                        color = royalblue
-                        min_value = 0
-                        max_value = {ctcf_vmax if args.locus else 'auto'}
-                        """
+                    height = 0.1
+                    color = white
+                    [ctcf]
+                    file = {args.ctcf}
+                    title = CTCF
+                    height = {track_height_1d}
+                    color = {track_colors['ctcf']}
+                    min_value = 0
+                    max_value = {ctcf_vmax if args.locus else 'auto'}"""
             )
             if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
                 # write ko locations as bed file
@@ -1098,50 +1111,52 @@ def main():
                         if ko_end - ko_start < 10000:
                             pad = (10000 - (ko_end - ko_start)) // 2
                         bed_file.write(f"{args.chrom}\t{ko_start - pad}\t{ko_end + pad}\t{ko_type}\n")
-            f.write(f"""[enformer_ctcf]
+            f.write(f"""
+                    [enformer_ctcf]
                     file = {bw_enformer_ctcf_path}
                     title = Enformer CTCF
                     height = {track_height_1d}
-                    color = teal
+                    color = {track_colors['ctcf']}
                     min_value = 0
-                    max_value = {ctcf_vmax if args.locus else 'auto'}
-                    """)
+                    max_value = {ctcf_vmax if args.locus else 'auto'}""")
             if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
                 f.write(f"""
                     [ko highlight]
                     file = {args.out_file.replace('.tsv', '') + f'_ko_regions.bed'}
-                    type = vhighlight
-                    """)
-            f.write(f"""[atac]
-                        file = {args.atac}
-                        title = ATAC
-                        height = {track_height_1d}
-                        color = green   
-                        """
+                    type = vhighlight""")
+            f.write(f"""
+                    [atac]
+                    file = {args.atac}
+                    title = ATAC
+                    height = {track_height_1d}
+                    color = {track_colors['atac']}"""
             )
-            f.write(f"""[enformer_atac]
+            f.write(f"""
+                    [enformer_atac]
                     file = {bw_enformer_atac_path}
                     title = Enformer ATAC
                     height = {track_height_1d}
-                    color = darkgreen
-                    """)
-            f.write(f"""[rad21]
-                        file = {args.ctcf.replace('ctcf.bw', 'rad21.bw')}
-                        title = RAD21
-                        height = {track_height_1d}
-                        color = blue
-                        min_value = 0
-                        max_value = {rad21_vmax if args.locus else 'auto'}
-                        """
+                    color = {track_colors['atac']}"""
             )
-            f.write(f"""[enformer_rad21]
+            f.write(f"""
+                    [rad21]
+                    file = {args.ctcf.replace('ctcf.bw', 'rad21.bw')}
+                    title = RAD21
+                    height = {track_height_1d}
+                    color = {track_colors['rad21']}
+                    min_value = 0
+                    max_value = {rad21_vmax if args.locus else 'auto'}"""
+            )
+            f.write(f"""
+                    [enformer_rad21]
                     file = {bw_enformer_rad21_path}
                     title = Enformer RAD21
                     height = {track_height_1d}
-                    color = darkblue
+                    color = {track_colors['rad21']}
                     min_value = 0
-                    max_value = {rad21_vmax if args.locus else 'auto'}
-                    """)
+                    max_value = {rad21_vmax if args.locus else 'auto'}"""
+            )
+            
             for track_path in other_paths:
                 track_name = os.path.basename(track_path).replace('.bw', '')
                 # check if it exists
@@ -1149,57 +1164,58 @@ def main():
                     continue
                 if track_name == 'rad21':
                     continue  # already added
-                f.write(f"""[{track_name}]
+                f.write(f"""
+                        [{track_name}]
                         file = {track_path}
                         title = {track_name} 
                         height = {track_height_1d}
-                        color = {colors[other_paths.index(track_path) % len(colors)]}
-                        """
+                        color = {track_colors.get(track_name, colors[other_paths.index(track_path) % len(colors)])}"""
                 )
 
                 enformer_track_path = args.out_file.replace('.tsv', f'_Enformer_{track_name}.bw')
                 if os.path.exists(enformer_track_path):
-                    f.write(f"""[enformer_{track_name}]
+                    f.write(f"""
+                            [enformer_{track_name}]
                             file = {enformer_track_path}
                             title = Enformer {track_name}
                             height = {track_height_1d}
-                            color = {colors[(other_paths.index(track_path)) % len(colors)]}
-                            """
+                            color = {track_colors.get(track_name, colors[other_paths.index(track_path) % len(colors)])}"""
                     )
                 else:
                     print(f"Enformer predicted track for {track_name} not found at {enformer_track_path}, skipping.")
-            f.write(f"""[pred_hic]
-                        file = {args.out_file.replace('.tsv', '') + '_wt.cool'}
-                        title = Predicted Hi-C
-                        file_type = hic_matrix_square
-                        min_value = {args.vmin}
-                        max_value = {args.vmax if args.vmax is not None else np.percentile(pred_wt_matrix, 99)}
-                        colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]
-                        """)
+            f.write(f"""
+                    [pred_hic]
+                    file = {args.out_file.replace('.tsv', '') + '_wt.cool'}
+                    title = Predicted Hi-C
+                    file_type = hic_matrix_square
+                    min_value = {args.vmin}
+                    max_value = {args.vmax if args.vmax is not None else np.percentile(pred_wt_matrix, 99)}
+                    colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]""")
+        _fix_ini_whitespace(tracks_wt_ini)
         with open(tracks_ko_ini, 'w') as f:
-            f.write(f"""[spacer]
-                        height = 0.1
-                        color = white
-                        [ctcf]
-                        file = {bw_ctcf_ko_path}
-                        title = CTCF
-                        height = {track_height_1d}
-                        color = royalblue
-                        min_value = 0
-                        max_value = {ctcf_vmax if args.locus else 'auto'}
-                        [atac]
-                        file = {args.atac}
-                        title = ATAC
-                        height = {track_height_1d}
-                        color = green   
-                        [pred_rad21]
-                        file = {bw_ko_path}
-                        title = Predicted RAD21
-                        height = {track_height_1d}
-                        color = orange
-                        min_value = 0
-                        max_value = {rad21_vmax if args.locus else 'auto'}
-                        """
+            f.write(f"""
+                    [spacer]
+                    height = 0.1
+                    color = white
+                    [ctcf]
+                    file = {bw_ctcf_ko_path}
+                    title = CTCF
+                    height = {track_height_1d}
+                    color = red
+                    min_value = 0
+                    max_value = {ctcf_vmax if args.locus else 'auto'}
+                    [atac]
+                    file = {args.atac}
+                    title = ATAC
+                    height = {track_height_1d}
+                    color = darkblue   
+                    [pred_rad21]
+                    file = {bw_ko_path}
+                    title = Predicted RAD21
+                    height = {track_height_1d}
+                    color = darkgreen
+                    min_value = 0
+                    max_value = {rad21_vmax if args.locus else 'auto'}"""
             )
             for track_path in other_paths:
                 track_name = os.path.basename(track_path).replace('.bw', '')
@@ -1212,7 +1228,7 @@ def main():
                         file = {track_path}
                         title = {track_name}
                         height = {track_height_1d}
-                        color = {colors[other_paths.index(track_path) % len(colors)]}"""
+                        color = {track_colors.get(track_name, colors[other_paths.index(track_path) % len(colors)])}"""
                 )
             f.write(f"""
                         [pred_hic]
@@ -1223,6 +1239,7 @@ def main():
                         max_value = {args.vmax if args.vmax is not None else np.percentile(pred_ko_matrix, 99)}
                         colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]
                         """)
+        _fix_ini_whitespace(tracks_ko_ini)
         print(f"Tracks INI files for pyGenomeTracks saved to {tracks_wt_ini} and {tracks_ko_ini}")
         pygenome_tracks_cmd_wt = f"pyGenomeTracks --tracks {tracks_wt_ini} --region {args.chrom}:{locus_start}-{locus_end} --outFileName {args.out_file.replace('.tsv', '') + f'_WT_rad21_tracks_{args.chrom}_{locus_start}_{locus_end}.png'} --dpi 300 --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
         pygenome_tracks_cmd_ko = f"pyGenomeTracks --tracks {tracks_ko_ini} --region {args.chrom}:{locus_start}-{locus_end} --outFileName {args.out_file.replace('.tsv', '') + f'_KO_rad21_tracks_{args.chrom}_{locus_start}_{locus_end}.png'} --dpi 300 --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
