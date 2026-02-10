@@ -1207,12 +1207,20 @@ def deletion_with_padding(chr_name, start, deletion_start, deletion_width, seq_r
                     for i in range(len(other_regions)):
                         other_regions[i] = np.concatenate((left_other_pads[i], other_regions[i][:deletion_start - start], 
                                                     other_regions[i][deletion_start - start + deletion_width:], right_other_pads[i]), axis=0)
-                
             elif knockout_mode == 'shuffle':
                 # shuffle seq_region
                 idxs = np.arange(seq_region[deletion_start - start:deletion_start - start + deletion_width, :].shape[0])
                 np.random.shuffle(idxs)
                 seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = seq_region[deletion_start - start:deletion_start - start + deletion_width, :][idxs, :]
+            elif knockout_mode == 'random':
+                # Generate random one-hot sequence
+                rand_bases = np.random.choice(4, size=(seq_region.shape[0], deletion_width))
+                rand_seq = np.zeros((seq_region.shape[0], deletion_width, 5), dtype=np.float32)
+                for i in range(4):
+                    rand_seq[:, :, i] = (rand_bases == i).astype(np.float32)
+                # if within range, apply
+                if deletion_start - start >= 0 and deletion_start - start + deletion_width <= seq_region.shape[0]:
+                    seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = rand_seq
             elif knockout_mode == 'reverse':
                 seq_region[deletion_start - start:deletion_start - start + deletion_width, :] = reverse_complement(seq_region[deletion_start - start:deletion_start - start + deletion_width, :])
             elif knockout_mode == 'reverse_motif':
