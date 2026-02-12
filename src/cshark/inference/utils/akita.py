@@ -87,7 +87,7 @@ def akita_pred(seq, model=seqnn_model, akita_res=2048, target_res=4096, akita_id
     # Average overlapping predictions
     count_mat[count_mat == 0] = 1  # Prevent division by zero
     hic_pred = mat / count_mat
-    mat = mat[:final_output_size, :final_output_size]
+    mat = hic_pred[:final_output_size, :final_output_size]
     # resize to target output size
     mat = resize(mat, (target_output_size, target_output_size), order=1, mode='reflect', anti_aliasing=True)
     # undo log transform
