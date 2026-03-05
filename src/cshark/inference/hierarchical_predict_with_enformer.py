@@ -20,7 +20,7 @@ from skimage.transform import resize
 import cshark.model.corigami_models as corigami_models
 import cshark.inference.utils.inference_utils as infer
 from cshark.inference.utils.model_utils import get_all_track_names
-from cshark.inference.utils.inference_utils import write_tmp_cooler, knockout_peaks, get_axis_range_from_bigwig
+from cshark.inference.utils.inference_utils import write_tmp_cooler, knockout_peaks, get_axis_range_from_bigwig, chunk_shuffle
 
 from enformer_pytorch import from_pretrained
 from enformer_pytorch.modeling_enformer import poisson_loss
@@ -199,7 +199,7 @@ def visualize_force_directed_structure(wt_matrix, ko_matrix, title_suffix, out_p
         return sc
 
     sc1 = draw_chromatin(G_wt, pos_wt, axs[0], "WT Predicted Structure")
-    sc2 = draw_chromatin(G_ko, pos_ko, axs[1], "CTCF KO Predicted Structure")
+    sc2 = draw_chromatin(G_ko, pos_ko, axs[1], "KO Predicted Structure")
     
     cbar = plt.colorbar(sc1, ax=axs.ravel().tolist(), shrink=0.6, orientation='horizontal', pad=0.05)
     cbar.set_label(f'Genomic Position (Bins) - {title_suffix}')
@@ -702,6 +702,105 @@ def apply_sequence_ko(inputs, seq_ko_starts, seq_ko_ends, seq_ko_types):
             raise ValueError(f"Unknown seq_ko_type: {ko_type}")
     return inputs
 
+def track_ko(start, end, track, window=2097152, ko_mode='knockout', peak_height=2.0):
+    """
+    Perform knockout on a 1D signal track within the given [start, end) region.
+    
+    Supported ko_mode values:
+        - 'zero': Set the region to 0.
+        - 'mean': Replace region with mean of flanking signal.
+        - 'knockout': Replace detected peaks with local background (default).
+        - 'increase_<factor>': Multiply peak values by <factor> (default 2.0).
+        - 'cluster_<ratio>': Add random peaks at <ratio> fraction of positions.
+        - 'shuffle': Chunk-shuffle the region.
+        - 'knockout_shuffle': Knockout peaks then shuffle.
+        - 'reverse' / 'reverse_motif': Reverse the signal in the region.
+    """
+    if ko_mode == 'zero':
+        track[start:end] = 0
+    elif ko_mode == 'mean':
+        flanking = np.concatenate([track[:start], track[end:]])
+        mean_val = np.mean(flanking) if len(flanking) > 0 else 0.0
+        track[start:end] = mean_val
+    elif ko_mode == 'knockout':
+        track[start:end] = knockout_peaks(track[start:end], threshold=peak_height)
+    elif 'increase' in ko_mode:
+        increase_factor = 2.0
+        if '_' in ko_mode:
+            increase_factor = float(ko_mode.split('_')[1])
+        track[start:end] = knockout_peaks(track[start:end], threshold=peak_height, increase_factor=increase_factor)
+    elif 'cluster' in ko_mode:
+        cluster_ratio = 0.05
+        if '_' in ko_mode:
+            cluster_ratio = float(ko_mode.split('_')[1])
+        cluster_indices = np.random.choice(np.arange(start, end), size=int((end - start) * cluster_ratio), replace=False)
+        for idx in cluster_indices:
+            track[idx] = np.random.uniform(1, 5)
+    elif ko_mode == 'shuffle':
+        track[start:end] = chunk_shuffle(track[start:end])
+    elif ko_mode == 'knockout_shuffle':
+        track[start:end] = knockout_peaks(track[start:end], threshold=peak_height)
+        track[start:end] = chunk_shuffle(track[start:end])
+    elif ko_mode == 'reverse' or ko_mode == 'reverse_motif':
+        track[start:end] = track[start:end][::-1]
+    else:
+        raise ValueError(f"Unknown ko_mode: '{ko_mode}'. Supported: zero, mean, knockout, increase_<f>, cluster_<r>, shuffle, knockout_shuffle, reverse, reverse_motif")
+    return track[:window]
+
+
+def apply_track_ko(seq_region, ctcf_region, atac_region, other_regions, other_track_names,
+                   ko_data, ko_mode, window=2097152, peak_height=0.5):
+    """
+    Apply knockout perturbations to the specified 1D input tracks across the full window.
+    
+    Args:
+        seq_region: Sequence array.
+        ctcf_region: CTCF signal array (or None).
+        atac_region: ATAC signal array (or None).
+        other_regions: List of other genomic feature arrays (or None).
+        other_track_names: List of names for tracks in other_regions.
+        ko_data: List of track names to knockout (e.g. ['ctcf', 'rad21']).
+        ko_mode: List of KO modes, one per ko_data entry (e.g. ['knockout', 'zero']).
+        window: Window size in bp.
+        peak_height: Peak height threshold for 'knockout' mode.
+    
+    Returns:
+        Tuple of (seq_region, ctcf_region, atac_region, other_regions) with KO applied.
+    """
+    if len(ko_mode) == 1 and len(ko_data) > 1:
+        ko_mode = ko_mode * len(ko_data)  # broadcast single mode to all tracks
+    
+    for track_name, mode in zip(ko_data, ko_mode):
+        region_len = len(ctcf_region) if ctcf_region is not None else (
+            len(atac_region) if atac_region is not None else window)
+        if track_name == 'ctcf' and ctcf_region is not None:
+            ctcf_region = track_ko(0, region_len, ctcf_region.copy(), window=window,
+                                   ko_mode=mode, peak_height=peak_height)
+        elif track_name == 'atac' and atac_region is not None:
+            atac_region = track_ko(0, region_len, atac_region.copy(), window=window,
+                                   ko_mode=mode, peak_height=peak_height)
+        elif track_name == 'seq':
+            if mode == 'knockout' or mode == 'zero':
+                seq_region[:, :4] = 0
+                if seq_region.shape[1] > 4:
+                    seq_region[:, 4] = 1  # set to N
+            elif mode == 'shuffle':
+                idxs = np.arange(seq_region.shape[0])
+                np.random.shuffle(idxs)
+                seq_region = seq_region[idxs, :]
+            elif mode == 'reverse':
+                seq_region = seq_region[::-1].copy()
+                seq_region = seq_region[:, [1, 0, 3, 2] + list(range(4, seq_region.shape[1]))]
+        elif other_regions is not None and track_name in other_track_names:
+            idx = other_track_names.index(track_name)
+            other_regions[idx] = track_ko(0, len(other_regions[idx]), other_regions[idx].copy(),
+                                          window=window, ko_mode=mode, peak_height=peak_height)
+        else:
+            print(f"Warning: KO track '{track_name}' not found in input tracks. Skipping.")
+    
+    return seq_region, ctcf_region, atac_region, other_regions
+
+
 def main():
     parser = argparse.ArgumentParser(description='Hierarchical C.Origami Full Chromosome Prediction')
     
@@ -736,7 +835,30 @@ def main():
     parser.add_argument('--seq-ko-sizes', nargs='+', type=int, help='Sizes of sequence knockouts (bp)')
     parser.add_argument('--seq-ko-type', nargs='+', help='Type of sequence knockout (or alt seq) [reverse, zero, random, alt]')
 
+    # 1D track knockout params
+    parser.add_argument('--ko', dest='ko_data', type=str, nargs='+', default=['ctcf'],
+                        help='Name(s) of input track(s) to knockout (e.g. ctcf, rad21, atac, h3k27ac). Default: ctcf')
+    parser.add_argument('--ko-mode', dest='ko_mode', type=str, nargs='+', default=['knockout'],
+                        help='KO mode(s), one per --ko track. Options: zero, mean, knockout, shuffle, '
+                             'knockout_shuffle, reverse, reverse_motif, increase_<factor>, cluster_<ratio>. '
+                             'Default: knockout')
+
     args = parser.parse_args()
+
+    # Normalize KO arguments
+    if isinstance(args.ko_data, str):
+        args.ko_data = [args.ko_data]
+    if isinstance(args.ko_mode, str):
+        args.ko_mode = [args.ko_mode]
+    # Broadcast single mode to all KO tracks if needed
+    if len(args.ko_mode) == 1 and len(args.ko_data) > 1:
+        args.ko_mode = args.ko_mode * len(args.ko_data)
+    if len(args.ko_mode) != len(args.ko_data):
+        parser.error(f"--ko-mode must have 1 entry or the same number as --ko ({len(args.ko_data)}).")
+
+    ko_label = '+'.join(f'{t}({m})' for t, m in zip(args.ko_data, args.ko_mode))
+    print(f"Track KO configuration: {ko_label}")
+
     print(f"Loading model from {args.model_path}...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(args.model_path, map_location=device)
@@ -775,9 +897,11 @@ def main():
     all_tracks, _, input_tracks = get_all_track_names(args.model_path)
     rad21_idx = all_tracks.index('rad21')
     other_paths = []
+    other_track_names = []
     for track in all_tracks:
         if track not in ['ctcf', 'atac']:
             other_paths.append(args.ctcf.replace('ctcf.bw', f'{track}.bw'))  # Assuming similar naming
+            other_track_names.append(track)
     
     if args.locus:
         locus_parts = args.locus.split(':')
@@ -798,14 +922,14 @@ def main():
         ends = starts + args.window
     
     print(f"Predicting on {args.chrom} in {len(starts)} windows.")
-    print(f"Hierarchical Mode: Predicting WT, then simulating CTCF KO -> RAD21 Pred -> Hi-C Pred.")
+    print(f"Hierarchical Mode: Predicting WT, then simulating {ko_label} -> RAD21 Pred -> Hi-C Pred.")
 
     # Storage for results
     # We will accumulate dataframes of pixels
     pixel_dfs = []
     rad21_dfs = []
     enformer_preds_dfs = []
-    ctcf_ko_dfs = []
+    ko_track_dfs = {t: [] for t in args.ko_data if t != 'seq'}  # per-window KO'd signal for each track
     os.makedirs('tmp', exist_ok=True)
 
     with torch.no_grad():
@@ -852,10 +976,19 @@ def main():
             pred_hic_wt = (pred_hic_wt + pred_hic_wt.T) / 2.0  # Symmetrize
             pred_hic_wt = np.clip(pred_hic_wt, a_min=0, a_max=None)  # No negative counts
 
-            # Knockout CTCF in input
-            ctcf_ko_region = knockout_peaks(ctcf_region.copy(), threshold=args.peak_height)
-            # Feed to model (Model infers RAD21 from zeroed CTCF KO)
-            inputs_ko = infer.preprocess_default(seq_region, ctcf_ko_region, atac_region, other_feats).to(device)
+            # Apply 1D track knockout(s) using the user-specified tracks and modes
+            ko_seq, ko_ctcf, ko_atac, ko_other = apply_track_ko(
+                seq_region.copy(), 
+                ctcf_region.copy() if ctcf_region is not None else None,
+                atac_region.copy() if atac_region is not None else None,
+                [o.copy() for o in other_feats] if other_feats is not None else None,
+                other_track_names,
+                ko_data=args.ko_data,
+                ko_mode=args.ko_mode,
+                window=args.window,
+                peak_height=args.peak_height
+            )
+            inputs_ko = infer.preprocess_default(ko_seq, ko_ctcf, ko_atac, ko_other).to(device)
             inputs_ko_without_rad21 = torch.cat([
                 inputs_ko[:,:,:5 + rad21_idx],
                 inputs_ko[:,:,6 + rad21_idx:]
@@ -885,17 +1018,30 @@ def main():
             })
             rad21_dfs.append(rad21_df_window)
 
-            if args.locus is not None:  # only save CTCF KO track for locus mode
-                ctcf_ko_region_64bp = F.interpolate(torch.from_numpy(ctcf_ko_region).unsqueeze(0).unsqueeze(0),
-                                                   size=pred_ko_rad21_64bp.shape[0],
-                                                   mode='linear', align_corners=True).squeeze().numpy()
-                ctcf_ko_df_window = pd.DataFrame({
-                    'chrom': args.chrom,
-                    'start': abs_starts.astype(int),
-                    'end': abs_ends.astype(int),
-                    'CTCF_KO': ctcf_ko_region_64bp
-                })
-                ctcf_ko_dfs.append(ctcf_ko_df_window)
+            if args.locus is not None:  # save KO'd input tracks for locus mode
+                # Build a map of each KO'd track name -> its perturbed signal array
+                ko_signals = {}
+                for t in args.ko_data:
+                    if t == 'ctcf' and ko_ctcf is not None:
+                        ko_signals[t] = ko_ctcf
+                    elif t == 'atac' and ko_atac is not None:
+                        ko_signals[t] = ko_atac
+                    elif t in other_track_names and ko_other is not None:
+                        ko_signals[t] = ko_other[other_track_names.index(t)]
+                for t, signal in ko_signals.items():
+                    col_name = f'{t}_KO'
+                    ko_region_64bp = F.interpolate(
+                        torch.from_numpy(signal).unsqueeze(0).unsqueeze(0),
+                        size=pred_ko_rad21_64bp.shape[0],
+                        mode='linear', align_corners=True
+                    ).squeeze().numpy()
+                    ko_df_window = pd.DataFrame({
+                        'chrom': args.chrom,
+                        'start': abs_starts.astype(int),
+                        'end': abs_ends.astype(int),
+                        col_name: ko_region_64bp
+                    })
+                    ko_track_dfs[t].append(ko_df_window)
 
             # save enformer predictions if seq KO was applied
             if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
@@ -912,7 +1058,8 @@ def main():
                 enformer_preds_dfs.append(enformer_df_window)
             
             # Replace RAD21 channel (assumed to be after seq, ctcf, atac channels)
-            inputs_ko[:,:,5 + rad21_idx] = pred_ko_rad21
+            if 'rad21' not in args.ko_data:
+                inputs_ko[:,:,5 + rad21_idx] = pred_ko_rad21
             output_ko = model(inputs_ko)
             pred_hic_ko = output_ko['hic'].squeeze().cpu().numpy()
 
@@ -1008,14 +1155,19 @@ def main():
     final_rad21_df = full_rad21_df.groupby(['chrom', 'start', 'end']).mean().reset_index()
     bw_wt_path = args.out_file.replace('.tsv', '_WT_rad21.bw')
     bw_ko_path = args.out_file.replace('.tsv', '_KO_rad21.bw')
+    # Aggregate and save bigwigs for each KO'd input track
+    ko_bw_paths = {}  # track_name -> output bigwig path
     if args.locus:
-        # save CTCF KO bigwig for locus mode
-        full_ctcf_ko_df = pd.concat(ctcf_ko_dfs, ignore_index=True)
-        final_ctcf_ko_df = full_ctcf_ko_df.groupby(['chrom', 'start', 'end']).mean().reset_index()
-        bw_ctcf_ko_path = args.out_file.replace('.tsv', '_CTCF_KO.bw')
-        print(final_ctcf_ko_df)
-        write_bigwig(final_ctcf_ko_df, args.chrom, bw_ctcf_ko_path, chrom_len, 'CTCF_KO')
-        print(f"CTCF KO bigwig saved to {bw_ctcf_ko_path}")
+        for t in args.ko_data:
+            if t == 'seq' or t not in ko_track_dfs or len(ko_track_dfs[t]) == 0:
+                continue
+            col_name = f'{t}_KO'
+            full_ko_df = pd.concat(ko_track_dfs[t], ignore_index=True)
+            final_ko_df = full_ko_df.groupby(['chrom', 'start', 'end']).mean().reset_index()
+            bw_path = args.out_file.replace('.tsv', f'_{t.upper()}_KO.bw')
+            write_bigwig(final_ko_df, args.chrom, bw_path, chrom_len, col_name)
+            ko_bw_paths[t] = bw_path
+            print(f"{t.upper()} KO bigwig saved to {bw_path}")
     if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
         full_enformer_df = pd.concat(enformer_preds_dfs, ignore_index=True)
         final_enformer_df = full_enformer_df.groupby(['chrom', 'start', 'end']).mean().reset_index()
@@ -1028,8 +1180,12 @@ def main():
     # Get actual chrom length for header from bigwig (already fetched) or max coordinate
     # Re-using chrom_len calculated earlier from CTCF input
     
+    skip_pred_rad21 = 'rad21' in args.ko_data
     write_bigwig(final_rad21_df, args.chrom, bw_wt_path, chrom_len, 'WT_rad21')
-    write_bigwig(final_rad21_df, args.chrom, bw_ko_path, chrom_len, 'KO_rad21')
+    if not skip_pred_rad21:
+        write_bigwig(final_rad21_df, args.chrom, bw_ko_path, chrom_len, 'KO_rad21')
+    else:
+        print("Skipping KO predicted RAD21 bigwig (RAD21 is directly KO'd).")
 
     print("Aggregating Hi-C results...")
     full_df = pd.concat(pixel_dfs, ignore_index=True)
@@ -1074,7 +1230,7 @@ def main():
         im = axs[1].imshow(pred_ko_matrix, cmap='Reds',
                         vmin=0, vmax=np.percentile(pred_ko_matrix, 99.8))
         plt.colorbar(im, ax=axs[1])
-        axs[1].set_title('Predicted CTCF KO Hi-C')
+        axs[1].set_title(f'Predicted {ko_label} Hi-C')
         axs[1].set_xticks([])
         axs[1].set_yticks([])
 
@@ -1104,29 +1260,66 @@ def main():
         #     threshold_percentile=args.viz_threshold
         # )
 
-        # generate two tracks.ini files to visualize with pyGenomeTracks
-        # show CTCF, ATAC, RAD21, RAD21 prediction, all other tracks, and predicted Hi-C
-        tracks_wt_ini = args.out_file.replace('.tsv', '') + f'_WT_rad21_tracks.ini'
-        tracks_ko_ini = args.out_file.replace('.tsv', '') + f'_KO_rad21_tracks.ini'
-        colors = ['red', 'purple', 'brown', 'pink', 'cyan', 'magenta', 'lime']
-        ctcf_vmax = get_axis_range_from_bigwig(args.ctcf, args.chrom, locus_start)
-        rad21_vmax = get_axis_range_from_bigwig(args.ctcf.replace('ctcf.bw', 'rad21.bw'), args.chrom, locus_start)
-        
+        # --- Generate pyGenomeTracks .ini files ---
+        # Build metadata for all input tracks: (name, original_path, color)
+        track_display_names = {
+            'ctcf': 'CTCF', 'atac': 'ATAC', 'rad21': 'RAD21',
+            'h3k27ac': 'H3K27ac', 'h3k4me3': 'H3K4me3', 'h3k9me3': 'H3K9me3',
+            'h3k36me3': 'H3K36me3', 'h3k27me3': 'H3K27me3'
+        }
+        track_color_map = {
+            'ctcf': 'royalblue', 'atac': 'green', 'rad21': 'blue',
+            'h3k27ac': 'red', 'h3k4me3': 'purple', 'h3k9me3': 'brown',
+            'h3k36me3': 'pink', 'h3k27me3': 'cyan'
+        }
+        fallback_colors = ['red', 'purple', 'brown', 'pink', 'cyan', 'magenta', 'lime']
+        all_input_tracks = []  # (name, path, color)
+        all_input_tracks.append(('ctcf', args.ctcf, track_color_map.get('ctcf', 'royalblue')))
+        all_input_tracks.append(('atac', args.atac, track_color_map.get('atac', 'green')))
+        for i, (t_name, t_path) in enumerate(zip(other_track_names, other_paths)):
+            if os.path.exists(t_path):
+                all_input_tracks.append((t_name, t_path, track_color_map.get(t_name, fallback_colors[i % len(fallback_colors)])))
+
+        # Compute vmax for each track from the real bigwig signal
+        track_vmax = {}
+        for t_name, t_path, _ in all_input_tracks:
+            try:
+                track_vmax[t_name] = get_axis_range_from_bigwig(t_path, args.chrom, locus_start)
+            except Exception:
+                track_vmax[t_name] = 'auto'
+
+        ko_short_label = '+'.join(args.ko_data)
+        tracks_wt_ini = args.out_file.replace('.tsv', '') + f'_WT_tracks.ini'
+        tracks_ko_ini = args.out_file.replace('.tsv', '') + f'_KO_{ko_short_label}_tracks.ini'
+
+        # Helper to write a single bigwig track entry
+        def _write_track_entry(fh, section_name, file_path, title, color, vmax_val):
+            fh.write(f"[{section_name}]\n")
+            fh.write(f"file = {file_path}\n")
+            fh.write(f"title = {title}\n")
+            fh.write(f"height = {track_height_1d}\n")
+            fh.write(f"color = {color}\n")
+            fh.write(f"min_value = 0\n")
+            fh.write(f"max_value = {vmax_val}\n\n")
+
+        def _write_hic_entry(fh, file_path, title, vmin_val, vmax_val):
+            fh.write(f"[pred_hic]\n")
+            fh.write(f"file = {file_path}\n")
+            fh.write(f"title = {title}\n")
+            fh.write(f"file_type = hic_matrix_square\n")
+            fh.write(f"min_value = {vmin_val}\n")
+            fh.write(f"max_value = {vmax_val}\n")
+            fh.write("colormap = [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]\n\n")
+
+        # --- WT tracks.ini ---
         with open(tracks_wt_ini, 'w') as f:
-            f.write(f"""[spacer]
-                        height = 0.1
-                        color = white
-                        [ctcf]
-                        file = {args.ctcf}
-                        title = CTCF
-                        height = {track_height_1d}
-                        color = royalblue
-                        min_value = 0
-                        max_value = {ctcf_vmax if args.locus else 'auto'}
-                        """
-            )
+            f.write("[spacer]\nheight = 0.1\ncolor = white\n\n")
+            # Write all real input tracks
+            for t_name, t_path, t_color in all_input_tracks:
+                display = track_display_names.get(t_name, t_name)
+                _write_track_entry(f, t_name, t_path, display, t_color, track_vmax.get(t_name, 'auto'))
+            # Enformer predictions if seq KO was done
             if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
-                # write ko locations as bed file
                 with open(args.out_file.replace('.tsv', '') + f'_ko_regions.bed', 'w') as bed_file:
                     for ko_start, ko_size, ko_type in zip(args.seq_ko_starts, args.seq_ko_sizes, args.seq_ko_type):
                         ko_end = ko_start + ko_size
@@ -1134,124 +1327,37 @@ def main():
                         if ko_end - ko_start < 10000:
                             pad = (10000 - (ko_end - ko_start)) // 2
                         bed_file.write(f"{args.chrom}\t{ko_start - pad}\t{ko_end + pad}\t{ko_type}\n")
-                f.write(f"""
-                        [enformer_ctcf]
-                        file = {bw_enformer_ctcf_path}
-                        title = Enformer CTCF
-                        height = {track_height_1d}
-                        color = teal
-                        min_value = 0
-                        max_value = {ctcf_vmax if args.locus else 'auto'}
-                        [ko highlight]
-                        file = {args.out_file.replace('.tsv', '') + f'_ko_regions.bed'}
-                        type = vhighlight
-                        """)
-            f.write(f"""
-                        [atac]
-                        file = {args.atac}
-                        title = ATAC
-                        height = {track_height_1d}
-                        color = green   
-                        """
-            )
-            if args.seq_ko_starts and args.seq_ko_sizes and args.seq_ko_type:
-                f.write(f"""
-                        [enformer_atac]
-                        file = {bw_enformer_atac_path}
-                        title = Enformer ATAC
-                        height = {track_height_1d}
-                        color = darkgreen
-                        """)
-            f.write(f"""
-                        [rad21]
-                        file = {args.ctcf.replace('ctcf.bw', 'rad21.bw')}
-                        title = Real RAD21
-                        height = {track_height_1d}
-                        color = blue
-                        min_value = 0
-                        max_value = {rad21_vmax if args.locus else 'auto'}
-                        [pred_rad21]
-                        file = {bw_wt_path}
-                        title = Predicted RAD21
-                        height = {track_height_1d}
-                        color = orange
-                        min_value = 0
-                        max_value = {rad21_vmax if args.locus else 'auto'}
-                    """
-            )
-            for track_path in other_paths:
-                track_name = os.path.basename(track_path).replace('.bw', '')
-                # check if it exists
-                if not os.path.exists(track_path):
-                    continue
-                if track_name == 'rad21':
-                    continue  # already added
-                f.write(f"""
-                        [{track_name}]
-                        file = {track_path}
-                        title = {track_name} 
-                        height = {track_height_1d}
-                        color = {colors[other_paths.index(track_path) % len(colors)]}"""
-                )
-            f.write(f"""
-                        [pred_hic]
-                        file = {args.out_file.replace('.tsv', '') + '_wt.cool'}
-                        title = Predicted Hi-C
-                        file_type = hic_matrix_square
-                        min_value = {args.vmin}
-                        max_value = {args.vmax if args.vmax is not None else np.percentile(pred_wt_matrix, 99)}
-                        colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]
-                        """)
+                _write_track_entry(f, 'enformer_ctcf', bw_enformer_ctcf_path, 'Enformer CTCF', 'teal', track_vmax.get('ctcf', 'auto'))
+                f.write(f"[ko highlight]\nfile = {args.out_file.replace('.tsv', '') + f'_ko_regions.bed'}\ntype = vhighlight\n\n")
+                _write_track_entry(f, 'enformer_atac', bw_enformer_atac_path, 'Enformer ATAC', 'darkgreen', track_vmax.get('atac', 'auto'))
+            # Predicted WT RAD21 (always useful in WT view unless RAD21 is being KO'd)
+            if not skip_pred_rad21:
+                _write_track_entry(f, 'pred_rad21_wt', bw_wt_path, 'Predicted RAD21', 'orange', track_vmax.get('rad21', 'auto'))
+            # Hi-C
+            hic_vmax = args.vmax if args.vmax is not None else np.percentile(pred_wt_matrix, 99)
+            _write_hic_entry(f, args.out_file.replace('.tsv', '') + '_wt.cool', 'Predicted Hi-C', args.vmin, hic_vmax)
+
+        # --- KO tracks.ini ---
         with open(tracks_ko_ini, 'w') as f:
-            f.write(f"""[spacer]
-                        height = 0.1
-                        color = white
-                        [ctcf]
-                        file = {bw_ctcf_ko_path}
-                        title = CTCF
-                        height = {track_height_1d}
-                        color = royalblue
-                        min_value = 0
-                        max_value = {ctcf_vmax if args.locus else 'auto'}
-                        [atac]
-                        file = {args.atac}
-                        title = ATAC
-                        height = {track_height_1d}
-                        color = green   
-                        [pred_rad21]
-                        file = {bw_ko_path}
-                        title = Predicted RAD21
-                        height = {track_height_1d}
-                        color = orange
-                        min_value = 0
-                        max_value = {rad21_vmax if args.locus else 'auto'}
-                        """
-            )
-            for track_path in other_paths:
-                track_name = os.path.basename(track_path).replace('.bw', '')
-                if not os.path.exists(track_path):
-                    continue
-                if track_name == 'rad21':
-                    continue
-                f.write(f"""
-                        [{track_name}]
-                        file = {track_path}
-                        title = {track_name}
-                        height = {track_height_1d}
-                        color = {colors[other_paths.index(track_path) % len(colors)]}"""
-                )
-            f.write(f"""
-                        [pred_hic]
-                        file = {args.out_file.replace('.tsv', '') + '_ko.cool'}
-                        title = Predicted Hi-C
-                        file_type = hic_matrix_square
-                        min_value = {args.vmin}
-                        max_value = {args.vmax if args.vmax is not None else np.percentile(pred_ko_matrix, 99)}
-                        colormap =  [ (1.0, 1.0, 1.0), (1.0, 0.92, 0.92),(1.0, 0.8, 0.8),(1.0, 0.6, 0.6), (1.0, 0.4, 0.4),(1.0, 0.294, 0.294)]
-                        """)
-        print(f"Tracks INI files for pyGenomeTracks saved to {tracks_wt_ini} and {tracks_ko_ini}")
-        pygenome_tracks_cmd_wt = f"pyGenomeTracks --tracks {tracks_wt_ini} --region {args.chrom}:{locus_start}-{locus_end} --outFileName {args.out_file.replace('.tsv', '') + f'_WT_rad21_tracks_{args.chrom}_{locus_start}_{locus_end}.png'} --dpi 300 --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
-        pygenome_tracks_cmd_ko = f"pyGenomeTracks --tracks {tracks_ko_ini} --region {args.chrom}:{locus_start}-{locus_end} --outFileName {args.out_file.replace('.tsv', '') + f'_KO_rad21_tracks_{args.chrom}_{locus_start}_{locus_end}.png'} --dpi 300 --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+            f.write("[spacer]\nheight = 0.1\ncolor = white\n\n")
+            # Write each input track: KO'd version if available, otherwise original
+            for t_name, t_path, t_color in all_input_tracks:
+                display = track_display_names.get(t_name, t_name)
+                if t_name in ko_bw_paths:
+                    _write_track_entry(f, f'{t_name}_ko', ko_bw_paths[t_name],
+                                       f'{display} (KO)', t_color, track_vmax.get(t_name, 'auto'))
+                else:
+                    _write_track_entry(f, t_name, t_path, display, t_color, track_vmax.get(t_name, 'auto'))
+            # Predicted KO RAD21 (only if RAD21 is not directly KO'd)
+            if not skip_pred_rad21:
+                _write_track_entry(f, 'pred_rad21_ko', bw_ko_path, 'Predicted RAD21', 'orange', track_vmax.get('rad21', 'auto'))
+            # Hi-C
+            hic_vmax_ko = args.vmax if args.vmax is not None else np.percentile(pred_ko_matrix, 99)
+            _write_hic_entry(f, args.out_file.replace('.tsv', '') + '_ko.cool', 'Predicted Hi-C', args.vmin, hic_vmax_ko)
+
+        print(f"Tracks INI files saved to {tracks_wt_ini} and {tracks_ko_ini}")
+        pygenome_tracks_cmd_wt = f"pyGenomeTracks --tracks {tracks_wt_ini} --region {args.chrom}:{locus_start}-{locus_end} --outFileName {args.out_file.replace('.tsv', '') + f'_WT_tracks_{args.chrom}_{locus_start}_{locus_end}.png'} --dpi 300 --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+        pygenome_tracks_cmd_ko = f"pyGenomeTracks --tracks {tracks_ko_ini} --region {args.chrom}:{locus_start}-{locus_end} --outFileName {args.out_file.replace('.tsv', '') + f'_KO_{ko_short_label}_tracks_{args.chrom}_{locus_start}_{locus_end}.png'} --dpi 300 --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
         os.system(pygenome_tracks_cmd_wt)
         os.system(pygenome_tracks_cmd_ko)
         print(f"pyGenomeTracks visualizations saved.")
