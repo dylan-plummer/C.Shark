@@ -191,11 +191,15 @@ def main():
                         help='Path to a fine-tuned Enformer checkpoint (.ckpt). '
                              'If not provided, the pre-trained Enformer from HuggingFace is used '
                              'when --ko-mode contains enformer_seq.')
-    parser.add_argument('--enformer-delta-mode', dest='enformer_delta_mode', type=str, default='multiplicative',
+    parser.add_argument('--enformer-delta-mode', dest='enformer_delta_mode', type=str, default='additive',
                         help='How to apply Enformer-predicted delta to experimental tracks: '
-                             'multiplicative (default) or additive')
+                             'multiplicative or additive')
     parser.add_argument('--enformer-delta-cap', dest='enformer_delta_cap', type=float, default=10.0,
                         help='Cap on fold-change values when using enformer_seq mode (default: 10.0)')
+    parser.add_argument('--enformer-tracks', dest='enformer_tracks', type=str, nargs='+',
+                        default=['ctcf', 'atac', 'rad21'],
+                        help='Target track names for Enformer delta predictions '
+                             '(default: ctcf atac rad21)')
 
     args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
 
@@ -249,7 +253,8 @@ def main():
                     silent=args.silent,
                     enformer_model_path=args.enformer_model_path,
                     enformer_delta_mode=args.enformer_delta_mode,
-                    enformer_delta_cap=args.enformer_delta_cap)
+                    enformer_delta_cap=args.enformer_delta_cap,
+                    enformer_tracks=args.enformer_tracks)
     else:  # full chromosome prediction
         # use the step-size arg to do predictions for the whole chromosome
         # load one of the bigwigs to get the chromosome length
@@ -583,7 +588,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     silent=False,
                     enformer_model_path=None,
                     enformer_delta_mode='multiplicative',
-                    enformer_delta_cap=10.0):
+                    enformer_delta_cap=10.0,
+                    enformer_tracks=None):
     os.makedirs(output_path, exist_ok=True)
     if not outname.endswith('_') and outname != '':
                 outname += '_'
@@ -731,7 +737,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     alt_string = raw_alt
 
                 print(f'[enformer_seq] Loading Enformer model for sequence-based perturbation...')
-                enf_target_tracks = ['ctcf', 'atac']
+                enf_target_tracks = enformer_tracks if enformer_tracks is not None else ['ctcf', 'atac', 'rad21']
                 enf_species = 'mouse' if 'mm10' in (assembly or '') else 'human'
                 if enformer_model_path is not None:
                     enformer_model, enformer_track_names, enf_device = load_enformer_from_checkpoint(
@@ -1236,16 +1242,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
-                        if enformer_seq_active and os.path.exists(f'tmp/{track_name}_enformer_ko.bw'):
-                            f.write(f'[{track_name} Enformer KO]\n')
-                            f.write(f'file = tmp/{track_name}_enformer_ko.bw\n')
-                            f.write('height = 2\n')
-                            f.write(f'color = {colors[track_i]}\n')
-                            f.write(f'title = {track_name} Enformer KO\n')
-                            f.write('min_value = 0\n')
-                            if track_max is not None:
-                                f.write(f'max_value = {track_max}\n')
-                            f.write('number_of_bins = 512\n\n')
+                       
                         if track_name in plot_pred_bigwigs:
                             #track_max = get_axis_range_from_bigwig(f'tmp/{track_name}_pred_WT.bw', chr_name, start)
                             f.write(f'[{track_name} pred]\n')
