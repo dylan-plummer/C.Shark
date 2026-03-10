@@ -16,6 +16,13 @@ from cshark.data.data_feature import GenomicFeature, HiCFeature, SequenceFeature
 import cshark.inference.utils.inference_utils as infer
 from cshark.inference.utils.inference_utils import write_tmp_cooler, write_tmp_chipseq_ko, knockout_peaks, get_axis_range_from_bigwig, chunk_shuffle, write_tmp_pred_bigwig, oe_normalize_cooler
 from cshark.inference.utils import plot_utils, model_utils
+from cshark.inference.utils.enformer_utils import (
+    load_enformer_pretrained,
+    load_enformer_from_checkpoint,
+    enformer_seq_knockout,
+    write_tmp_enformer_ko_bigwig,
+    write_tmp_enformer_delta_bigwig,
+)
 from cshark.inference.tracks_files import get_tracks
 
 import argparse
@@ -116,10 +123,17 @@ def main():
                         help='Width for deletion.', required=False)
     parser.add_argument('--peak-height', dest='peak_height', nargs='+', type=float,
                         help='Starting points for deletion.', default=2.0)
-    parser.add_argument('--var-pos', dest='var_pos', type=int, nargs='+',
-                        help='Variant position', required=False)
     parser.add_argument('--alt', dest='alt_bp', type=str, nargs='+',
-                        help='Variant alt base', required=False)
+                        help='Alt base(s) for seq / enformer_seq ko-modes. Each entry '
+                             'corresponds to the matching --ko-start position. A single '
+                             'character (e.g. A) performs a point mutation; a longer string '
+                             '(e.g. ACGTNN) replaces that many bases starting at --ko-start. '
+                             'Special keywords: "reverse" (reverse-complement the region), '
+                             '"shuffle" (randomly rearrange existing bases), '
+                             '"random" (replace with random bases). '
+                             'These keywords require --ko-width to set the region size. '
+                             'If omitted for seq modes, the region is replaced with N bases.',
+                        required=False)
     parser.add_argument('--padding', dest='end_padding_type', 
                         default='zero',
                         help='Padding type, either zero or follow. Using zero: the missing region at the end will be padded with zero for ctcf and atac seq, while sequence will be padded with N (unknown necleotide). Using follow: the end will be padded with features in the following region (default: %(default)s)')
@@ -171,6 +185,18 @@ def main():
     parser.add_argument('--no-plots', dest='no_plots', 
                         action = 'store_true',
                         help='do not generate plots')
+
+    # Enformer-based perturbation params
+    parser.add_argument('--enformer-model', dest='enformer_model_path', type=str, default=None,
+                        help='Path to a fine-tuned Enformer checkpoint (.ckpt). '
+                             'If not provided, the pre-trained Enformer from HuggingFace is used '
+                             'when --ko-mode contains enformer_seq.')
+    parser.add_argument('--enformer-delta-mode', dest='enformer_delta_mode', type=str, default='multiplicative',
+                        help='How to apply Enformer-predicted delta to experimental tracks: '
+                             'multiplicative (default) or additive')
+    parser.add_argument('--enformer-delta-cap', dest='enformer_delta_cap', type=float, default=10.0,
+                        help='Cap on fold-change values when using enformer_seq mode (default: 10.0)')
+
     args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
 
     os.makedirs('tmp', exist_ok=True)
@@ -201,7 +227,7 @@ def main():
     if args.start is not None:
             single_deletion(args.output_path, args.outname, args.celltype, args.chr_name, args.start, 
                     args.deletion_start, args.deletion_width, 
-                    args.var_pos, args.alt_bp, 
+                    args.alt_bp, 
                     args.model_path,
                     args.seq_path, args.ctcf_path, args.atac_path, other_feats, 
                     args,
@@ -220,7 +246,10 @@ def main():
                     ctcf_motif_p=args.ctcf_motif_p,
                     undo_log=args.hic_log_transform,
                     no_plots=args.no_plots,
-                    silent=args.silent)
+                    silent=args.silent,
+                    enformer_model_path=args.enformer_model_path,
+                    enformer_delta_mode=args.enformer_delta_mode,
+                    enformer_delta_cap=args.enformer_delta_cap)
     else:  # full chromosome prediction
         # use the step-size arg to do predictions for the whole chromosome
         # load one of the bigwigs to get the chromosome length
@@ -538,7 +567,7 @@ def main():
    
 
 def single_deletion(output_path, outname, celltype, chr_name, start, deletion_starts, deletion_widths, 
-                    var_pos, alt_bp,
+                    alt_bp,
                     model_path, seq_path, ctcf_path, atac_path, other_feats, 
                     args,
                     seq2_path=None, assembly='hg19',
@@ -551,7 +580,10 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     undo_log=True,
                     ctcf_log2=False, 
                     no_plots=False,
-                    silent=False):
+                    silent=False,
+                    enformer_model_path=None,
+                    enformer_delta_mode='multiplicative',
+                    enformer_delta_cap=10.0):
     os.makedirs(output_path, exist_ok=True)
     if not outname.endswith('_') and outname != '':
                 outname += '_'
@@ -642,9 +674,176 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             if ko != 'seq':
                 print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
 
-    # Delete inputs
+    # ---------------------------------------------------------------
+    # Resolve --alt list: pair each alt with the matching ko-start.
+    # For seq / enformer_seq modes --ko-width is inferred from the
+    # alt string length when not explicitly provided.
+    # ---------------------------------------------------------------
+    alt_bp_list = alt_bp if alt_bp is not None else []
+    _alt_keywords = {'reverse', 'shuffle', 'random'}
+    if deletion_starts is not None and deletion_widths is None:
+        # infer widths from alt strings (1 for single-base, len for multi)
+        # keywords (reverse/shuffle/random) cannot infer width — default to 1
+        deletion_widths = []
+        for i, ds in enumerate(deletion_starts):
+            if i < len(alt_bp_list) and alt_bp_list[i].lower() not in _alt_keywords:
+                deletion_widths.append(max(1, len(alt_bp_list[i])))
+            else:
+                deletion_widths.append(1)
+
+    # ---------------------------------------------------------------
+    # Apply perturbations
+    # ---------------------------------------------------------------
+    enformer_seq_active = False
+
     if deletion_starts is not None and deletion_widths is not None:
-        for deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height in zip(deletion_starts, deletion_widths, ko_data_types, ko_mode, peak_height):
+        for ko_idx, (deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height) in enumerate(
+                zip(deletion_starts, deletion_widths, ko_data_types, ko_mode, peak_height)):
+
+            # --- enformer_seq mode: Enformer delta on tracks ----------
+            if knockout_mode == 'enformer_seq':
+                enformer_seq_active = True
+                raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
+                rel_start = deletion_start - start
+                rel_end = rel_start + deletion_width
+
+                # Resolve special --alt keywords into concrete base strings
+                idx_to_base = {0: 'a', 1: 't', 2: 'c', 3: 'g', 4: 'n'}
+                if raw_alt.lower() == 'reverse':
+                    rc = reverse_complement(seq_region[rel_start:rel_end, :])
+                    alt_string = ''.join(idx_to_base[row.argmax()] for row in rc)
+                    print(f'[enformer_seq] Using reverse-complement of '
+                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
+                elif raw_alt.lower() == 'shuffle':
+                    sub = seq_region[rel_start:rel_end, :].copy()
+                    idxs = np.arange(sub.shape[0])
+                    np.random.shuffle(idxs)
+                    sub = sub[idxs, :]
+                    alt_string = ''.join(idx_to_base[row.argmax()] for row in sub)
+                    print(f'[enformer_seq] Using shuffled bases of '
+                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
+                elif raw_alt.lower() == 'random':
+                    bases = 'acgt'
+                    alt_string = ''.join(np.random.choice(list(bases)) for _ in range(deletion_width))
+                    print(f'[enformer_seq] Using random bases for '
+                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
+                else:
+                    alt_string = raw_alt
+
+                print(f'[enformer_seq] Loading Enformer model for sequence-based perturbation...')
+                enf_target_tracks = ['ctcf', 'atac']
+                enf_species = 'mouse' if 'mm10' in (assembly or '') else 'human'
+                if enformer_model_path is not None:
+                    enformer_model, enformer_track_names, enf_device = load_enformer_from_checkpoint(
+                        enformer_model_path)
+                else:
+                    enformer_model, enformer_track_names, enf_device = load_enformer_pretrained(
+                        target_tracks=enf_target_tracks, species=enf_species)
+
+                # Determine how to express the edit to enformer_seq_knockout
+                if len(alt_string) == 1:
+                    # Single-base variant
+                    enf_var_positions = [rel_start]
+                    enf_alt_bases = [alt_string]
+                    enf_ko_start, enf_ko_end, enf_alt_seq = None, None, None
+                else:
+                    # Multi-base replacement
+                    enf_var_positions, enf_alt_bases = None, None
+                    enf_ko_start = rel_start
+                    enf_ko_end = rel_start + len(alt_string)
+                    enf_alt_seq = alt_string
+
+                ctcf_region, atac_region, other_regions, enformer_results = enformer_seq_knockout(
+                    seq_region, ctcf_region, atac_region, other_regions,
+                    input_track_names,
+                    enformer_model, enformer_track_names,
+                    variant_positions=enf_var_positions, alt_bases=enf_alt_bases,
+                    ko_start=enf_ko_start, ko_end=enf_ko_end, alt_sequence=enf_alt_seq,
+                    window=window,
+                    delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
+                    device=enf_device,
+                )
+                print('[enformer_seq] Enformer delta applied to experimental tracks.')
+
+                # Write enformer-modified bigwig tracks for plotting
+                for enf_idx, enf_name in enumerate(enformer_results['enformer_track_names']):
+                    if enf_name in input_track_names:
+                        track_path = input_track_paths[input_track_names.index(enf_name)]
+                        write_tmp_enformer_ko_bigwig(
+                            track_path,
+                            enformer_results['fold_change'],
+                            enformer_results['delta'],
+                            enf_idx, enf_name,
+                            chr_name, start, window=window,
+                            delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
+                        )
+                        write_tmp_enformer_delta_bigwig(
+                            track_path,
+                            enformer_results['fold_change'],
+                            enformer_results['delta'],
+                            enf_idx, enf_name,
+                            chr_name, start, window=window,
+                            delta_mode='additive',
+                        )
+
+                # Also apply the alt sequence to the DNA so C.Shark sees it
+                for bp_offset, base in enumerate(alt_string):
+                    abs_pos = rel_start + bp_offset
+                    if 0 <= abs_pos < seq_region.shape[0]:
+                        if seq2_path is not None:
+                            seq1 = seq_region[:, :seq_region.shape[1] // 2]
+                            seq2 = seq_region[:, seq_region.shape[1] // 2:]
+                            seq1 = seq_perturb(abs_pos, base, seq1)
+                            seq2 = seq_perturb(abs_pos, base, seq2)
+                            seq_region = np.concatenate((seq1, seq2), axis=1)
+                        else:
+                            seq_region = seq_perturb(abs_pos, base, seq_region)
+                continue
+            # --- seq mode: modify the DNA sequence only ---------------
+            if knockout_mode == 'seq':
+                raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
+                rel_start = deletion_start - start
+                rel_end = rel_start + deletion_width
+
+                # Resolve special --alt keywords into concrete base strings
+                idx_to_base = {0: 'a', 1: 't', 2: 'c', 3: 'g', 4: 'n'}
+                if raw_alt.lower() == 'reverse':
+                    rc = reverse_complement(seq_region[rel_start:rel_end, :])
+                    alt_string = ''.join(idx_to_base[row.argmax()] for row in rc)
+                    print(f'[seq] Using reverse-complement of '
+                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
+                elif raw_alt.lower() == 'shuffle':
+                    sub = seq_region[rel_start:rel_end, :].copy()
+                    idxs = np.arange(sub.shape[0])
+                    np.random.shuffle(idxs)
+                    sub = sub[idxs, :]
+                    alt_string = ''.join(idx_to_base[row.argmax()] for row in sub)
+                    print(f'[seq] Using shuffled bases of '
+                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
+                elif raw_alt.lower() == 'random':
+                    bases = 'acgt'
+                    alt_string = ''.join(np.random.choice(list(bases)) for _ in range(deletion_width))
+                    print(f'[seq] Using random bases for '
+                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
+                else:
+                    alt_string = raw_alt
+
+                print(f'[seq] Substituting {len(alt_string)} base(s) at '
+                      f'{chr_name}:{deletion_start} (rel {rel_start}): {alt_string.upper()}')
+                for bp_offset, base in enumerate(alt_string):
+                    abs_pos = rel_start + bp_offset
+                    if 0 <= abs_pos < seq_region.shape[0]:
+                        if seq2_path is not None:
+                            seq1 = seq_region[:, :seq_region.shape[1] // 2]
+                            seq2 = seq_region[:, seq_region.shape[1] // 2:]
+                            seq1 = seq_perturb(abs_pos, base, seq1)
+                            seq2 = seq_perturb(abs_pos, base, seq2)
+                            seq_region = np.concatenate((seq1, seq2), axis=1)
+                        else:
+                            seq_region = seq_perturb(abs_pos, base, seq_region)
+                continue  # nothing else to do for this entry
+
+            # --- Normal track KO modes (zero, knockout, shuffle, etc.) -
             if ko_data_type in input_track_names:
                 ko_channel = input_track_names.index(ko_data_type)
             else:
@@ -654,42 +853,28 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 channel_offset += 1
             if 'atac' in input_track_names:
                 channel_offset += 1
-            left_del_pad = None 
+            left_del_pad = None
             right_del_pad = None
-            if knockout_mode == 'del' or knockout_mode == 'deletion' or knockout_mode == 'delete':
+            if knockout_mode in ('del', 'deletion', 'delete'):
                 left_pad_bp = deletion_width // 2
                 right_pad_bp = deletion_width - left_pad_bp
-                left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other = infer.load_region(chr_name, 
-                    start - left_pad_bp, seq_path, ctcf_path, atac_path, other_feats, 
-                    seq2_path=seq2_path,
-                    window = left_pad_bp, 
-                    ctcf_log2=ctcf_log2,
-                    bigwig_log=bigwig_log_transform)
+                left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other = infer.load_region(chr_name,
+                    start - left_pad_bp, seq_path, ctcf_path, atac_path, other_feats,
+                    seq2_path=seq2_path, window=left_pad_bp,
+                    ctcf_log2=ctcf_log2, bigwig_log=bigwig_log_transform)
                 left_del_pad = (left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other)
-                right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other = infer.load_region(chr_name, 
-                    start + window + right_pad_bp, seq_path, ctcf_path, atac_path, other_feats, 
-                    seq2_path=seq2_path,
-                    window = right_pad_bp, 
-                    ctcf_log2=ctcf_log2,
-                    bigwig_log=bigwig_log_transform)
+                right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other = infer.load_region(chr_name,
+                    start + window + right_pad_bp, seq_path, ctcf_path, atac_path, other_feats,
+                    seq2_path=seq2_path, window=right_pad_bp,
+                    ctcf_log2=ctcf_log2, bigwig_log=bigwig_log_transform)
                 right_del_pad = (right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other)
-            seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
-                    deletion_start, deletion_width, seq_region, ctcf_region, 
-                    atac_region, other_regions, ko_data=[ko_data_type], ko_channels=[ko_channel], channel_offset=channel_offset,
-                    ko_mode=[knockout_mode], peak_height=ko_height, left_del_pad=left_del_pad, right_del_pad=right_del_pad)
-    
-    # perturb sequence if var_pos is not None
-    if var_pos is not None and alt_bp is not None:
-        for pos, alt in zip(var_pos, alt_bp):
-            print(f'Variant pos: {pos}, alt base: {alt}')
-            if seq2_path is not None:  # split back into separate alleles then concat back together
-                seq1_region = seq_region[:, :seq_region.shape[1] // 2]
-                seq2_region = seq_region[:, seq_region.shape[1] // 2:]
-                seq1_region = seq_perturb(pos - start - 1, alt, seq1_region)
-                seq2_region = seq_perturb(pos - start - 1, alt, seq2_region)
-                seq_region = np.concatenate((seq1_region, seq2_region), axis=1)
-            else:
-                seq_region = seq_perturb(pos - start - 1, alt, seq_region)
+            seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(
+                    chr_name, start, deletion_start, deletion_width,
+                    seq_region, ctcf_region, atac_region, other_regions,
+                    ko_data=[ko_data_type], ko_channels=[ko_channel],
+                    channel_offset=channel_offset,
+                    ko_mode=[knockout_mode], peak_height=ko_height,
+                    left_del_pad=left_del_pad, right_del_pad=right_del_pad)
 
     # Prediction
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
@@ -946,6 +1131,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
+                        if enformer_seq_active and os.path.exists(f'tmp/{track_name}_enformer_ko.bw'):
+                            f.write(f'[{track_name} Enformer KO]\n')
+                            f.write(f'file = tmp/{track_name}_enformer_ko.bw\n')
+                            f.write('height = 2\n')
+                            f.write(f'color = {colors[track_i]}\n')
+                            f.write(f'title = {track_name} Enformer KO\n')
+                            f.write('min_value = 0\n')
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
+                            f.write('number_of_bins = 512\n\n')
                     if track_name in plot_pred_bigwigs:
                         f.write(f'[{track_name} pred]\n')
                         f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
@@ -1041,6 +1236,16 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
+                        if enformer_seq_active and os.path.exists(f'tmp/{track_name}_enformer_ko.bw'):
+                            f.write(f'[{track_name} Enformer KO]\n')
+                            f.write(f'file = tmp/{track_name}_enformer_ko.bw\n')
+                            f.write('height = 2\n')
+                            f.write(f'color = {colors[track_i]}\n')
+                            f.write(f'title = {track_name} Enformer KO\n')
+                            f.write('min_value = 0\n')
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
+                            f.write('number_of_bins = 512\n\n')
                         if track_name in plot_pred_bigwigs:
                             #track_max = get_axis_range_from_bigwig(f'tmp/{track_name}_pred_WT.bw', chr_name, start)
                             f.write(f'[{track_name} pred]\n')
@@ -1104,6 +1309,18 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     f.write('min_value = 0\n')
                                     if track_max is not None:
                                         f.write(f'max_value = {track_max}\n')
+                                    f.write('number_of_bins = 512\n\n')
+                                if enformer_seq_active and os.path.exists(f'tmp/{track_name}_enformer_delta.bw'):
+                                    f.write(f'[{track_name} Enformer Delta]\n')
+                                    f.write(f'file = tmp/{track_name}_enformer_delta.bw\n')
+                                    f.write('height = 2\n')
+                                    f.write(f'color = red\n')
+                                    f.write(f'negative_color = blue\n')
+                                    # delta_label = 'log2FC' if enformer_delta_mode == 'multiplicative' else 'delta'
+                                    delta_label = 'delta'
+                                    f.write(f'title = {track_name} Enformer {delta_label}\n')
+                                    f.write('min_value = -0.5\n')
+                                    f.write('max_value = 0.5\n')
                                     f.write('number_of_bins = 512\n\n')
                             if track_name in plot_pred_bigwigs:
                                 f.write(f'[{track_name} pred]\n')
