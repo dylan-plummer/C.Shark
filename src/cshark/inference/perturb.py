@@ -23,6 +23,12 @@ from cshark.inference.utils.enformer_utils import (
     write_tmp_enformer_ko_bigwig,
     write_tmp_enformer_delta_bigwig,
 )
+from cshark.inference.utils.hierarchical_utils import (
+    load_hierarchical_rad21_predictor,
+    hierarchical_rad21_update,
+    write_tmp_hierarchical_rad21_bigwig,
+    write_tmp_hierarchical_delta_bigwig,
+)
 from cshark.inference.tracks_files import get_tracks
 
 import argparse
@@ -197,9 +203,25 @@ def main():
     parser.add_argument('--enformer-delta-cap', dest='enformer_delta_cap', type=float, default=10.0,
                         help='Cap on fold-change values when using enformer_seq mode (default: 10.0)')
     parser.add_argument('--enformer-tracks', dest='enformer_tracks', type=str, nargs='+',
-                        default=['ctcf', 'atac', 'rad21'],
+                        default=['ctcf', 'atac'],
                         help='Target track names for Enformer delta predictions '
-                             '(default: ctcf atac rad21)')
+                             '(default: ctcf atac)')
+
+    # Hierarchical RAD21 predictor params
+    parser.add_argument('--hierarchical-model', dest='hierarchical_model_path', type=str, default=None,
+                        help='Path to a hierarchical training checkpoint (.ckpt) that contains '
+                             'an inner RAD21 predictor. When provided, any perturbation to '
+                             'the 7 input tracks (CTCF, ATAC, histones) is propagated through '
+                             'the RAD21 predictor and the resulting delta is applied to the '
+                             'experimental RAD21 track before Hi-C prediction.')
+    parser.add_argument('--hierarchical-delta-mode', dest='hierarchical_delta_mode', type=str,
+                        default='additive',
+                        help='How to apply the hierarchical RAD21 delta to the experimental '
+                             'RAD21 track: multiplicative or additive (default: additive)')
+    parser.add_argument('--hierarchical-delta-cap', dest='hierarchical_delta_cap', type=float,
+                        default=10.0,
+                        help='Cap on fold-change values when using hierarchical RAD21 '
+                             'multiplicative mode (default: 10.0)')
 
     args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
 
@@ -254,7 +276,10 @@ def main():
                     enformer_model_path=args.enformer_model_path,
                     enformer_delta_mode=args.enformer_delta_mode,
                     enformer_delta_cap=args.enformer_delta_cap,
-                    enformer_tracks=args.enformer_tracks)
+                    enformer_tracks=args.enformer_tracks,
+                    hierarchical_model_path=args.hierarchical_model_path,
+                    hierarchical_delta_mode=args.hierarchical_delta_mode,
+                    hierarchical_delta_cap=args.hierarchical_delta_cap)
     else:  # full chromosome prediction
         # use the step-size arg to do predictions for the whole chromosome
         # load one of the bigwigs to get the chromosome length
@@ -589,7 +614,10 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     enformer_model_path=None,
                     enformer_delta_mode='multiplicative',
                     enformer_delta_cap=10.0,
-                    enformer_tracks=None):
+                    enformer_tracks=None,
+                    hierarchical_model_path=None,
+                    hierarchical_delta_mode='additive',
+                    hierarchical_delta_cap=10.0):
     os.makedirs(output_path, exist_ok=True)
     if not outname.endswith('_') and outname != '':
                 outname += '_'
@@ -648,7 +676,20 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         plt.close()
     pred_before_1d = pred_before_output['1d']
 
-    
+    # Save WT copies for hierarchical RAD21 delta computation
+    seq_region_wt = seq_region.copy()
+    ctcf_region_wt = ctcf_region.copy() if ctcf_region is not None else None
+    atac_region_wt = atac_region.copy() if atac_region is not None else None
+    other_regions_wt = [r.copy() for r in other_regions] if other_regions is not None else None
+
+    # Pre-load hierarchical RAD21 model if requested
+    hierarchical_rad21_model = None
+    hierarchical_rad21_idx = None
+    hierarchical_all_tracks = None
+    if hierarchical_model_path is not None:
+        hierarchical_rad21_model, hierarchical_all_tracks, hierarchical_rad21_idx, _hier_device = (
+            load_hierarchical_rad21_predictor(hierarchical_model_path)
+        )
 
     if len(input_track_paths) == 0:
         print('No input tracks found. Using plot_bigwigs only.')
@@ -701,6 +742,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     # Apply perturbations
     # ---------------------------------------------------------------
     enformer_seq_active = False
+    hierarchical_active = hierarchical_rad21_model is not None
 
     if deletion_starts is not None and deletion_widths is not None:
         for ko_idx, (deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height) in enumerate(
@@ -881,6 +923,50 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     channel_offset=channel_offset,
                     ko_mode=[knockout_mode], peak_height=ko_height,
                     left_del_pad=left_del_pad, right_del_pad=right_del_pad)
+
+    # --- Hierarchical RAD21 update ---
+    # If a hierarchical model is provided, propagate the perturbation through
+    # the RAD21 predictor and apply the predicted delta to the experimental
+    # RAD21 track before running the main Hi-C prediction.
+    if hierarchical_rad21_model is not None and other_regions is not None:
+        # Find experimental RAD21 in other_regions (WT copy)
+        other_offset = 0
+        if 'ctcf' in input_track_names:
+            other_offset += 1
+        if 'atac' in input_track_names:
+            other_offset += 1
+        other_track_names = input_track_names[other_offset:]
+        if 'rad21' in other_track_names:
+            rad21_other_idx = other_track_names.index('rad21')
+            experimental_rad21 = other_regions_wt[rad21_other_idx].copy()
+
+            other_regions, hierarchical_results = hierarchical_rad21_update(
+                hierarchical_rad21_model, hierarchical_rad21_idx,
+                seq_region_wt, ctcf_region_wt, atac_region_wt, other_regions_wt,
+                seq_region, ctcf_region, atac_region, other_regions,
+                experimental_rad21,
+                input_track_names,
+                delta_mode=hierarchical_delta_mode,
+                cap=hierarchical_delta_cap,
+                window=window,
+            )
+
+            # Write diagnostic bigwigs for plotting
+            rad21_bw_path = input_track_paths[input_track_names.index('rad21')] if 'rad21' in input_track_names else input_track_paths[0]
+            write_tmp_hierarchical_rad21_bigwig(
+                rad21_bw_path,
+                hierarchical_results['wt_pred'],
+                hierarchical_results['ko_pred'],
+                hierarchical_results['perturbed_rad21'],
+                chr_name, start, window=window,
+            )
+            write_tmp_hierarchical_delta_bigwig(
+                rad21_bw_path,
+                hierarchical_results['delta'],
+                chr_name, start, window=window,
+            )
+        else:
+            print('[hierarchical] Warning: rad21 not in input tracks, skipping hierarchical update.')
 
     # Prediction
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
@@ -1147,6 +1233,40 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
+                        if hierarchical_active and track_name.lower() == 'rad21':
+                            # Hierarchical RAD21 WT prediction
+                            if os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
+                                f.write('[RAD21 Hier. WT pred]\n')
+                                f.write('file = tmp/rad21_hierarchical_wt_pred.bw\n')
+                                f.write('height = 2\n')
+                                f.write('color = darkgreen\n')
+                                f.write('title = RAD21 Hier. WT pred\n')
+                                f.write('min_value = 0\n')
+                                if track_max is not None:
+                                    f.write(f'max_value = {track_max}\n')
+                                f.write('number_of_bins = 512\n\n')
+                            # Hierarchical RAD21 KO prediction
+                            if os.path.exists('tmp/rad21_hierarchical_ko_pred.bw'):
+                                f.write('[RAD21 Hier. KO pred]\n')
+                                f.write('file = tmp/rad21_hierarchical_ko_pred.bw\n')
+                                f.write('height = 2\n')
+                                f.write('color = darkorange\n')
+                                f.write('title = RAD21 Hier. KO pred\n')
+                                f.write('min_value = 0\n')
+                                if track_max is not None:
+                                    f.write(f'max_value = {track_max}\n')
+                                f.write('number_of_bins = 512\n\n')
+                            # Hierarchical RAD21 perturbed (delta applied to experimental)
+                            if os.path.exists('tmp/rad21_hierarchical_perturbed.bw'):
+                                f.write('[RAD21 Hier. Perturbed]\n')
+                                f.write('file = tmp/rad21_hierarchical_perturbed.bw\n')
+                                f.write('height = 2\n')
+                                f.write('color = crimson\n')
+                                f.write('title = RAD21 Hier. Perturbed\n')
+                                f.write('min_value = 0\n')
+                                if track_max is not None:
+                                    f.write(f'max_value = {track_max}\n')
+                                f.write('number_of_bins = 512\n\n')
                     if track_name in plot_pred_bigwigs:
                         f.write(f'[{track_name} pred]\n')
                         f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
@@ -1254,6 +1374,17 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
+                        if hierarchical_active and track_name.lower() == 'rad21':
+                            if os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
+                                f.write('[RAD21 Hier. WT pred]\n')
+                                f.write('file = tmp/rad21_hierarchical_wt_pred.bw\n')
+                                f.write('height = 2\n')
+                                f.write('color = darkgreen\n')
+                                f.write('title = RAD21 Hier. WT pred\n')
+                                f.write('min_value = 0\n')
+                                if track_max is not None:
+                                    f.write(f'max_value = {track_max}\n')
+                                f.write('number_of_bins = 512\n\n')
                     # add the ground truth hic matrix
                     f.write('[WT pred]\n')
                     f.write('file = tmp/tmp_before.cool\n')
@@ -1319,6 +1450,29 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     f.write('min_value = -0.5\n')
                                     f.write('max_value = 0.5\n')
                                     f.write('number_of_bins = 512\n\n')
+                                if hierarchical_active and track_name.lower() == 'rad21':
+                                    # Hierarchical RAD21 delta
+                                    if os.path.exists('tmp/rad21_hierarchical_delta.bw'):
+                                        f.write('[RAD21 Hier. Delta]\n')
+                                        f.write('file = tmp/rad21_hierarchical_delta.bw\n')
+                                        f.write('height = 2\n')
+                                        f.write('color = red\n')
+                                        f.write('negative_color = blue\n')
+                                        f.write('title = RAD21 Hier. Delta\n')
+                                        f.write('min_value = -0.5\n')
+                                        f.write('max_value = 0.5\n')
+                                        f.write('number_of_bins = 512\n\n')
+                                    # Hierarchical RAD21 perturbed (delta applied to experimental)
+                                    if os.path.exists('tmp/rad21_hierarchical_perturbed.bw'):
+                                        f.write('[RAD21 Hier. Perturbed]\n')
+                                        f.write('file = tmp/rad21_hierarchical_perturbed.bw\n')
+                                        f.write('height = 2\n')
+                                        f.write('color = crimson\n')
+                                        f.write('title = RAD21 Hier. Perturbed\n')
+                                        f.write('min_value = 0\n')
+                                        if track_max is not None:
+                                            f.write(f'max_value = {track_max}\n')
+                                        f.write('number_of_bins = 512\n\n')
                             if track_name in plot_pred_bigwigs:
                                 f.write(f'[{track_name} pred]\n')
                                 f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
