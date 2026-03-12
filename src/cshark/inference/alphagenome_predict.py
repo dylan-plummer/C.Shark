@@ -23,7 +23,10 @@ import pyfaidx
 from tqdm import tqdm
 from scipy.sparse import coo_matrix
 
+import torch.nn as nn
+
 from alphagenome_pytorch import AlphaGenome
+from alphagenome_pytorch.config import DtypePolicy
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot_tensor
 
 # ── Constants ──────────────────────────────────────────────────────────
@@ -173,10 +176,25 @@ def alphagenome_predict(seq_str, model, organism_index=0, contact_head=0,
         np.ndarray of shape (S, S) – predicted contact matrix.
     """
     dna_onehot = sequence_to_onehot_tensor(seq_str).unsqueeze(0).to(device)
-    preds = model.predict(dna_onehot, organism_index=organism_index)
+
+    # --- GPU memory saving #3: request only 128-bp resolution ----------
+    # We only need pair_activations (64×64 at 2048 bp).  Passing
+    # resolutions=(128,) tells the model to skip the decoder up-sampling
+    # back to 131,072 positions and the expensive 1bp embeddings,
+    # saving ~1+ GB of GPU memory per forward pass.
+    preds = model.predict(
+        dna_onehot,
+        organism_index=organism_index,
+        resolutions=(128,),
+    )
+
     # pair_activations: (B, S, S, 28)  channels_last
     contacts = preds['pair_activations']
     mat = contacts[0, :, :, contact_head].float().cpu().numpy()
+
+    # --- GPU memory saving #4: eagerly free prediction tensors ---------
+    del preds, contacts, dna_onehot
+
     # undo log transform 
     mat = np.exp(mat)
     return mat
@@ -224,6 +242,9 @@ def main():
                         help='Skip pyGenomeTracks / matplotlib plots')
     parser.add_argument('--silent', action='store_true',
                         help='Suppress pyGenomeTracks stdout/stderr')
+    parser.add_argument('--full-precision', dest='full_precision',
+                        action='store_true',
+                        help='Disable bf16 mixed precision (use fp32 only)')
 
     # Plot colour-scale
     parser.add_argument('--min-val', dest='min_val', type=float, default=0.0,
@@ -247,7 +268,32 @@ def main():
 
     # ── Load model ─────────────────────────────────────────────────────
     print(f'Loading AlphaGenome from {args.model_path} ...')
-    model = AlphaGenome.from_pretrained(args.model_path)
+
+    # --- GPU memory saving #1: mixed-precision (bf16 compute) ----------
+    # Halves activation memory (~2-3 GB savings on a 450M-param model).
+    if args.full_precision:
+        dtype_policy = DtypePolicy.full_float32()
+        print('Using full float32 precision')
+    else:
+        dtype_policy = DtypePolicy.mixed_precision()   # params=fp32, compute/output=bf16
+        print('Using mixed precision (bfloat16 compute) to save GPU memory')
+
+    model = AlphaGenome.from_pretrained(
+        args.model_path,
+        dtype_policy=dtype_policy,
+    )
+
+    # --- GPU memory saving #2: prune unused prediction heads -----------
+    # We only need pair_activations (contact maps).  Removing the seven
+    # genome-track heads (ATAC, DNase, CAGE, RNA-seq, ChIP, …) avoids
+    # allocating their forward-pass activations and output tensors.
+    pruned_heads = list(model.heads.keys())
+    model.heads = nn.ModuleDict()          # drop all genome-track heads
+    model.splice_site_classification_head = None
+    model.splice_site_usage_head = None
+    model.splice_site_junction_head = None
+    print(f'Pruned {len(pruned_heads)} unused heads: {pruned_heads}')
+
     model = model.to(device).eval()
     total_params = sum(p.numel() for p in model.parameters())
     print(f'Model loaded - {total_params / 1e6:.1f}M parameters')
@@ -290,6 +336,10 @@ def main():
 
     for start, end in tqdm(zip(starts, ends), desc='Predicting',
                            total=len(starts)):
+        # --- GPU memory saving #5: flush CUDA cache between windows ----
+        if device != 'cpu':
+            torch.cuda.empty_cache()
+
         seq_str = str(genome[chr_name][start:end])
 
         mat = alphagenome_predict(
