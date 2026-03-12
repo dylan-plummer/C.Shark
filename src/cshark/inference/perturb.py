@@ -197,7 +197,7 @@ def main():
                         help='Path to a fine-tuned Enformer checkpoint (.ckpt). '
                              'If not provided, the pre-trained Enformer from HuggingFace is used '
                              'when --ko-mode contains enformer_seq.')
-    parser.add_argument('--enformer-delta-mode', dest='enformer_delta_mode', type=str, default='additive',
+    parser.add_argument('--enformer-delta-mode', dest='enformer_delta_mode', type=str, default='multiplicative',
                         help='How to apply Enformer-predicted delta to experimental tracks: '
                              'multiplicative or additive')
     parser.add_argument('--enformer-delta-cap', dest='enformer_delta_cap', type=float, default=10.0,
@@ -215,9 +215,9 @@ def main():
                              'the RAD21 predictor and the resulting delta is applied to the '
                              'experimental RAD21 track before Hi-C prediction.')
     parser.add_argument('--hierarchical-delta-mode', dest='hierarchical_delta_mode', type=str,
-                        default='additive',
+                        default='multiplicative',
                         help='How to apply the hierarchical RAD21 delta to the experimental '
-                             'RAD21 track: multiplicative or additive (default: additive)')
+                             'RAD21 track: multiplicative or additive (default: multiplicative)')
     parser.add_argument('--hierarchical-delta-cap', dest='hierarchical_delta_cap', type=float,
                         default=10.0,
                         help='Cap on fold-change values when using hierarchical RAD21 '
