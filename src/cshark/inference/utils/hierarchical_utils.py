@@ -483,3 +483,12 @@ def write_tmp_hierarchical_delta_bigwig(base_bigwig_path, delta,
 
     out_bw.close()
     print(f"[hierarchical] Wrote {out_path}")
+
+    # Also write fold-change bigwig for reference
+    fc_out_path = 'tmp/rad21_hierarchical_fold_change.bw'
+    out_bw = pyBigWig.open(fc_out_path, 'w')
+    out_bw.addHeader(header_list)
+    for s, e, v in merged:
+        out_bw.addEntries([chr_name], [s], [e], [float(v)])
+    out_bw.close()
+    print(f"[hierarchical] Wrote {fc_out_path}")

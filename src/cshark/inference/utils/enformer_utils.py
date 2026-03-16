@@ -818,3 +818,12 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
 
     out_bw.close()
     print(f"[enformer_seq] Wrote enformer delta bigwig: {out_path}")
+
+    # also write fc bigwig for reference
+    fc_out_path = f'tmp/{track_name}_enformer_fold_change.bw'
+    out_bw = pyBigWig.open(fc_out_path, 'w')
+    out_bw.addHeader(header_list)   
+    for s, e, v in merged_intervals:
+        out_bw.addEntries([chr_name], [s], [e], [float(v)])
+    out_bw.close()
+    print(f"[enformer_seq] Wrote enformer fold-change bigwig: {fc_out_path}")
