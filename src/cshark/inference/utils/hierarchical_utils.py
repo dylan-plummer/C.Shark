@@ -443,7 +443,7 @@ def write_tmp_hierarchical_rad21_bigwig(base_bigwig_path, wt_pred, ko_pred,
         print(f"[hierarchical] Wrote {out_path}")
 
 
-def write_tmp_hierarchical_delta_bigwig(base_bigwig_path, delta,
+def write_tmp_hierarchical_delta_bigwig(base_bigwig_path, delta, fc,
                                          chr_name, start, window=2097152):
     """Write the raw RAD21 delta as a bigwig (centered around zero).
 
@@ -494,6 +494,19 @@ def write_tmp_hierarchical_delta_bigwig(base_bigwig_path, delta,
     fc_out_path = 'tmp/rad21_hierarchical_fold_change.bw'
     out_bw = pyBigWig.open(fc_out_path, 'w')
     out_bw.addHeader(header_list)
+    fc_signal = fc.copy()
+    if len(fc_signal) != window:
+        fc_signal = _resample(fc_signal, window)
+    fc_values = list(fc_signal.astype(float))
+    merged = []
+    prev_pos = positions[0]
+    prev_val = fc_values[0]
+    for i in range(1, len(positions)):
+        if fc_values[i] != prev_val:
+            merged.append((prev_pos, positions[i], prev_val))
+            prev_pos = positions[i]
+            prev_val = fc_values[i]
+    merged.append((prev_pos, positions[-1] + 1, prev_val))
     for s, e, v in merged:
         out_bw.addEntries([chr_name], [s], [e], [float(v)])
     out_bw.close()

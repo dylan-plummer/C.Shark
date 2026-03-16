@@ -963,6 +963,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             write_tmp_hierarchical_delta_bigwig(
                 rad21_bw_path,
                 hierarchical_results['delta'],
+                hierarchical_results['fold_change'],
                 chr_name, start, window=window,
             )
         else:
