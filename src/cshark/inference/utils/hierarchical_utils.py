@@ -337,10 +337,16 @@ def hierarchical_rad21_update(rad21_model, rad21_idx,
     )
 
     # Apply delta to experimental RAD21
-    perturbed_rad21 = apply_rad21_delta(
-        experimental_rad21, fold_change, delta,
-        mode=delta_mode, cap=cap,
-    )
+    if delta_mode == 'prediction':
+        print(f"[hierarchical] Using raw hierarchical model prediction as perturbed RAD21.")
+        perturbed_rad21 = ko_pred
+        perturbed_rad21 = np.clip(perturbed_rad21, 0, None)
+        perturbed_rad21 = _resample(perturbed_rad21, len(experimental_rad21))
+    else:
+        perturbed_rad21 = apply_rad21_delta(
+            experimental_rad21, fold_change, delta,
+            mode=delta_mode, cap=cap,
+        )
 
     # Determine where RAD21 sits in other_regions
     # input_track_names is like ['ctcf', 'atac', 'rad21', 'h3k27ac', ...]

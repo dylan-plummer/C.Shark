@@ -631,11 +631,17 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
             fc_resampled = downsample_to_track_resolution(fc_1d, track_len)
             return apply_enformer_delta_to_track(track, fc_resampled,
                                                   mode='multiplicative', cap=cap)
-        else:
+        elif delta_mode == 'additive':
             d_1d = delta[:, enformer_track_idx]
             d_resampled = downsample_to_track_resolution(d_1d, track_len)
             return apply_enformer_delta_to_track(track, d_resampled,
                                                   mode='additive', cap=cap)
+        else:  # use raw predictions without fold-change or delta transformation
+            pred_1d = alt_pred[:, enformer_track_idx]
+            pred_resampled = downsample_to_track_resolution(pred_1d, track_len)
+            return pred_resampled
+            
+            
 
     for enf_idx, enf_name in enumerate(enformer_track_names):
         if enf_name == 'ctcf' and ctcf_region is not None:

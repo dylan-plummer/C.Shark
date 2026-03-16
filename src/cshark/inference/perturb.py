@@ -199,7 +199,7 @@ def main():
                              'when --ko-mode contains enformer_seq.')
     parser.add_argument('--enformer-delta-mode', dest='enformer_delta_mode', type=str, default='multiplicative',
                         help='How to apply Enformer-predicted delta to experimental tracks: '
-                             'multiplicative or additive')
+                             'multiplicative, additive, predidction')
     parser.add_argument('--enformer-delta-cap', dest='enformer_delta_cap', type=float, default=10.0,
                         help='Cap on fold-change values when using enformer_seq mode (default: 10.0)')
     parser.add_argument('--enformer-tracks', dest='enformer_tracks', type=str, nargs='+',
@@ -217,7 +217,7 @@ def main():
     parser.add_argument('--hierarchical-delta-mode', dest='hierarchical_delta_mode', type=str,
                         default='multiplicative',
                         help='How to apply the hierarchical RAD21 delta to the experimental '
-                             'RAD21 track: multiplicative or additive (default: multiplicative)')
+                             'RAD21 track: multiplicative, additive, or prediction (default: multiplicative)')
     parser.add_argument('--hierarchical-delta-cap', dest='hierarchical_delta_cap', type=float,
                         default=10.0,
                         help='Cap on fold-change values when using hierarchical RAD21 '
