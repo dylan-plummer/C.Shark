@@ -216,7 +216,7 @@ def compute_hierarchical_rad21_delta(rad21_model, wt_inputs, ko_inputs,
 # ---------------------------------------------------------------------------
 
 def apply_rad21_delta(experimental_rad21, fold_change, delta,
-                      mode='additive', cap=10.0):
+                      mode='additive', cap=None):
     """Apply the hierarchical-model-predicted RAD21 delta to experimental
     RAD21 data.
 
@@ -251,8 +251,13 @@ def apply_rad21_delta(experimental_rad21, fold_change, delta,
         delta = _resample(delta, track_len)
 
     if mode == 'multiplicative':
-        fc = np.clip(fold_change, 1.0 / cap, cap)
-        result = result * fc
+        if cap is not None:
+            fold_change = np.clip(fold_change, 1.0 / cap, cap)
+        print(np.min(fold_change), np.mean(fold_change), np.max(fold_change))
+        print(np.min(result), np.mean(result), np.max(result))
+        result = np.expm1(result)  # Convert from log1p to linear space
+        result = result * fold_change
+        result = np.log1p(result)  # Back to log1p space
     elif mode == 'additive':
         result = result + delta
     else:
@@ -260,7 +265,7 @@ def apply_rad21_delta(experimental_rad21, fold_change, delta,
             f"Unknown delta mode: '{mode}'. Use 'multiplicative' or 'additive'."
         )
 
-    result = np.clip(result, 0, None)
+    #result = np.clip(result, 0, None)
     return result
 
 
@@ -283,7 +288,7 @@ def hierarchical_rad21_update(rad21_model, rad21_idx,
                               other_regions_ko,
                               experimental_rad21,
                               input_track_names,
-                              delta_mode='additive', cap=10.0,
+                              delta_mode='additive', cap=None,
                               window=2097152):
     """End-to-end hierarchical RAD21 update for the perturbation pipeline.
 
@@ -340,7 +345,7 @@ def hierarchical_rad21_update(rad21_model, rad21_idx,
     if delta_mode == 'prediction':
         print(f"[hierarchical] Using raw hierarchical model prediction as perturbed RAD21.")
         perturbed_rad21 = ko_pred
-        perturbed_rad21 = np.clip(perturbed_rad21, 0, None)
+        #perturbed_rad21 = np.clip(perturbed_rad21, 0, None)
         perturbed_rad21 = _resample(perturbed_rad21, len(experimental_rad21))
     else:
         perturbed_rad21 = apply_rad21_delta(
@@ -413,7 +418,7 @@ def write_tmp_hierarchical_rad21_bigwig(base_bigwig_path, wt_pred, ko_pred,
 
     for name, signal in [('wt_pred', wt_pred),
                          ('ko_pred', ko_pred),
-                         ('perturbed', perturbed_rad21)]:
+                         ('perturbed', np.expm1(perturbed_rad21))]:  # Convert back from log1p for visualization
         # Resample to bp resolution for bigwig
         if len(signal) != window:
             signal = _resample(signal, window)

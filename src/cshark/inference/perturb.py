@@ -219,7 +219,7 @@ def main():
                         help='How to apply the hierarchical RAD21 delta to the experimental '
                              'RAD21 track: multiplicative, additive, or prediction (default: multiplicative)')
     parser.add_argument('--hierarchical-delta-cap', dest='hierarchical_delta_cap', type=float,
-                        default=10.0,
+                        default=None,
                         help='Cap on fold-change values when using hierarchical RAD21 '
                              'multiplicative mode (default: 10.0)')
 
@@ -970,6 +970,9 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             print('[hierarchical] Warning: rad21 not in input tracks, skipping hierarchical update.')
 
     # Prediction
+    rad21_hier = other_regions[rad21_other_idx] if hierarchical_rad21_model is not None and other_regions is not None and 'rad21' in other_track_names else None
+    if rad21_hier is not None:
+        print(np.min(rad21_hier), np.mean(rad21_hier), np.max(rad21_hier))
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                    num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                       target_1d_length=int(window / args.resolution_1d),
