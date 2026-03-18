@@ -178,7 +178,7 @@ def predict_rad21(rad21_model, inputs_tensor, rad21_idx, device=None):
 # ---------------------------------------------------------------------------
 
 def compute_hierarchical_rad21_delta(rad21_model, wt_inputs, ko_inputs,
-                                     rad21_idx, device=None, epsilon=1e-6):
+                                     rad21_idx, device=None, epsilon=0.01):
     """Compute fold-change and additive delta for RAD21 between WT and
     perturbed (KO) inputs.
 
