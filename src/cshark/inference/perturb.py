@@ -1,8 +1,6 @@
 from calendar import c
 from math import dist
 import os
-# force cpu
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 import re
 import numpy as np
 import pandas as pd
