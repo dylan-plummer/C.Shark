@@ -356,6 +356,27 @@ def main():
             results_1d[f'{track_name}_WT'] = []
             results_1d[f'{track_name}_KO'] = []
         bins_1d = []
+
+        # Load hierarchical RAD21 model if requested for full chromosome prediction
+        hierarchical_rad21_model = None
+        hierarchical_rad21_idx = None
+        use_hierarchical = args.hierarchical_model_path is not None
+        rad21_other_idx_hier = None
+        if use_hierarchical:
+            hierarchical_rad21_model, hierarchical_all_tracks, hierarchical_rad21_idx, _hier_device = (
+                load_hierarchical_rad21_predictor(args.hierarchical_model_path)
+            )
+            other_track_names_hier = input_track_names[channel_offset:]
+            if 'rad21' not in other_track_names_hier:
+                print('[hierarchical] Warning: rad21 not in input tracks for full-chrom prediction. Disabling hierarchical.')
+                use_hierarchical = False
+            else:
+                rad21_other_idx_hier = other_track_names_hier.index('rad21')
+        results_hierarchical = {'chrom': [], 'start': [], 'end': []}
+        if use_hierarchical:
+            for col in ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc', 'rad21_perturbed']:
+                results_hierarchical[col] = []
+
         for start, end in tqdm(zip(starts, ends), desc='Predicting', total=len(starts)):
             #print(f'Start: {start}, End: {end}')
             seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
@@ -374,12 +395,35 @@ def main():
                                                   other_feat_names=input_track_names[2:])
             pred_before = pred_before_output['hic']
             pred_before_1d = pred_before_output['1d']
-           
+
+            # Save WT copies for hierarchical RAD21 delta computation
+            if use_hierarchical:
+                seq_region_wt = seq_region.copy()
+                ctcf_region_wt = ctcf_region.copy() if ctcf_region is not None else None
+                atac_region_wt = atac_region.copy() if atac_region is not None else None
+                other_regions_wt = [r.copy() for r in other_regions] if other_regions is not None else None
+                experimental_rad21 = other_regions[rad21_other_idx_hier].copy()
+
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                 start, window, seq_region, ctcf_region, 
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels, 
                 channel_offset=channel_offset,
                 ko_mode=ko_mode, peak_height=args.peak_height)
+
+            # Apply hierarchical RAD21 update if enabled
+            hierarchical_results_window = None
+            if use_hierarchical and other_regions is not None:
+                other_regions, hierarchical_results_window = hierarchical_rad21_update(
+                    hierarchical_rad21_model, hierarchical_rad21_idx,
+                    seq_region_wt, ctcf_region_wt, atac_region_wt, other_regions_wt,
+                    seq_region, ctcf_region, atac_region, other_regions,
+                    experimental_rad21,
+                    input_track_names,
+                    delta_mode=args.hierarchical_delta_mode,
+                    cap=args.hierarchical_delta_cap,
+                    window=window,
+                )
+
             pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                            num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                            diploid=diploid,
@@ -443,9 +487,31 @@ def main():
                     results_1d[f'{track_name}_KO'].extend(pred_1d[:, track_idx].tolist())
                 bins_1d.append(pred_before_cooler.bins()[:])
 
-           
-                
-                
+            # Collect hierarchical RAD21 results for this window
+            if use_hierarchical and hierarchical_results_window is not None:
+                wt_pred_h = hierarchical_results_window['wt_pred']
+                ko_pred_h = hierarchical_results_window['ko_pred']
+                delta_h = hierarchical_results_window['delta']
+                fc_h = hierarchical_results_window['fold_change']
+                perturbed_h = hierarchical_results_window['perturbed_rad21']
+                # Resample perturbed_rad21 to match hierarchical prediction resolution
+                if len(perturbed_h) != len(wt_pred_h):
+                    perturbed_h = np.interp(
+                        np.linspace(0, 1, len(wt_pred_h)),
+                        np.linspace(0, 1, len(perturbed_h)),
+                        perturbed_h,
+                    )
+                n_bins_h = len(wt_pred_h)
+                res_h = int(window / n_bins_h)
+                bin_range_h = np.int32(np.linspace(start, start + window - res_h, n_bins_h))
+                results_hierarchical['chrom'].extend([chr_name] * n_bins_h)
+                results_hierarchical['start'].extend(bin_range_h.tolist())
+                results_hierarchical['end'].extend((bin_range_h + res_h).tolist())
+                results_hierarchical['rad21_WT_pred'].extend(wt_pred_h.tolist())
+                results_hierarchical['rad21_KO_pred'].extend(ko_pred_h.tolist())
+                results_hierarchical['rad21_delta'].extend(delta_h.tolist())
+                results_hierarchical['rad21_fc'].extend(fc_h.tolist())
+                results_hierarchical['rad21_perturbed'].extend(perturbed_h.tolist())
 
         # convert the res dict to a dataframe
         res_df = pd.DataFrame(results).groupby(['a1', 'a2']).mean().reset_index()
@@ -485,22 +551,26 @@ def main():
         # also create cooler file for full chromosome
         wt_cooler_df = res_df[['a1', 'a2', 'WT']].rename(columns={'WT': 'count'})
         ko_cooler_df = res_df[['a1', 'a2', 'KO']].rename(columns={'KO': 'count'})
-        exp_wt_cooler_df = res_df[['a1', 'a2', 'exp_WT']].rename(columns={'exp_WT': 'count'})
+        if args.oe_norm:
+            exp_wt_cooler_df = res_df[['a1', 'a2', 'exp_WT']].rename(columns={'exp_WT': 'count'})
+            exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
+            exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+            exp_wt_cooler_df = exp_wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
+            cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT.cool'), bins_cooler_df, exp_wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
         # map a1 and a2 to bin_ids
         wt_cooler_df['bin1_id'] = wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
         wt_cooler_df['bin2_id'] = wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
         ko_cooler_df['bin1_id'] = ko_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
         ko_cooler_df['bin2_id'] = ko_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
-        exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
-        exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+        
         wt_cooler_df = wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
         ko_cooler_df = ko_cooler_df[['bin1_id', 'bin2_id', 'count']]
-        exp_wt_cooler_df = exp_wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
+        
         bins_cooler_df = bins_df[['chrom', 'start', 'end']].copy()
         bins_cooler_df.reset_index(inplace=True)
         cooler.create_cooler(args.out_file.replace('.tsv', '_WT.cool'), bins_cooler_df, wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
         cooler.create_cooler(args.out_file.replace('.tsv', '_KO.cool'), bins_cooler_df, ko_cooler_df, ordered=True, dtypes={'count': 'float32'})
-        cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT.cool'), bins_cooler_df, exp_wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
+        
         if args.oe_norm:
             dist_norm_res_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')))
             dist_norm_res_KO_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_KO.cool')))
@@ -581,7 +651,40 @@ def main():
 
                 plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_1d_scatter.png'), dpi=300)
                 plt.close(fig)
-        
+
+        # Save hierarchical RAD21 predictions if used
+        if use_hierarchical and len(results_hierarchical['chrom']) > 0:
+            res_hier_df = pd.DataFrame(results_hierarchical).groupby(['chrom', 'start', 'end']).mean().reset_index()
+            print(res_hier_df)
+            hier_col_names = ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc', 'rad21_perturbed']
+            res_hier_df = res_hier_df[['chrom', 'start', 'end'] + hier_col_names]
+            # remove predictions outside region
+            if region is not None:
+                res_hier_df = res_hier_df[(res_hier_df['start'] >= region_start) & (res_hier_df['end'] <= region_end)]
+            hier_out_path = args.out_file.replace('.tsv', '_hierarchical_rad21.bed')
+            # round to 4 decimal places for saving
+            for col in hier_col_names:
+                res_hier_df[col] = res_hier_df[col].round(4)
+            res_hier_df.to_csv(hier_out_path, sep='\t', header=True, index=False)
+            print(f'[hierarchical] Saved hierarchical RAD21 predictions to {hier_out_path}')
+
+            # Plot scatter and distribution diagnostics
+            fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+            sns.scatterplot(data=res_hier_df, x='rad21_WT_pred', y='rad21_KO_pred', alpha=0.5, ax=axs[0])
+            axs[0].set_xlabel('RAD21 WT pred')
+            axs[0].set_ylabel('RAD21 KO pred')
+            axs[0].set_title('Hierarchical RAD21 WT vs KO')
+            axs[0].set_aspect('equal', adjustable='box')
+            axs[1].hist(res_hier_df['rad21_delta'], bins=50, alpha=0.7)
+            axs[1].set_xlabel('Delta (KO - WT)')
+            axs[1].set_title('RAD21 Delta Distribution')
+            axs[2].hist(res_hier_df['rad21_fc'], bins=50, alpha=0.7)
+            axs[2].set_xlabel('Fold Change (KO / WT)')
+            axs[2].set_title('RAD21 Fold Change Distribution')
+            plt.tight_layout()
+            plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_hierarchical_rad21.png'), dpi=300)
+            plt.close(fig)
+
         # plot a simple scatter plot of the WT vs KO
         fig, ax = plt.subplots(figsize=(10, 10))
         sns.scatterplot(data=res_df, x='WT', y='KO', ax=ax)
