@@ -98,10 +98,17 @@ def load_hierarchical_rad21_predictor(checkpoint_path, device=None):
             inner_weights[new_key] = value
 
     if not inner_weights:
-        raise RuntimeError(
-            f"No 'input_pred_model.*' keys found in checkpoint {checkpoint_path}. "
-            f"Are you sure this is a hierarchical training checkpoint?"
-        )
+        # raise RuntimeError(
+        #     f"No 'input_pred_model.*' keys found in checkpoint {checkpoint_path}. "
+        #     f"Are you sure this is a hierarchical training checkpoint?"
+        # )
+        # provided checkpoint is already a MultiTaskConvTransModel checkpoint, not a hierarchical TrainModule checkpoint
+        print(f"[hierarchical] Warning: No 'input_pred_model.*' keys found in checkpoint. Assuming checkpoint is already the inner model.")
+        inner_weights = {}
+        for key, value in state_dict.items():
+            if key.startswith('model.'):
+                new_key = key.replace('model.', '')
+                inner_weights[new_key] = value
 
     rad21_model.load_state_dict(inner_weights)
     rad21_model.eval()
