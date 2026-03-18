@@ -374,7 +374,7 @@ def main():
                 rad21_other_idx_hier = other_track_names_hier.index('rad21')
         results_hierarchical = {'chrom': [], 'start': [], 'end': []}
         if use_hierarchical:
-            for col in ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc', 'rad21_perturbed']:
+            for col in ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc', 'rad21_perturbed', 'rad21_experimental']:
                 results_hierarchical[col] = []
 
         for start, end in tqdm(zip(starts, ends), desc='Predicting', total=len(starts)):
@@ -512,6 +512,15 @@ def main():
                 results_hierarchical['rad21_delta'].extend(delta_h.tolist())
                 results_hierarchical['rad21_fc'].extend(fc_h.tolist())
                 results_hierarchical['rad21_perturbed'].extend(perturbed_h.tolist())
+                # Add experimental RAD21 data
+                exp_rad21_h = experimental_rad21.copy()
+                if len(exp_rad21_h) != len(wt_pred_h):
+                    exp_rad21_h = np.interp(
+                        np.linspace(0, 1, len(wt_pred_h)),
+                        np.linspace(0, 1, len(exp_rad21_h)),
+                        exp_rad21_h,
+                    )
+                results_hierarchical['rad21_experimental'].extend(exp_rad21_h.tolist())
 
         # convert the res dict to a dataframe
         res_df = pd.DataFrame(results).groupby(['a1', 'a2']).mean().reset_index()
@@ -656,7 +665,7 @@ def main():
         if use_hierarchical and len(results_hierarchical['chrom']) > 0:
             res_hier_df = pd.DataFrame(results_hierarchical).groupby(['chrom', 'start', 'end']).mean().reset_index()
             print(res_hier_df)
-            hier_col_names = ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc', 'rad21_perturbed']
+            hier_col_names = ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc', 'rad21_perturbed', 'rad21_experimental']
             res_hier_df = res_hier_df[['chrom', 'start', 'end'] + hier_col_names]
             # remove predictions outside region
             if region is not None:
