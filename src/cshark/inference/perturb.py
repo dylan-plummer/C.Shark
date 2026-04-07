@@ -1,7 +1,4 @@
-from calendar import c
-from math import dist
 import os
-import re
 import numpy as np
 import pandas as pd
 import sys
@@ -862,6 +859,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
 
             # --- enformer_seq mode: Enformer delta on tracks ----------
             if knockout_mode == 'enformer_seq':
+                deletion_start -= 1  # convert to 0-based indexing
                 enformer_seq_active = True
                 raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
                 rel_start = deletion_start - start
@@ -961,6 +959,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 continue
             # --- seq mode: modify the DNA sequence only ---------------
             if knockout_mode == 'seq':
+                deletion_start -= 1  # convert to 0-based indexing
                 raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
                 rel_start = deletion_start - start
                 rel_end = rel_start + deletion_width
