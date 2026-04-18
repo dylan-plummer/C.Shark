@@ -205,9 +205,9 @@ class VizCallback(Callback):
                     # predict tracks using enformer for comparison
                     if pl_module.hparams.dataset_assembly2 is not None:
                         enformer_inputs = inputs[:, :, 5:]
-                        enformer_pred_tracks, _ = pl_module.enformer_predict_1d(enformer_inputs)
+                        enformer_pred_tracks = pl_module.enformer_predict_1d(enformer_inputs)
                     else:
-                        enformer_pred_tracks, _ = pl_module.enformer_predict_1d(inputs)
+                        enformer_pred_tracks = pl_module.enformer_predict_1d(inputs)
                     enformer_pred_tracks = enformer_pred_tracks[0].permute(1, 0).detach().cpu().numpy()
                     os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
                     # visualize 1D tracks as shaded plots
@@ -571,7 +571,7 @@ class TrainModule(pl.LightningModule):
 
         # 2. Define the Adapter Class
         class HESCHeadAdapterWrapper(torch.nn.Module):
-            def __init__(self, enformer, hesc_indices, species='human', load_pretrained=True):
+            def __init__(self, enformer, hesc_indices, species='human', load_pretrained=False):
                 super().__init__()
                 self.enformer = enformer
                 self.hesc_indices = hesc_indices
@@ -711,7 +711,7 @@ class TrainModule(pl.LightningModule):
         condition_vec = condition_vec.float() if condition_vec is not None else None
         return inputs, mat, target_1d_tracks, condition_vec
     
-    def enformer_predict_1d(self, inputs, seq_vocab_len=5):
+    def enformer_predict_1d(self, inputs, seq_vocab_size=5):
         """
         Use enformer to predict 1D input tracks using a sliding window approach.
         Maps each Enformer bin (896 total) to its corresponding 128bp region.
@@ -721,23 +721,28 @@ class TrainModule(pl.LightningModule):
         
         pred_1d_inputs = torch.zeros((inputs.shape[0], inputs.shape[1], len(self.hparams.input_features)), device=inputs.device)
         pred_1d_counts = torch.zeros((inputs.shape[0], inputs.shape[1], len(self.hparams.input_features)), device=inputs.device)
-        
         seq_length = inputs.shape[1]
         step_size = ENFORMER_CONTEXT_LENGTH // 2  # 50% overlap
         
         total_poisson_loss = 0.0
         num_windows = 0
         
-        for start in range(0, seq_length, step_size):
+        for start in range(-ENFORMER_TRIM, seq_length, step_size):
             end = start + ENFORMER_CONTEXT_LENGTH
             
             if start + ENFORMER_TRIM >= seq_length:
                 break
             
-            # Extract input
-            input_seq = inputs[:, start:end, :4]
+            # Extract input (handle negative start for left-edge coverage)
+            input_start = max(start, 0)
+            input_seq = inputs[:, input_start:end, :4]
             
-            # Pad if needed
+            # Pad left if window extends before sequence start
+            if start < 0:
+                left_pad = -start
+                input_seq = F.pad(input_seq, (0, 0, left_pad, 0), "constant", 0.25)
+            
+            # Pad right if needed
             if input_seq.shape[1] < ENFORMER_CONTEXT_LENGTH:
                 pad_size = ENFORMER_CONTEXT_LENGTH - input_seq.shape[1]
                 input_seq = F.pad(input_seq, (0, 0, 0, pad_size), "constant", 0.25)
@@ -764,37 +769,10 @@ class TrainModule(pl.LightningModule):
                 # Broadcast this bin's prediction across its 128bp region
                 pred_1d_inputs[:, bin_start:bin_end, :] += outputs[:, bin_idx:bin_idx+1, :].expand(-1, bin_end - bin_start, -1)
                 pred_1d_counts[:, bin_start:bin_end, :] += 1.0
-            
-            # Calculate loss (downsample targets to match Enformer resolution)
-            target_start = global_out_start
-            target_end = min(global_out_start + ENFORMER_TARGET_LEN, seq_length)
-            
-            if target_end > target_start:
-                target_tracks = inputs[:, target_start:target_end, seq_vocab_len:]
-                
-                # Downsample targets by averaging over 128bp bins
-                target_bins = (target_end - target_start) // DOWNSAMPLE_FACTOR
-                if target_bins > 0:
-                    target_downsampled = F.avg_pool1d(
-                        target_tracks.permute(0, 2, 1),
-                        kernel_size=DOWNSAMPLE_FACTOR,
-                        stride=DOWNSAMPLE_FACTOR
-                    ).permute(0, 2, 1)
-                    
-                    # Match sizes
-                    min_bins = min(outputs.shape[1], target_downsampled.shape[1])
-                    chunk_loss = poisson_loss(
-                        outputs[:, :min_bins, :],
-                        torch.expm1(target_downsampled[:, :min_bins, :])
-                    )
-                    total_poisson_loss += chunk_loss
-                    num_windows += 1
         
         # Average overlapping predictions
         pred_1d_inputs = pred_1d_inputs / pred_1d_counts.clamp(min=1.0)
-        avg_poisson_loss = total_poisson_loss / max(num_windows, 1) if num_windows > 0 else 0.0
-        
-        return pred_1d_inputs, avg_poisson_loss
+        return pred_1d_inputs
 
     
     def training_step(self, batch, batch_idx):
@@ -805,9 +783,10 @@ class TrainModule(pl.LightningModule):
             # use enformer to predict 1D input tracks using a sliding window approach
             
             if self.hparams.dataset_assembly2 is not None:
-                pred_1d_inputs, avg_poisson_loss = self.enformer_predict_1d(inputs, seq_vocab_len=10)
-                pred_1d_inputs_other_strand, avg_poisson_loss_other = self.enformer_predict_1d(inputs[:, :, 5:])
-                pred_1d_inputs = (pred_1d_inputs + pred_1d_inputs_other_strand) / 2.0
+                pred_1d_inputs_other_strand = self.enformer_predict_1d(inputs[:, :, 5:])
+                pred_1d_inputs = self.enformer_predict_1d(inputs)
+                
+                pred_1d_inputs = (pred_1d_inputs + pred_1d_inputs_other_strand)
                 pred_1d_inputs = torch.log1p(pred_1d_inputs)
                 enformer_loss = torch.nn.functional.mse_loss(pred_1d_inputs.float(), inputs[:, :, 10:10 + pred_1d_inputs.shape[2]].float()).mean()
                 inputs = torch.cat([inputs[:, :, :10], pred_1d_inputs], dim=2)
@@ -861,15 +840,18 @@ class TrainModule(pl.LightningModule):
             outputs = self(inputs)
 
         if self.hparams.dataset_assembly2 is not None:
-            pred_1d_inputs, avg_poisson_loss = self.enformer_predict_1d(inputs, seq_vocab_len=10)
-            pred_1d_inputs_other_strand, avg_poisson_loss_other = self.enformer_predict_1d(inputs[:, :, 5:])
-            pred_1d_inputs = (pred_1d_inputs + pred_1d_inputs_other_strand) / 2.0
-            avg_poisson_loss = (avg_poisson_loss + avg_poisson_loss_other) / 2.0
+            pred_1d_inputs_other_strand = self.enformer_predict_1d(inputs[:, :, 5:])
+            pred_1d_inputs = self.enformer_predict_1d(inputs)
+            
+            pred_1d_inputs = (pred_1d_inputs + pred_1d_inputs_other_strand)
+            enformer_loss = torch.nn.functional.mse_loss(pred_1d_inputs.float(), inputs[:, :, 10:10 + pred_1d_inputs.shape[2]].float()).mean()
+            self.log('val_enformer_poisson_loss', enformer_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         else:
-            pred_1d_inputs, avg_poisson_loss = self.enformer_predict_1d(inputs)
+            pred_1d_inputs = self.enformer_predict_1d(inputs)
+            enformer_loss = torch.nn.functional.mse_loss(pred_1d_inputs.float(), inputs[:, :, 5:5 + pred_1d_inputs.shape[2]].float()).mean()
         pred_1d_inputs = F.interpolate(pred_1d_inputs.permute(0, 2, 1), size=(self.hparams.target_1d_size), mode='linear', align_corners=True).permute(0, 2, 1)
-        self.log('val_enformer_poisson_loss', avg_poisson_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        total_loss += avg_poisson_loss
+        self.log('val_enformer_poisson_loss', enformer_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        total_loss += enformer_loss
 
         loss_hic = 0.0
         if self.hparams.predict_hic:
