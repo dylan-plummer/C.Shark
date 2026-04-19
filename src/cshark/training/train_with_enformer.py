@@ -65,6 +65,7 @@ class VizCallback(Callback):
         self.h3k4me1 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
         self.h3k27me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
         self.rad21 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/rad21.bw" for celltype in celltypes}
+        self.h3k9me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k9me3.bw" for celltype in celltypes}
 
     def on_train_start(self, trainer, pl_module):
         print("Saving ground truth loci for reference")
@@ -144,6 +145,8 @@ class VizCallback(Callback):
                             other_paths.append(self.h3k27me3[celltype])
                         elif feature == 'rad21':
                             other_paths.append(self.rad21[celltype])
+                        elif feature == 'h3k9me3':
+                            other_paths.append(self.h3k9me3[celltype])
                     #other_paths = [self.h3k27me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
                         start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2,
@@ -791,7 +794,7 @@ class TrainModule(pl.LightningModule):
                 enformer_loss = torch.nn.functional.mse_loss(pred_1d_inputs.float(), inputs[:, :, 10:10 + pred_1d_inputs.shape[2]].float()).mean()
                 inputs = torch.cat([inputs[:, :, :10], pred_1d_inputs], dim=2)
             else:
-                pred_1d_inputs, avg_poisson_loss = self.enformer_predict_1d(inputs)
+                pred_1d_inputs = self.enformer_predict_1d(inputs)
                 pred_1d_inputs = torch.log1p(pred_1d_inputs)
                 inputs = torch.cat([inputs[:, :, :5], pred_1d_inputs], dim=2)
                 enformer_loss = torch.nn.functional.mse_loss(pred_1d_inputs.float(), inputs[:, :, 5:5 + pred_1d_inputs.shape[2]].float()).mean()
