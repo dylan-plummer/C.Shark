@@ -525,7 +525,7 @@ class TrainModule(pl.LightningModule):
                             'h3k36me3': 'CHIP:H3K36me3:129 ES-E14',
                             'h3k27me3': 'CHIP:H3K27me3:C57BL/6 ES-Bruce4'}
             species = 'mouse'
-        self.enformer = self.get_hESC_wrapper(species=species)
+        self.enformer = self.get_hESC_wrapper(species=species, target_tracks=args.output_features)
 
     @staticmethod
     def get_target_indices(species: str, target: str) -> np.ndarray:
