@@ -347,7 +347,7 @@ class TrainModule(pl.LightningModule):
                           'h3k9me3': 'CHIP:H3K9me3:H1-hESC',
                           'h3k36me3': 'CHIP:H3K36me3:H1-hESC',
                           'h3k27me3': 'CHIP:H3K27me3:H1-hESC'}
-        self.enformer = self.get_hESC_wrapper(target_tracks=['ctcf', 'atac', 'h3k27ac', 'h3k4me3', 'h3k9me3', 'h3k36me3', 'h3k27me3'])
+        self.enformer = self.get_hESC_wrapper(target_tracks=args.enformer_tracks if args.enformer_tracks is not None else ['ctcf', 'atac', 'h3k27ac', 'h3k4me3', 'h3k9me3', 'h3k36me3', 'h3k27me3'])
 
     def enformer_predict_1d(self, inputs):
         """

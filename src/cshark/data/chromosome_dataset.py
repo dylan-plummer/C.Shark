@@ -2,6 +2,7 @@ import sys
 import os
 import random
 import pickle
+import re
 import pandas as pd
 import numpy as np
 
@@ -69,6 +70,7 @@ class ChromosomeDataset(Dataset):
         else:
             self.seq2 = None
         self.genomic_features = feature_list
+        self.feature_strand_pairs = self.build_strand_pair_map(self.genomic_features)
         self.mat = data_feature.HiCFeature(path = f'{celltype_root}/hic_matrix/{chr_name}.npz')
 
         if self.predict_1d:
@@ -77,6 +79,7 @@ class ChromosomeDataset(Dataset):
                  raise ValueError("predict_1d is True, but target_track_list is empty.")
         else:
             self.target_tracks = []
+        self.target_track_strand_pairs = self.build_strand_pair_map(self.target_tracks)
 
         self.omit_regions = omit_regions
         self.check_length() # Check data length
@@ -110,8 +113,8 @@ class ChromosomeDataset(Dataset):
                 seq2 = self.gaussian_noise(seq2, 0.1)
                 chance = np.random.rand(1)
                 if chance < 0.5:
-                    seq, features, mat, target_1d_tracks = self.reverse(seq, features, mat, target_1d_tracks)
-                    seq2, features, mat, target_1d_tracks = self.reverse(seq2, features, mat, target_1d_tracks)
+                    seq, features, mat, target_1d_tracks = self.reverse(seq, features, mat, target_1d_tracks, chance=1.0)
+                    seq2 = self.reverse_sequence(seq2)
             else:
                 seq, features, mat, target_1d_tracks = self.reverse(seq, features, mat, target_1d_tracks)
         if self.seq2:
@@ -126,6 +129,58 @@ class ChromosomeDataset(Dataset):
         outputs = inputs + noise
         return outputs
 
+    def build_strand_pair_map(self, feature_list):
+        strand_groups = {}
+        strand_pairs = {}
+        for idx, feature in enumerate(feature_list):
+            track_name = os.path.splitext(os.path.basename(feature.path))[0]
+            parsed_name = self.parse_strand_track_name(track_name)
+            if parsed_name is None:
+                continue
+            base_name, strand = parsed_name
+            strand_groups.setdefault(base_name, {})[strand] = idx
+
+        for group in strand_groups.values():
+            if 'plus' in group and 'minus' in group:
+                plus_idx = group['plus']
+                minus_idx = group['minus']
+                strand_pairs[plus_idx] = minus_idx
+                strand_pairs[minus_idx] = plus_idx
+        return strand_pairs
+
+    def parse_strand_track_name(self, track_name):
+        match = re.match(r'^(.*?)[._-](plus|minus|pos|neg|forward|reverse|fwd|rev|sense|antisense)$', track_name, re.IGNORECASE)
+        if match is None:
+            return None
+
+        strand_aliases = {
+            'plus': 'plus',
+            'pos': 'plus',
+            'forward': 'plus',
+            'fwd': 'plus',
+            'sense': 'plus',
+            'minus': 'minus',
+            'neg': 'minus',
+            'reverse': 'minus',
+            'rev': 'minus',
+            'antisense': 'minus',
+        }
+        base_name = match.group(1)
+        strand = strand_aliases[match.group(2).lower()]
+        return base_name, strand
+
+    def swap_strand_specific_tracks(self, track_values, strand_pairs):
+        if not track_values or not strand_pairs:
+            return track_values
+
+        swapped_tracks = list(track_values)
+        for idx, paired_idx in strand_pairs.items():
+            swapped_tracks[idx] = track_values[paired_idx]
+        return swapped_tracks
+
+    def reverse_sequence(self, seq):
+        return self.complement(np.flip(seq, 0).copy())
+
     def reverse(self, seq, features, mat, target_1d_tracks, chance = 0.5):
         '''
         Reverse sequence and matrix
@@ -137,6 +192,9 @@ class ChromosomeDataset(Dataset):
             target_1d_tracks_r = [np.flip(item, 0).copy() for item in target_1d_tracks] # n
             mat_r = np.flip(mat, [0, 1]).copy() # n x n
 
+            features_r = self.swap_strand_specific_tracks(features_r, self.feature_strand_pairs)
+            target_1d_tracks_r = self.swap_strand_specific_tracks(target_1d_tracks_r, self.target_track_strand_pairs)
+
             # Complementary sequence
             seq_r = self.complement(seq_r)
         else:
@@ -146,7 +204,7 @@ class ChromosomeDataset(Dataset):
             target_1d_tracks_r = target_1d_tracks
         return seq_r, features_r, mat_r, target_1d_tracks_r
 
-    def complement(self, seq, chance = 0.5):
+    def complement(self, seq, chance = 1.0):
         '''
         Complimentary sequence
         '''

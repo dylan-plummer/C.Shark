@@ -22,9 +22,13 @@ from cshark.inference.utils.enformer_utils import (
 )
 from cshark.inference.utils.hierarchical_utils import (
     load_hierarchical_rad21_predictor,
+    load_hierarchical_predictor,
     hierarchical_rad21_update,
+    hierarchical_universal_update,
     write_tmp_hierarchical_rad21_bigwig,
     write_tmp_hierarchical_delta_bigwig,
+    write_tmp_hierarchical_bigwigs,
+    fill_missing_tracks,
 )
 from cshark.inference.tracks_files import get_tracks
 
@@ -79,7 +83,7 @@ def main():
     parser.add_argument('--start', dest='start', type=int,
                         help='Starting point for prediction (width is 2097152 bp which is the input window size)', required=False)
     parser.add_argument('--model', dest='model_path', 
-                        help='Path to the model checkpoint', required=True)
+                        help='Path to the model checkpoint (not required when --hierarchical-only is used)', required=False)
     parser.add_argument('--resolution', dest='resolution', type=int, default=8192,
                       help='Resolution (bp) of output Hi-C matrix')
     parser.add_argument('--resolution-1d', dest='resolution_1d', type=int, default=256,
@@ -206,11 +210,13 @@ def main():
 
     # Hierarchical RAD21 predictor params
     parser.add_argument('--hierarchical-model', dest='hierarchical_model_path', type=str, default=None,
-                        help='Path to a hierarchical training checkpoint (.ckpt) that contains '
-                             'an inner RAD21 predictor. When provided, any perturbation to '
-                             'the 7 input tracks (CTCF, ATAC, histones) is propagated through '
-                             'the RAD21 predictor and the resulting delta is applied to the '
-                             'experimental RAD21 track before Hi-C prediction.')
+                        help='Path to a hierarchical prediction checkpoint (.ckpt). '
+                             'Can be either a legacy RAD21-only inner model or a '
+                             'CSharkUniversalModel. When a universal model is provided, '
+                             'all tracks required by the Hi-C model but not supplied by '
+                             'the user are predicted automatically (CTCF and ATAC are '
+                             'required inputs). Diagnostic bigwigs are written for every '
+                             'predicted track.')
     parser.add_argument('--hierarchical-delta-mode', dest='hierarchical_delta_mode', type=str,
                         default='multiplicative',
                         help='How to apply the hierarchical RAD21 delta to the experimental '
@@ -220,7 +226,21 @@ def main():
                         help='Cap on fold-change values when using hierarchical RAD21 '
                              'multiplicative mode (default: 10.0)')
 
+    parser.add_argument('--hierarchical-only', dest='hierarchical_only',
+                        action='store_true',
+                        help='Only run hierarchical model predictions and output bigwigs. '
+                             'Skip the Hi-C prediction step entirely. Useful when the '
+                             'dataset is missing tracks required by the Hi-C predictor '
+                             'but you still want hierarchical 1D track predictions.')
+
     args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
+
+    if not args.hierarchical_only and args.model_path is None:
+        parser.error('--model is required unless --hierarchical-only is used')
+    if args.hierarchical_only and args.hierarchical_model_path is None:
+        parser.error('--hierarchical-model is required when --hierarchical-only is used')
+    if args.hierarchical_only and args.out_file is None and args.start is None:
+        parser.error('--out-file is required when --hierarchical-only is used for full chromosome prediction')
 
     os.makedirs('tmp', exist_ok=True)
 
@@ -354,52 +374,121 @@ def main():
             results_1d[f'{track_name}_KO'] = []
         bins_1d = []
 
-        # Load hierarchical RAD21 model if requested for full chromosome prediction
+        # Load hierarchical model if requested for full chromosome prediction
         hierarchical_rad21_model = None
         hierarchical_rad21_idx = None
         use_hierarchical = args.hierarchical_model_path is not None
+        hierarchical_only = getattr(args, 'hierarchical_only', False)
+        use_hierarchical_universal = False
         rad21_other_idx_hier = None
+        hier_info_fullchrom = None
+        hic_all_tracks_fc = None
+        hic_input_tracks_fc = None
+        if hierarchical_only:
+            use_hierarchical = True
         if use_hierarchical:
-            hierarchical_rad21_model, hierarchical_all_tracks, hierarchical_rad21_idx, _hier_device = (
-                load_hierarchical_rad21_predictor(args.hierarchical_model_path)
-            )
-            other_track_names_hier = input_track_names[channel_offset:]
-            if 'rad21' not in other_track_names_hier:
-                print('[hierarchical] Warning: rad21 not in input tracks for full-chrom prediction. Disabling hierarchical.')
-                use_hierarchical = False
+            hier_info_fullchrom = load_hierarchical_predictor(args.hierarchical_model_path)
+            if hier_info_fullchrom['is_universal']:
+                use_hierarchical_universal = True
+                if model_path is not None:
+                    hic_all_tracks_fc, _, hic_input_tracks_fc = model_utils.get_all_track_names(model_path)
+                    hierarchical_predict_tracks = [t for t in hic_all_tracks_fc
+                                                   if t not in input_track_names
+                                                   and t in hier_info_fullchrom['target_track_names']]
+                else:
+                    # hierarchical-only without Hi-C model: predict all tracks the
+                    # hierarchical model can predict that the user didn't provide
+                    hic_all_tracks_fc = hier_info_fullchrom['target_track_names']
+                    hierarchical_predict_tracks = [t for t in hier_info_fullchrom['target_track_names']
+                                                   if t not in input_track_names]
+                print(f'[hierarchical-universal] Full-chrom tracks to predict: {hierarchical_predict_tracks}')
+                if not hierarchical_predict_tracks:
+                    print('[hierarchical-universal] No tracks to predict. Disabling hierarchical.')
+                    use_hierarchical = False
+                    if hierarchical_only:
+                        print('[hierarchical-only] ERROR: No tracks to predict. All target tracks already provided.')
+                        sys.exit(1)
             else:
-                rad21_other_idx_hier = other_track_names_hier.index('rad21')
+                hierarchical_rad21_model = hier_info_fullchrom['model']
+                hierarchical_all_tracks = hier_info_fullchrom['all_track_names']
+                hierarchical_rad21_idx = hier_info_fullchrom['rad21_idx']
+                other_track_names_hier = input_track_names[channel_offset:]
+                if 'rad21' not in other_track_names_hier:
+                    if hierarchical_only:
+                        # In hierarchical-only mode with legacy model, rad21 won't be in
+                        # inputs (that's the point). We still run the predictor.
+                        print('[hierarchical-only] rad21 not in inputs; will predict from available tracks.')
+                    else:
+                        print('[hierarchical] Warning: rad21 not in input tracks for full-chrom prediction. Disabling hierarchical.')
+                        use_hierarchical = False
+                else:
+                    rad21_other_idx_hier = other_track_names_hier.index('rad21')
         results_hierarchical = {'chrom': [], 'start': [], 'end': []}
-        if use_hierarchical:
+        if use_hierarchical and not use_hierarchical_universal:
             for col in ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc', 'rad21_perturbed', 'rad21_experimental']:
                 results_hierarchical[col] = []
+        # Universal hierarchical results collector
+        results_hier_universal = {'chrom': [], 'start': [], 'end': []}
+        if use_hierarchical_universal:
+            for tname in hierarchical_predict_tracks:
+                for suffix in ['_WT_pred', '_KO_pred', '_delta', '_fc', '_perturbed', '_experimental']:
+                    results_hier_universal[f'{tname}{suffix}'] = []
 
         for start, end in tqdm(zip(starts, ends), desc='Predicting', total=len(starts)):
             #print(f'Start: {start}, End: {end}')
             seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
                     start, seq_path, ctcf_path, atac_path, other_feats, window = window)
-            num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
-            if atac_region is None:
-                num_genomic_features -= 1
-            if ctcf_region is None:
-                num_genomic_features -= 1
-            pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
-                                                  num_genomic_features=num_genomic_features, mat_size=image_scale, 
-                                                  diploid=diploid,
-                                                  target_1d_length=int(window / args.resolution_1d),
-                                                  mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
-                                                  recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
-                                                  other_feat_names=input_track_names[2:])
-            pred_before = pred_before_output['hic']
-            pred_before_1d = pred_before_output['1d']
 
-            # Save WT copies for hierarchical RAD21 delta computation
+            # Fill missing tracks using universal model if available
+            # (skip when hierarchical-only: we don't need to pad inputs for the Hi-C model)
+            if use_hierarchical and hier_info_fullchrom is not None and hier_info_fullchrom['is_universal'] and not hierarchical_only:
+                other_regions, _, _itn, num_genomic_features = fill_missing_tracks(
+                    model_path, args.hierarchical_model_path,
+                    seq_region, ctcf_region, atac_region,
+                    other_regions, other_feats, input_track_names,
+                    hier_info=hier_info_fullchrom,
+                    verbose=False,
+                    hic_input_tracks=hic_input_tracks_fc,
+                )
+                # Use returned names for this iteration (matches other_regions order)
+                _active_names = _itn
+            else:
+                num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
+                if atac_region is None:
+                    num_genomic_features -= 1
+                if ctcf_region is None:
+                    num_genomic_features -= 1
+                num_genomic_features -= 1
+                _active_names = input_track_names
+
+            # Run WT Hi-C prediction (skip in hierarchical-only mode)
+            pred_before = None
+            pred_before_1d = None
+            if not hierarchical_only:
+                pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
+                                                      num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                                      diploid=diploid,
+                                                      target_1d_length=int(window / args.resolution_1d),
+                                                      mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
+                                                      recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
+                                                      other_feat_names=_active_names[2:])
+                pred_before = pred_before_output['hic']
+                pred_before_1d = pred_before_output['1d']
+
+            # Save WT copies for hierarchical delta computation
             if use_hierarchical:
                 seq_region_wt = seq_region.copy()
                 ctcf_region_wt = ctcf_region.copy() if ctcf_region is not None else None
                 atac_region_wt = atac_region.copy() if atac_region is not None else None
                 other_regions_wt = [r.copy() for r in other_regions] if other_regions is not None else None
-                experimental_rad21 = other_regions[rad21_other_idx_hier].copy()
+                if not use_hierarchical_universal:
+                    if rad21_other_idx_hier is not None:
+                        experimental_rad21 = other_regions[rad21_other_idx_hier].copy()
+                    else:
+                        # hierarchical-only without rad21 in inputs: use a
+                        # dummy so the model can still run in 'prediction' mode
+                        _ref_len = seq_region.shape[0] if seq_region is not None else window
+                        experimental_rad21 = np.zeros(_ref_len, dtype=np.float32)
 
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(chr_name, start, 
                 start, window, seq_region, ctcf_region, 
@@ -407,39 +496,60 @@ def main():
                 channel_offset=channel_offset,
                 ko_mode=ko_mode, peak_height=args.peak_height)
 
-            # Apply hierarchical RAD21 update if enabled
+            # Apply hierarchical update if enabled
             hierarchical_results_window = None
+            hier_universal_results_window = None
             if use_hierarchical and other_regions is not None:
-                other_regions, hierarchical_results_window = hierarchical_rad21_update(
-                    hierarchical_rad21_model, hierarchical_rad21_idx,
-                    seq_region_wt, ctcf_region_wt, atac_region_wt, other_regions_wt,
-                    seq_region, ctcf_region, atac_region, other_regions,
-                    experimental_rad21,
-                    input_track_names,
-                    delta_mode=args.hierarchical_delta_mode,
-                    cap=args.hierarchical_delta_cap,
-                    window=window,
-                )
+                if use_hierarchical_universal:
+                    other_regions, hier_universal_results_window = hierarchical_universal_update(
+                        hier_info_fullchrom,
+                        seq_region_wt, ctcf_region_wt, atac_region_wt, other_regions_wt,
+                        seq_region, ctcf_region, atac_region, other_regions,
+                        _active_names,
+                        hic_all_tracks_fc,
+                        user_provided_names=input_track_names,
+                        delta_mode=args.hierarchical_delta_mode,
+                        cap=args.hierarchical_delta_cap,
+                        window=window,
+                    )
+                else:
+                    # When rad21 isn't in inputs (hierarchical-only), force
+                    # 'prediction' mode so we just use the raw model output.
+                    _hier_delta_mode = args.hierarchical_delta_mode
+                    if rad21_other_idx_hier is None:
+                        _hier_delta_mode = 'prediction'
+                    other_regions, hierarchical_results_window = hierarchical_rad21_update(
+                        hierarchical_rad21_model, hierarchical_rad21_idx,
+                        seq_region_wt, ctcf_region_wt, atac_region_wt, other_regions_wt,
+                        seq_region, ctcf_region, atac_region, other_regions,
+                        experimental_rad21,
+                        _active_names,
+                        delta_mode=_hier_delta_mode,
+                        cap=args.hierarchical_delta_cap,
+                        window=window,
+                    )
 
-            pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
-                                           num_genomic_features=num_genomic_features, mat_size=image_scale, 
-                                           diploid=diploid,
-                                           target_1d_length=int(window / args.resolution_1d),
-                                           mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
-                                           recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
-                                           other_feat_names=input_track_names[2:])
-            pred = pred_output['hic']
-            pred_1d = pred_output['1d']
-            write_tmp_cooler(pred, chr_name, start, res=res)
-            write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool', res=res)
-            # load coolers to populate res dict
-            pred_cooler = cooler.Cooler('tmp/tmp.cool')
-            pred_before_cooler = cooler.Cooler('tmp/tmp_before.cool')
-            wt_pixels = pred_before_cooler.pixels()[:]
-            ko_pixels = pred_cooler.pixels()[:]
-            wt_pixels = wt_pixels.rename(columns={'count': 'WT'})
-            ko_pixels = ko_pixels.rename(columns={'count': 'KO'})
-            if args.oe_norm:
+            # Run KO Hi-C prediction and collect results (skip in hierarchical-only mode)
+            if not hierarchical_only:
+                pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
+                                               num_genomic_features=num_genomic_features, mat_size=image_scale, 
+                                               diploid=diploid,
+                                               target_1d_length=int(window / args.resolution_1d),
+                                               mid_hidden=mid_hidden, seq_filter_size=args.seq_filter_size, 
+                                               recon_1d=args.recon_1d, undo_log=args.hic_log_transform,
+                                               other_feat_names=_active_names[2:])
+                pred = pred_output['hic']
+                pred_1d = pred_output['1d']
+                write_tmp_cooler(pred, chr_name, start, res=res)
+                write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool', res=res)
+                # load coolers to populate res dict
+                pred_cooler = cooler.Cooler('tmp/tmp.cool')
+                pred_before_cooler = cooler.Cooler('tmp/tmp_before.cool')
+                wt_pixels = pred_before_cooler.pixels()[:]
+                ko_pixels = pred_cooler.pixels()[:]
+                wt_pixels = wt_pixels.rename(columns={'count': 'WT'})
+                ko_pixels = ko_pixels.rename(columns={'count': 'KO'})
+            if not hierarchical_only and args.oe_norm:
                 # load ground truth matrix for this region
                 ctcf_filename = os.path.basename(ctcf_path).split('.')[0]
                 hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace(f'/{ctcf_filename}.bw', '') + f'/{chr_name}.npz'
@@ -463,16 +573,17 @@ def main():
                 results['WT'].extend(pixels['WT'].tolist())
                 results['KO'].extend(pixels['KO'].tolist())
                 results['exp_WT'].extend(pixels['exp_WT'].tolist())
-            else:
+            elif not hierarchical_only:
                 # merge the two cooler files with WT and KO keys
                 pixels = wt_pixels.merge(ko_pixels, how='outer')
                 results['a1'].extend(pixels['bin1_id'].tolist())
                 results['a2'].extend(pixels['bin2_id'].tolist())
                 results['WT'].extend(pixels['WT'].tolist())
                 results['KO'].extend(pixels['KO'].tolist())
-            bins.append(pred_before_cooler.bins()[:])
+            if not hierarchical_only:
+                bins.append(pred_before_cooler.bins()[:])
 
-            if pred_1d is not None:
+            if not hierarchical_only and pred_1d is not None:
                 res_ratio = int(pred_1d.shape[0] / pred.shape[0])
                 res_1d = int(res / res_ratio)
                 bin_range = np.int32(np.linspace(start, start + window - res_1d, pred_1d.shape[0]))
@@ -484,8 +595,8 @@ def main():
                     results_1d[f'{track_name}_KO'].extend(pred_1d[:, track_idx].tolist())
                 bins_1d.append(pred_before_cooler.bins()[:])
 
-            # Collect hierarchical RAD21 results for this window
-            if use_hierarchical and hierarchical_results_window is not None:
+            # Collect hierarchical results for this window
+            if use_hierarchical and not use_hierarchical_universal and hierarchical_results_window is not None:
                 wt_pred_h = hierarchical_results_window['wt_pred']
                 ko_pred_h = hierarchical_results_window['ko_pred']
                 delta_h = hierarchical_results_window['delta']
@@ -519,29 +630,42 @@ def main():
                     )
                 results_hierarchical['rad21_experimental'].extend(exp_rad21_h.tolist())
 
-        # convert the res dict to a dataframe
-        res_df = pd.DataFrame(results).groupby(['a1', 'a2']).mean().reset_index()
-        res_df['a1'] = 'A_' + res_df['a1'].astype(str)
-        res_df['a2'] = 'A_' + res_df['a2'].astype(str)
-        print(res_df)
-        # convert the bins list to a dataframe
-        bins_df = pd.concat(bins, ignore_index=True).drop_duplicates().reset_index(drop=True)
-        bins_df['bin_id'] = 'A_' + bins_df.index.astype(str)
-        print(bins_df) 
-        chr_map = bins_df.set_index('bin_id')['chrom'].to_dict()
-        start_map = bins_df.set_index('bin_id')['start'].to_dict()
-        end_map = bins_df.set_index('bin_id')['end'].to_dict()
-        res_df['chrom1'] = res_df['a1'].map(chr_map)
-        res_df['chrom2'] = res_df['a2'].map(chr_map)
-        res_df['start1'] = res_df['a1'].map(start_map)
-        res_df['start2'] = res_df['a2'].map(start_map)
-        res_df['end1'] = res_df['a1'].map(end_map)
-        res_df['end2'] = res_df['a2'].map(end_map)
-        res_df = res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO'] + (['exp_WT'] if args.oe_norm else [])]
-        # remove predictions outside region
-        if region is not None:
-            res_df = res_df[(res_df['start1'] >= region_start) & (res_df['end1'] <= region_end) & (res_df['start2'] >= region_start) & (res_df['end2'] <= region_end)]
-            bins_df = bins_df[(bins_df['start'] >= region_start) & (bins_df['end'] <= region_end)]
+            # Collect universal hierarchical results for this window
+            if use_hierarchical_universal and hier_universal_results_window:
+                # Use the first predicted track to determine bin count
+                first_track = next(iter(hier_universal_results_window))
+                wt_pred_ref = hier_universal_results_window[first_track]['wt_pred']
+                n_bins_h = len(wt_pred_ref)
+                res_h = int(window / n_bins_h)
+                bin_range_h = np.int32(np.linspace(start, start + window - res_h, n_bins_h))
+                results_hier_universal['chrom'].extend([chr_name] * n_bins_h)
+                results_hier_universal['start'].extend(bin_range_h.tolist())
+                results_hier_universal['end'].extend((bin_range_h + res_h).tolist())
+                for tname, info in hier_universal_results_window.items():
+                    for key, suffix in [('wt_pred', '_WT_pred'), ('ko_pred', '_KO_pred'),
+                                        ('delta', '_delta'), ('fold_change', '_fc'),
+                                        ('perturbed', '_perturbed')]:
+                        vals = info[key]
+                        if len(vals) != n_bins_h:
+                            vals = np.interp(
+                                np.linspace(0, 1, n_bins_h),
+                                np.linspace(0, 1, len(vals)),
+                                vals,
+                            )
+                        results_hier_universal[f'{tname}{suffix}'].extend(vals.tolist())
+                    # Experimental
+                    exp = info.get('experimental')
+                    if exp is not None:
+                        if len(exp) != n_bins_h:
+                            exp = np.interp(
+                                np.linspace(0, 1, n_bins_h),
+                                np.linspace(0, 1, len(exp)),
+                                exp,
+                            )
+                        results_hier_universal[f'{tname}_experimental'].extend(exp.tolist())
+                    else:
+                        results_hier_universal[f'{tname}_experimental'].extend([0.0] * n_bins_h)
+
         # make sure outfile directory exists
         try:
             os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
@@ -550,116 +674,143 @@ def main():
         # make sure outfile ends with .tsv
         if not args.out_file.endswith('.tsv'):
             args.out_file += '.tsv'
-        # output the dataframe to a bed file
-        res_df.to_csv(args.out_file, sep='\t', header=True, index=False)
-        bins_df.to_csv(args.out_file.replace('.tsv', '_bins.tsv'), sep='\t', header=False, index=False)
 
-        # also create cooler file for full chromosome
-        wt_cooler_df = res_df[['a1', 'a2', 'WT']].rename(columns={'WT': 'count'})
-        ko_cooler_df = res_df[['a1', 'a2', 'KO']].rename(columns={'KO': 'count'})
-        if args.oe_norm:
-            exp_wt_cooler_df = res_df[['a1', 'a2', 'exp_WT']].rename(columns={'exp_WT': 'count'})
-            exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
-            exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
-            exp_wt_cooler_df = exp_wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
-            cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT.cool'), bins_cooler_df, exp_wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
-        # map a1 and a2 to bin_ids
-        wt_cooler_df['bin1_id'] = wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
-        wt_cooler_df['bin2_id'] = wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
-        ko_cooler_df['bin1_id'] = ko_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
-        ko_cooler_df['bin2_id'] = ko_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
-        
-        wt_cooler_df = wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
-        ko_cooler_df = ko_cooler_df[['bin1_id', 'bin2_id', 'count']]
-        
-        bins_cooler_df = bins_df[['chrom', 'start', 'end']].copy()
-        bins_cooler_df.reset_index(inplace=True)
-        cooler.create_cooler(args.out_file.replace('.tsv', '_WT.cool'), bins_cooler_df, wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
-        cooler.create_cooler(args.out_file.replace('.tsv', '_KO.cool'), bins_cooler_df, ko_cooler_df, ordered=True, dtypes={'count': 'float32'})
-        
-        if args.oe_norm:
-            dist_norm_res_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')))
-            dist_norm_res_KO_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_KO.cool')))
-            dist_norm_res_exp_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_exp_WT.cool')))
-            dist_norm_res_df = dist_norm_res_WT_df.merge(dist_norm_res_KO_df, on=['bin1_id', 'bin2_id'], suffixes=('_WT', '_KO'))
-            dist_norm_res_df = dist_norm_res_df.merge(dist_norm_res_exp_WT_df, on=['bin1_id', 'bin2_id'])
-            dist_norm_res_df = dist_norm_res_df.rename(columns={'count': 'exp_WT'})
-            # rename to just WT and KO
-            dist_norm_res_df = dist_norm_res_df.rename(columns={'count_WT': 'WT', 'count_KO': 'KO'})
-            # add back a1, a2, chrom1, chrom2, start1, start2, end1, end2
-            dist_norm_res_df['a1'] = res_df['a1']
-            dist_norm_res_df['a2'] = res_df['a2']
-            # round the WT and KO columns to 3 decimal places
-            dist_norm_res_df['WT'] = dist_norm_res_df['WT'].round(3)
-            dist_norm_res_df['KO'] = dist_norm_res_df['KO'].round(3)
-            dist_norm_res_df['exp_WT'] = dist_norm_res_df['exp_WT'].round(3)
-            # add chrom start and end columns
-            dist_norm_res_df['chrom1'] = chr_name
-            dist_norm_res_df['chrom2'] = chr_name
-            dist_norm_res_df['start1'] = dist_norm_res_df['a1'].map(start_map)
-            dist_norm_res_df['end1'] = dist_norm_res_df['a1'].map(end_map)
-            dist_norm_res_df['start2'] = dist_norm_res_df['a2'].map(start_map)
-            dist_norm_res_df['end2'] = dist_norm_res_df['a2'].map(end_map)
-            dist_norm_res_df.dropna(inplace=True)
-            dist_norm_res_df = dist_norm_res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO', 'exp_WT']]
-            # set start and end to int
-            dist_norm_res_df['start1'] = dist_norm_res_df['start1'].astype(int)
-            dist_norm_res_df['end1'] = dist_norm_res_df['end1'].astype(int)
-            dist_norm_res_df['start2'] = dist_norm_res_df['start2'].astype(int)
-            dist_norm_res_df['end2'] = dist_norm_res_df['end2'].astype(int)
-            dist_norm_res_df = dist_norm_res_df[(dist_norm_res_df['WT'] >= 1e-4) | (dist_norm_res_df['KO'] >= 1e-4) | (dist_norm_res_df['exp_WT'] >= 1e-4)].reset_index(drop=True)
-            dist_norm_res_df.to_csv(args.out_file.replace('.tsv', '_oe_norm.tsv'), sep='\t', header=True, index=False)
-
-            # write oe normalized coolers
-            cooler.create_cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool'), bins_cooler_df, dist_norm_res_WT_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
-            cooler.create_cooler(args.out_file.replace('.tsv', '_KO_oe_norm.cool'), bins_cooler_df, dist_norm_res_KO_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
-            cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT_oe_norm.cool'), bins_cooler_df, dist_norm_res_exp_WT_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
-
-            # visualize a sample heatmap in raw and oe for checking
-            fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-            mat = cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
-            axs[0].imshow(mat, cmap='Reds')
-            axs[0].set_title('Raw Hi-C Heatmap (WT)')
-            mat_oe = cooler.Cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
-            axs[1].imshow(mat_oe, cmap='Reds')
-            axs[1].set_title('OE Normalized Hi-C Heatmap (WT)')
-            mat_true_oe = cooler.Cooler(args.out_file.replace('.tsv', '_exp_WT_oe_norm.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
-            axs[2].imshow(mat_true_oe, cmap='Reds')
-            axs[2].set_title('OE Normalized Hi-C Heatmap (Expected WT)')
-            plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_WT_oe_check.png'), dpi=300)
-            plt.close(fig)
-
-
-        if pred_1d is not None:
-            # convert the res_1d dict to a dataframe
-            res_1d_df = pd.DataFrame(results_1d).groupby(['chrom', 'start', 'end']).mean().reset_index()
-            print(res_1d_df)
-            track_col_names = []
-            for track_name in track_names:
-                track_col_names.append(f'{track_name}_WT')
-                track_col_names.append(f'{track_name}_KO')
-            res_1d_df = res_1d_df[['chrom', 'start', 'end'] + track_col_names]
+        # ---------------------------------------------------------------
+        # Hi-C output: TSV, coolers, scatter plots (skip in hierarchical-only mode)
+        # ---------------------------------------------------------------
+        if not hierarchical_only:
+            # convert the res dict to a dataframe
+            res_df = pd.DataFrame(results).groupby(['a1', 'a2']).mean().reset_index()
+            res_df['a1'] = 'A_' + res_df['a1'].astype(str)
+            res_df['a2'] = 'A_' + res_df['a2'].astype(str)
+            print(res_df)
+            # convert the bins list to a dataframe
+            bins_df = pd.concat(bins, ignore_index=True).drop_duplicates().reset_index(drop=True)
+            bins_df['bin_id'] = 'A_' + bins_df.index.astype(str)
+            print(bins_df) 
+            chr_map = bins_df.set_index('bin_id')['chrom'].to_dict()
+            start_map = bins_df.set_index('bin_id')['start'].to_dict()
+            end_map = bins_df.set_index('bin_id')['end'].to_dict()
+            res_df['chrom1'] = res_df['a1'].map(chr_map)
+            res_df['chrom2'] = res_df['a2'].map(chr_map)
+            res_df['start1'] = res_df['a1'].map(start_map)
+            res_df['start2'] = res_df['a2'].map(start_map)
+            res_df['end1'] = res_df['a1'].map(end_map)
+            res_df['end2'] = res_df['a2'].map(end_map)
+            res_df = res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO'] + (['exp_WT'] if args.oe_norm else [])]
             # remove predictions outside region
             if region is not None:
-                res_1d_df = res_1d_df[(res_1d_df['start'] >= region_start) & (res_1d_df['end'] <= region_end)]
-            res_1d_df.to_csv(args.out_file.replace('.tsv', '_1d.bed'), sep='\t', header=True, index=False)
+                res_df = res_df[(res_df['start1'] >= region_start) & (res_df['end1'] <= region_end) & (res_df['start2'] >= region_start) & (res_df['end2'] <= region_end)]
+                bins_df = bins_df[(bins_df['start'] >= region_start) & (bins_df['end'] <= region_end)]
+            # output the dataframe to a bed file
+            res_df.to_csv(args.out_file, sep='\t', header=True, index=False)
+            bins_df.to_csv(args.out_file.replace('.tsv', '_bins.tsv'), sep='\t', header=False, index=False)
 
-            # plot the 1d WT and KO overlaid
-            if len(track_names) > 0:
-                fig, axs = plt.subplots(len(track_names), 1, figsize=(5, 5 * len(track_names)))
-                for track_idx, track_name in enumerate(track_names):
-                    sns.scatterplot(data=res_1d_df, x=f'{track_name}_WT', y=f'{track_name}_KO', alpha=0.5, ax=axs[track_idx])
-                    axs[track_idx].set_xlabel(f'{track_name} WT')
-                    axs[track_idx].set_ylabel(f'{track_name} KO')
-                    axs[track_idx].set_title(f'{track_name} WT vs KO')
-                    # make the axes equal
-                    axs[track_idx].set_aspect('equal', adjustable='box')
+            # also create cooler file for full chromosome
+            wt_cooler_df = res_df[['a1', 'a2', 'WT']].rename(columns={'WT': 'count'})
+            ko_cooler_df = res_df[['a1', 'a2', 'KO']].rename(columns={'KO': 'count'})
+            if args.oe_norm:
+                exp_wt_cooler_df = res_df[['a1', 'a2', 'exp_WT']].rename(columns={'exp_WT': 'count'})
+                exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
+                exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+                exp_wt_cooler_df = exp_wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
+                cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT.cool'), bins_cooler_df, exp_wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
+            # map a1 and a2 to bin_ids
+            wt_cooler_df['bin1_id'] = wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
+            wt_cooler_df['bin2_id'] = wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+            ko_cooler_df['bin1_id'] = ko_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
+            ko_cooler_df['bin2_id'] = ko_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+            
+            wt_cooler_df = wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
+            ko_cooler_df = ko_cooler_df[['bin1_id', 'bin2_id', 'count']]
+            
+            bins_cooler_df = bins_df[['chrom', 'start', 'end']].copy()
+            bins_cooler_df.reset_index(inplace=True)
+            cooler.create_cooler(args.out_file.replace('.tsv', '_WT.cool'), bins_cooler_df, wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
+            cooler.create_cooler(args.out_file.replace('.tsv', '_KO.cool'), bins_cooler_df, ko_cooler_df, ordered=True, dtypes={'count': 'float32'})
+            
+            if args.oe_norm:
+                dist_norm_res_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')))
+                dist_norm_res_KO_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_KO.cool')))
+                dist_norm_res_exp_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_exp_WT.cool')))
+                dist_norm_res_df = dist_norm_res_WT_df.merge(dist_norm_res_KO_df, on=['bin1_id', 'bin2_id'], suffixes=('_WT', '_KO'))
+                dist_norm_res_df = dist_norm_res_df.merge(dist_norm_res_exp_WT_df, on=['bin1_id', 'bin2_id'])
+                dist_norm_res_df = dist_norm_res_df.rename(columns={'count': 'exp_WT'})
+                # rename to just WT and KO
+                dist_norm_res_df = dist_norm_res_df.rename(columns={'count_WT': 'WT', 'count_KO': 'KO'})
+                # add back a1, a2, chrom1, chrom2, start1, start2, end1, end2
+                dist_norm_res_df['a1'] = res_df['a1']
+                dist_norm_res_df['a2'] = res_df['a2']
+                # round the WT and KO columns to 3 decimal places
+                dist_norm_res_df['WT'] = dist_norm_res_df['WT'].round(3)
+                dist_norm_res_df['KO'] = dist_norm_res_df['KO'].round(3)
+                dist_norm_res_df['exp_WT'] = dist_norm_res_df['exp_WT'].round(3)
+                # add chrom start and end columns
+                dist_norm_res_df['chrom1'] = chr_name
+                dist_norm_res_df['chrom2'] = chr_name
+                dist_norm_res_df['start1'] = dist_norm_res_df['a1'].map(start_map)
+                dist_norm_res_df['end1'] = dist_norm_res_df['a1'].map(end_map)
+                dist_norm_res_df['start2'] = dist_norm_res_df['a2'].map(start_map)
+                dist_norm_res_df['end2'] = dist_norm_res_df['a2'].map(end_map)
+                dist_norm_res_df.dropna(inplace=True)
+                dist_norm_res_df = dist_norm_res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO', 'exp_WT']]
+                # set start and end to int
+                dist_norm_res_df['start1'] = dist_norm_res_df['start1'].astype(int)
+                dist_norm_res_df['end1'] = dist_norm_res_df['end1'].astype(int)
+                dist_norm_res_df['start2'] = dist_norm_res_df['start2'].astype(int)
+                dist_norm_res_df['end2'] = dist_norm_res_df['end2'].astype(int)
+                dist_norm_res_df = dist_norm_res_df[(dist_norm_res_df['WT'] >= 1e-4) | (dist_norm_res_df['KO'] >= 1e-4) | (dist_norm_res_df['exp_WT'] >= 1e-4)].reset_index(drop=True)
+                dist_norm_res_df.to_csv(args.out_file.replace('.tsv', '_oe_norm.tsv'), sep='\t', header=True, index=False)
 
-                plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_1d_scatter.png'), dpi=300)
+                # write oe normalized coolers
+                cooler.create_cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool'), bins_cooler_df, dist_norm_res_WT_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
+                cooler.create_cooler(args.out_file.replace('.tsv', '_KO_oe_norm.cool'), bins_cooler_df, dist_norm_res_KO_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
+                cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT_oe_norm.cool'), bins_cooler_df, dist_norm_res_exp_WT_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
+
+                # visualize a sample heatmap in raw and oe for checking
+                fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+                mat = cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
+                axs[0].imshow(mat, cmap='Reds')
+                axs[0].set_title('Raw Hi-C Heatmap (WT)')
+                mat_oe = cooler.Cooler(args.out_file.replace('.tsv', '_WT_oe_norm.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
+                axs[1].imshow(mat_oe, cmap='Reds')
+                axs[1].set_title('OE Normalized Hi-C Heatmap (WT)')
+                mat_true_oe = cooler.Cooler(args.out_file.replace('.tsv', '_exp_WT_oe_norm.cool')).matrix(balance=False).fetch(f'{chr_name}:30000000-40000000')
+                axs[2].imshow(mat_true_oe, cmap='Reds')
+                axs[2].set_title('OE Normalized Hi-C Heatmap (Expected WT)')
+                plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_WT_oe_check.png'), dpi=300)
                 plt.close(fig)
 
-        # Save hierarchical RAD21 predictions if used
-        if use_hierarchical and len(results_hierarchical['chrom']) > 0:
+            if pred_1d is not None:
+                # convert the res_1d dict to a dataframe
+                res_1d_df = pd.DataFrame(results_1d).groupby(['chrom', 'start', 'end']).mean().reset_index()
+                print(res_1d_df)
+                track_col_names = []
+                for track_name in track_names:
+                    track_col_names.append(f'{track_name}_WT')
+                    track_col_names.append(f'{track_name}_KO')
+                res_1d_df = res_1d_df[['chrom', 'start', 'end'] + track_col_names]
+                # remove predictions outside region
+                if region is not None:
+                    res_1d_df = res_1d_df[(res_1d_df['start'] >= region_start) & (res_1d_df['end'] <= region_end)]
+                res_1d_df.to_csv(args.out_file.replace('.tsv', '_1d.bed'), sep='\t', header=True, index=False)
+
+                # plot the 1d WT and KO overlaid
+                if len(track_names) > 0:
+                    fig, axs = plt.subplots(len(track_names), 1, figsize=(5, 5 * len(track_names)))
+                    for track_idx, track_name in enumerate(track_names):
+                        sns.scatterplot(data=res_1d_df, x=f'{track_name}_WT', y=f'{track_name}_KO', alpha=0.5, ax=axs[track_idx])
+                        axs[track_idx].set_xlabel(f'{track_name} WT')
+                        axs[track_idx].set_ylabel(f'{track_name} KO')
+                        axs[track_idx].set_title(f'{track_name} WT vs KO')
+                        # make the axes equal
+                        axs[track_idx].set_aspect('equal', adjustable='box')
+
+                    plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_1d_scatter.png'), dpi=300)
+                    plt.close(fig)
+
+        # Save hierarchical RAD21 predictions if used (legacy mode)
+        if use_hierarchical and not use_hierarchical_universal and len(results_hierarchical['chrom']) > 0:
             res_hier_df = pd.DataFrame(results_hierarchical).groupby(['chrom', 'start', 'end']).mean().reset_index()
             print(res_hier_df)
             hier_col_names = ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc', 'rad21_perturbed', 'rad21_experimental']
@@ -673,6 +824,40 @@ def main():
                 res_hier_df[col] = res_hier_df[col].round(4)
             res_hier_df.to_csv(hier_out_path, sep='\t', header=True, index=False)
             print(f'[hierarchical] Saved hierarchical RAD21 predictions to {hier_out_path}')
+
+            # also save a bigwig of the RAD21 predictions for visualization
+            bw_wt_path = args.out_file.replace('.tsv', '_hierarchical_rad21_WT.bw')
+            bw_ko_path = args.out_file.replace('.tsv', '_hierarchical_rad21_KO.bw')
+            bw_perturbed_path = args.out_file.replace('.tsv', '_hierarchical_rad21_perturbed.bw')
+            bw_experimental_path = args.out_file.replace('.tsv', '_hierarchical_rad21_experimental.bw')
+            bw_delta_path = args.out_file.replace('.tsv', '_hierarchical_rad21_delta.bw')
+
+            import pyBigWig
+            # Get chromosome header from an existing bigwig
+            rad21_bw_base = input_track_paths[input_track_names.index('rad21')] if 'rad21' in input_track_names else input_track_paths[0]
+            _bw_ref = pyBigWig.open(rad21_bw_base)
+            header_list = list(_bw_ref.chroms().items())
+            _bw_ref.close()
+
+            # Sort by start position for proper bigwig writing
+            hier_sorted = res_hier_df.sort_values('start').reset_index(drop=True)
+
+            for bw_out_path, col_name in [
+                (bw_wt_path, 'rad21_WT_pred'),
+                (bw_ko_path, 'rad21_KO_pred'),
+                (bw_perturbed_path, 'rad21_perturbed'),
+                (bw_experimental_path, 'rad21_experimental'),
+                (bw_delta_path, 'rad21_delta'),
+            ]:
+                out_bw = pyBigWig.open(bw_out_path, 'w')
+                out_bw.addHeader(header_list)
+                chroms = hier_sorted['chrom'].tolist()
+                starts = hier_sorted['start'].astype(int).tolist()
+                ends = hier_sorted['end'].astype(int).tolist()
+                values = hier_sorted[col_name].astype(float).tolist()
+                out_bw.addEntries(chroms, starts, ends=ends, values=values)
+                out_bw.close()
+                print(f'[hierarchical] Wrote {bw_out_path}')
 
             # Plot scatter and distribution diagnostics
             fig, axs = plt.subplots(1, 3, figsize=(15, 5))
@@ -691,15 +876,77 @@ def main():
             plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_hierarchical_rad21.png'), dpi=300)
             plt.close(fig)
 
+        # Save universal hierarchical predictions if used
+        if use_hierarchical_universal and len(results_hier_universal['chrom']) > 0:
+            res_uni_df = pd.DataFrame(results_hier_universal).groupby(['chrom', 'start', 'end']).mean().reset_index()
+            print(res_uni_df)
+            uni_col_names = [c for c in res_uni_df.columns if c not in ['chrom', 'start', 'end']]
+            res_uni_df = res_uni_df[['chrom', 'start', 'end'] + uni_col_names]
+            if region is not None:
+                res_uni_df = res_uni_df[(res_uni_df['start'] >= region_start) & (res_uni_df['end'] <= region_end)]
+            for col in uni_col_names:
+                res_uni_df[col] = res_uni_df[col].round(4)
+            uni_out_path = args.out_file.replace('.tsv', '_hierarchical_universal.bed')
+            res_uni_df.to_csv(uni_out_path, sep='\t', header=True, index=False)
+            print(f'[hierarchical-universal] Saved predictions to {uni_out_path}')
+
+            # Write per-track bigwigs
+            import pyBigWig
+            bw_base = input_track_paths[0] if len(input_track_paths) > 0 else None
+            if bw_base is not None:
+                _bw_ref = pyBigWig.open(bw_base)
+                header_list = list(_bw_ref.chroms().items())
+                _bw_ref.close()
+
+                uni_sorted = res_uni_df.sort_values('start').reset_index(drop=True)
+                for col_name in uni_col_names:
+                    bw_out_path = args.out_file.replace('.tsv', f'_hierarchical_{col_name}.bw')
+                    out_bw = pyBigWig.open(bw_out_path, 'w')
+                    out_bw.addHeader(header_list)
+                    chroms = uni_sorted['chrom'].tolist()
+                    starts_bw = uni_sorted['start'].astype(int).tolist()
+                    ends_bw = uni_sorted['end'].astype(int).tolist()
+                    values_bw = uni_sorted[col_name].astype(float).tolist()
+                    out_bw.addEntries(chroms, starts_bw, ends=ends_bw, values=values_bw)
+                    out_bw.close()
+                    print(f'[hierarchical-universal] Wrote {bw_out_path}')
+
+            # Plot per-track scatter diagnostics
+            for tname in hierarchical_predict_tracks:
+                wt_col = f'{tname}_WT_pred'
+                ko_col = f'{tname}_KO_pred'
+                delta_col = f'{tname}_delta'
+                fc_col = f'{tname}_fc'
+                if wt_col in res_uni_df.columns and ko_col in res_uni_df.columns:
+                    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+                    sns.scatterplot(data=res_uni_df, x=wt_col, y=ko_col, alpha=0.5, ax=axs[0])
+                    axs[0].set_xlabel(f'{tname} WT pred')
+                    axs[0].set_ylabel(f'{tname} KO pred')
+                    axs[0].set_title(f'Hierarchical {tname} WT vs KO')
+                    axs[0].set_aspect('equal', adjustable='box')
+                    if delta_col in res_uni_df.columns:
+                        axs[1].hist(res_uni_df[delta_col], bins=50, alpha=0.7)
+                        axs[1].set_xlabel('Delta (KO - WT)')
+                        axs[1].set_title(f'{tname} Delta Distribution')
+                    if fc_col in res_uni_df.columns:
+                        axs[2].hist(res_uni_df[fc_col], bins=50, alpha=0.7)
+                        axs[2].set_xlabel('Fold Change (KO / WT)')
+                        axs[2].set_title(f'{tname} FC Distribution')
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(args.output_path,
+                                f'{args.outname}{args.celltype}_{args.chr_name}_hierarchical_{tname}.png'), dpi=300)
+                    plt.close(fig)
+
         # plot a simple scatter plot of the WT vs KO
-        fig, ax = plt.subplots(figsize=(10, 10))
-        sns.scatterplot(data=res_df, x='WT', y='KO', ax=ax)
-        ax.set_xlabel('WT')
-        ax.set_ylabel('KO')
-        ax.set_title('WT vs KO')
-        
-        plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_scatter.png'), dpi=300)
-        plt.close(fig)
+        if not hierarchical_only:
+            fig, ax = plt.subplots(figsize=(10, 10))
+            sns.scatterplot(data=res_df, x='WT', y='KO', ax=ax)
+            ax.set_xlabel('WT')
+            ax.set_ylabel('KO')
+            ax.set_title('WT vs KO')
+            
+            plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_scatter.png'), dpi=300)
+            plt.close(fig)
 
 
 #def gradient_attribution(seq_region, ctcf_region, atac_region, model_path, other_regions):
@@ -769,6 +1016,48 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         for other_feat in other_feats:
             input_track_names.append(os.path.basename(other_feat).split('.')[0])
             input_track_paths.append(other_feat)
+
+    # Fill in missing tracks using the universal hierarchical model
+    if hierarchical_model_path is not None:
+        other_regions, other_feats, input_track_names, num_genomic_features = fill_missing_tracks(
+            model_path, hierarchical_model_path,
+            seq_region, ctcf_region, atac_region,
+            other_regions, other_feats, input_track_names,
+            bigwig_log=bigwig_log_transform,
+        )
+        # Write predicted tracks as bigwig files so plotting code can read them
+        _ref_bw_path = ctcf_path or atac_path
+        if _ref_bw_path and other_feats:
+            import pyBigWig
+            _ref_bw = pyBigWig.open(_ref_bw_path)
+            _header = list(_ref_bw.chroms().items())
+            _ref_bw.close()
+            os.makedirs('tmp', exist_ok=True)
+            for _pi, _pf in enumerate(other_feats):
+                if not _pf.startswith('predicted_'):
+                    continue
+                _out_path = os.path.join('tmp', _pf)
+                # other_regions values are in log1p space; convert to linear for bigwig
+                _signal = np.expm1(np.clip(other_regions[_pi], 0, None)).astype(float)
+                _bw_out = pyBigWig.open(_out_path, 'w')
+                _bw_out.addHeader(_header)
+                _n = len(_signal)
+                _chroms = [chr_name] * _n
+                _starts = [int(start + i) for i in range(_n)]
+                _ends = [int(start + i + 1) for i in range(_n)]
+                _vals = [float(v) for v in _signal]
+                _bw_out.addEntries(_chroms, _starts, ends=_ends, values=_vals)
+                _bw_out.close()
+                other_feats[_pi] = _out_path
+
+        input_track_paths = []
+        if ctcf_path is not None:
+            input_track_paths.append(ctcf_path)
+        if atac_path is not None:
+            input_track_paths.append(atac_path)
+        for of in (other_feats if other_feats else []):
+            input_track_paths.append(of)
+
     # do baseline prediction for comparison
     pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                           num_genomic_features=num_genomic_features, mat_size=image_scale, 
@@ -791,14 +1080,17 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     atac_region_wt = atac_region.copy() if atac_region is not None else None
     other_regions_wt = [r.copy() for r in other_regions] if other_regions is not None else None
 
-    # Pre-load hierarchical RAD21 model if requested
+    # Pre-load hierarchical model if requested
     hierarchical_rad21_model = None
     hierarchical_rad21_idx = None
     hierarchical_all_tracks = None
+    hier_info = None
     if hierarchical_model_path is not None:
-        hierarchical_rad21_model, hierarchical_all_tracks, hierarchical_rad21_idx, _hier_device = (
-            load_hierarchical_rad21_predictor(hierarchical_model_path)
-        )
+        hier_info = load_hierarchical_predictor(hierarchical_model_path)
+        if not hier_info['is_universal']:
+            hierarchical_rad21_model = hier_info['model']
+            hierarchical_all_tracks = hier_info['all_track_names']
+            hierarchical_rad21_idx = hier_info['rad21_idx']
 
     if len(input_track_paths) == 0:
         print('No input tracks found. Using plot_bigwigs only.')
@@ -893,7 +1185,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 enf_species = 'mouse' if 'mm10' in (assembly or '') else 'human'
                 if enformer_model_path is not None:
                     enformer_model, enformer_track_names, enf_device = load_enformer_from_checkpoint(
-                        enformer_model_path)
+                        enformer_model_path, enformer_tracks=enf_target_tracks)
                 else:
                     enformer_model, enformer_track_names, enf_device = load_enformer_pretrained(
                         target_tracks=enf_target_tracks, species=enf_species)
@@ -915,6 +1207,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     seq_region, ctcf_region, atac_region, other_regions,
                     input_track_names,
                     enformer_model, enformer_track_names,
+                    perturb_track_names=enf_target_tracks,
                     variant_positions=enf_var_positions, alt_bases=enf_alt_bases,
                     ko_start=enf_ko_start, ko_end=enf_ko_end, alt_sequence=enf_alt_seq,
                     window=window,
@@ -924,8 +1217,9 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 print('[enformer_seq] Enformer delta applied to experimental tracks.')
 
                 # Write enformer-modified bigwig tracks for plotting
+                perturbed_track_names = set(enformer_results.get('perturbed_track_names', []))
                 for enf_idx, enf_name in enumerate(enformer_results['enformer_track_names']):
-                    if enf_name in input_track_names:
+                    if enf_name in perturbed_track_names and enf_name in input_track_names:
                         track_path = input_track_paths[input_track_names.index(enf_name)]
                         write_tmp_enformer_ko_bigwig(
                             track_path,
@@ -1035,12 +1329,34 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     ko_mode=[knockout_mode], peak_height=ko_height,
                     left_del_pad=left_del_pad, right_del_pad=right_del_pad)
 
-    # --- Hierarchical RAD21 update ---
+    # --- Hierarchical update ---
     # If a hierarchical model is provided, propagate the perturbation through
-    # the RAD21 predictor and apply the predicted delta to the experimental
-    # RAD21 track before running the main Hi-C prediction.
-    if hierarchical_rad21_model is not None and other_regions is not None:
-        # Find experimental RAD21 in other_regions (WT copy)
+    # the predictor and apply the predicted delta to the experimental
+    # tracks before running the main Hi-C prediction.
+    # Supports both legacy RAD21-only models and CSharkUniversalModel.
+    universal_hier_results = None
+    if hier_info is not None and hier_info['is_universal'] and other_regions is not None:
+        # Universal model path
+        hic_all_tracks, _, _ = model_utils.get_all_track_names(model_path)
+        other_regions, universal_hier_results = hierarchical_universal_update(
+            hier_info,
+            seq_region_wt, ctcf_region_wt, atac_region_wt, other_regions_wt,
+            seq_region, ctcf_region, atac_region, other_regions,
+            input_track_names,
+            hic_all_tracks,
+            delta_mode=hierarchical_delta_mode,
+            cap=hierarchical_delta_cap,
+            window=window,
+        )
+        # Write diagnostic bigwigs for all predicted tracks
+        base_bw = input_track_paths[0] if len(input_track_paths) > 0 else None
+        if base_bw is not None and universal_hier_results:
+            write_tmp_hierarchical_bigwigs(
+                base_bw, universal_hier_results,
+                chr_name, start, window=window,
+            )
+    elif hierarchical_rad21_model is not None and other_regions is not None:
+        # Legacy RAD21-only path
         other_offset = 0
         if 'ctcf' in input_track_names:
             other_offset += 1
@@ -1081,9 +1397,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             print('[hierarchical] Warning: rad21 not in input tracks, skipping hierarchical update.')
 
     # Prediction
-    rad21_hier = other_regions[rad21_other_idx] if hierarchical_rad21_model is not None and other_regions is not None and 'rad21' in other_track_names else None
-    if rad21_hier is not None:
-        print(np.min(rad21_hier), np.mean(rad21_hier), np.max(rad21_hier))
+    # Prediction
     pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path, other_regions, 
                                    num_genomic_features=num_genomic_features, mat_size=image_scale, 
                                       target_1d_length=int(window / args.resolution_1d),
@@ -1304,19 +1618,28 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 # write additional tracks for each input track
                 for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                     track_name = os.path.basename(track_path).split('.')[0]
+                    canonical_track_name = track_name.lower()
+                    if canonical_track_name.startswith('predicted_'):
+                        canonical_track_name = canonical_track_name[len('predicted_'):]
                     track_max = None
-                    if os.path.exists(track_path):
+                    display_track_path = track_path
+                    if hierarchical_active and canonical_track_name == 'rad21':
+                        if os.path.exists('tmp/rad21_hierarchical_perturbed.bw'):
+                            display_track_path = 'tmp/rad21_hierarchical_perturbed.bw'
+                        elif os.path.exists('tmp/rad21_hierarchical_ko_pred.bw'):
+                            display_track_path = 'tmp/rad21_hierarchical_ko_pred.bw'
+                    if os.path.exists(display_track_path):
                         f.write(f'[{track_name}]\n')
-                        f.write(f'file = {track_path}\n')
+                        f.write(f'file = {display_track_path}\n')
                         f.write('height = 2\n')
                         f.write(f'color = {colors[track_i]}\n')
                         f.write(f'title = {track_name}\n')
                         f.write('min_value = 0\n')
-                        track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                        track_max = get_axis_range_from_bigwig(display_track_path, chr_name, start)
                         if track_max is not None:
                             f.write(f'max_value = {track_max}\n')
                         f.write('number_of_bins = 512\n\n')
-                        if track_name.lower() == 'ctcf' and ctcf_motif_p is not None:
+                        if canonical_track_name == 'ctcf' and ctcf_motif_p is not None:
                             #if 'ctcf_motif.bed' in os.listdir('tmp'):
                             f.write('[CTCF motif]\n')
                             #f.write('file = tmp/ctcf_motif.bed\n')
@@ -1348,7 +1671,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
-                        if hierarchical_active and track_name.lower() == 'rad21':
+                        if hierarchical_active and canonical_track_name == 'rad21':
                             # Hierarchical RAD21 WT prediction
                             if os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
                                 f.write('[RAD21 Hier. WT pred]\n')
@@ -1383,8 +1706,13 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
                     if track_name in plot_pred_bigwigs:
+                        pred_ko_file = f'tmp/{track_name}_pred_KO.bw'
+                        if (not plot_pred_log2fc and hierarchical_active and
+                            track_name.lower() == 'rad21' and
+                            os.path.exists('tmp/rad21_hierarchical_ko_pred.bw')):
+                            pred_ko_file = 'tmp/rad21_hierarchical_ko_pred.bw'
                         f.write(f'[{track_name} pred]\n')
-                        f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
+                        f.write(f'file = {pred_ko_file}\n')
                         f.write('height = 2\n')
                         if plot_pred_log2fc:
                             f.write(f'title = {track_name} log2FC\n')
@@ -1465,23 +1793,32 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     # write additional tracks for each input track
                     for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                         track_name = os.path.basename(track_path).split('.')[0]
+                        canonical_track_name = track_name.lower()
+                        if canonical_track_name.startswith('predicted_'):
+                            canonical_track_name = canonical_track_name[len('predicted_'):]
                         track_max = None
-                        if os.path.exists(track_path):
+                        display_track_path = track_path
+                        if hierarchical_active and canonical_track_name == 'rad21' and os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
+                            display_track_path = 'tmp/rad21_hierarchical_wt_pred.bw'
+                        if os.path.exists(display_track_path):
                             f.write(f'[{track_name}]\n')
-                            f.write(f'file = {track_path}\n')
+                            f.write(f'file = {display_track_path}\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
                             f.write(f'title = {track_name}\n')
                             f.write('min_value = 0\n')
-                            track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                            track_max = get_axis_range_from_bigwig(display_track_path, chr_name, start)
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
                        
                         if track_name in plot_pred_bigwigs:
+                            pred_wt_file = f'tmp/{track_name}_pred_WT.bw'
+                            if hierarchical_active and track_name.lower() == 'rad21' and os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
+                                pred_wt_file = 'tmp/rad21_hierarchical_wt_pred.bw'
                             #track_max = get_axis_range_from_bigwig(f'tmp/{track_name}_pred_WT.bw', chr_name, start)
                             f.write(f'[{track_name} pred]\n')
-                            f.write(f'file = tmp/{track_name}_pred_WT.bw\n')
+                            f.write(f'file = {pred_wt_file}\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
                             f.write(f'title = {track_name} pred\n')
@@ -1489,7 +1826,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
-                        if hierarchical_active and track_name.lower() == 'rad21':
+                        if hierarchical_active and canonical_track_name == 'rad21':
                             if os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
                                 f.write('[RAD21 Hier. WT pred]\n')
                                 f.write('file = tmp/rad21_hierarchical_wt_pred.bw\n')
@@ -1531,15 +1868,24 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     if '[Genes]' in line:
                         for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                             track_name = os.path.basename(track_path).split('.')[0]
+                            canonical_track_name = track_name.lower()
+                            if canonical_track_name.startswith('predicted_'):
+                                canonical_track_name = canonical_track_name[len('predicted_'):]
                             track_max = None
-                            if os.path.exists(track_path):
+                            display_track_path = track_path
+                            if hierarchical_active and canonical_track_name == 'rad21':
+                                if os.path.exists('tmp/rad21_hierarchical_perturbed.bw'):
+                                    display_track_path = 'tmp/rad21_hierarchical_perturbed.bw'
+                                elif os.path.exists('tmp/rad21_hierarchical_ko_pred.bw'):
+                                    display_track_path = 'tmp/rad21_hierarchical_ko_pred.bw'
+                            if os.path.exists(display_track_path):
                                 f.write(f'[{track_name}]\n')
-                                f.write(f'file = {track_path}\n')
+                                f.write(f'file = {display_track_path}\n')
                                 f.write('height = 2\n')
                                 f.write(f'color = {colors[track_i]}\n')
                                 f.write(f'title = {track_name}\n')
                                 f.write('min_value = 0\n')
-                                track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                                track_max = get_axis_range_from_bigwig(display_track_path, chr_name, start)
                                 if track_max is not None:
                                     f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
@@ -1565,7 +1911,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     f.write('min_value = -0.5\n')
                                     f.write('max_value = 0.5\n')
                                     f.write('number_of_bins = 512\n\n')
-                                if hierarchical_active and track_name.lower() == 'rad21':
+                                if hierarchical_active and canonical_track_name == 'rad21':
                                     # Hierarchical RAD21 delta
                                     if os.path.exists('tmp/rad21_hierarchical_delta.bw'):
                                         f.write('[RAD21 Hier. Delta]\n')
@@ -1589,8 +1935,13 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                             f.write(f'max_value = {track_max}\n')
                                         f.write('number_of_bins = 512\n\n')
                             if track_name in plot_pred_bigwigs:
+                                pred_ko_file = f'tmp/{track_name}_pred_KO.bw'
+                                if (not plot_pred_log2fc and hierarchical_active and
+                                    track_name.lower() == 'rad21' and
+                                    os.path.exists('tmp/rad21_hierarchical_ko_pred.bw')):
+                                    pred_ko_file = 'tmp/rad21_hierarchical_ko_pred.bw'
                                 f.write(f'[{track_name} pred]\n')
-                                f.write(f'file = tmp/{track_name}_pred_KO.bw\n')
+                                f.write(f'file = {pred_ko_file}\n')
                                 f.write('height = 2\n')
                                 if plot_pred_log2fc:
                                     f.write(f'title = {track_name} log2FC\n')

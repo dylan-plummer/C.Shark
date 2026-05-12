@@ -248,7 +248,7 @@ def load_enformer_pretrained(target_tracks=None, species='human',
     return wrapper, resolved_names, device
 
 
-def load_enformer_from_checkpoint(checkpoint_path, device=None):
+def load_enformer_from_checkpoint(checkpoint_path, device=None, enformer_tracks=None):
     """Load a fine-tuned Enformer wrapper from a hierarchical training checkpoint.
 
     The checkpoint is expected to contain a ``TrainModule`` with an ``enformer``
@@ -263,14 +263,45 @@ def load_enformer_from_checkpoint(checkpoint_path, device=None):
     device : torch.device
     """
     import argparse
-    # Lazy import to avoid circular deps at module level
-    from cshark.inference.hierarchical_predict_with_enformer import TrainModule
 
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     hparams = argparse.Namespace(**checkpoint['hyper_parameters'])
+    state_dict = checkpoint.get('state_dict', {})
+
+    requested_track_names = list(enformer_tracks) if enformer_tracks is not None else None
+
+    if any(key.startswith('input_pred_model.') for key in state_dict):
+        # Lazy import to avoid circular deps at module level
+        from cshark.inference.hierarchical_predict_with_enformer import TrainModule
+
+        if not hasattr(hparams, 'enformer_tracks') or hparams.enformer_tracks is None:
+            print(f"[enformer_utils] Warning: 'enformer_tracks' not found in checkpoint hparams. "
+                  f"Setting to default ['ctcf', 'atac'].")
+            hparams.enformer_tracks = ['ctcf', 'atac']
+        track_names = hparams.enformer_tracks
+        checkpoint_kind = 'hierarchical'
+    else:
+        # Standard Enformer fine-tuning checkpoint produced by train_with_enformer.py.
+        from cshark.training.train_with_enformer import TrainModule
+
+        if not hasattr(hparams, 'output_features') or hparams.output_features is None:
+            raise ValueError(
+                f"Checkpoint {checkpoint_path} does not define output_features; "
+                "cannot infer Enformer head outputs."
+            )
+        track_names = list(hparams.output_features)
+        checkpoint_kind = 'fine_tuned'
+
+    if requested_track_names is not None:
+        missing_tracks = [track for track in requested_track_names if track not in track_names]
+        if missing_tracks:
+            raise ValueError(
+                f"Requested --enformer-tracks {missing_tracks} are not present in checkpoint outputs {track_names}."
+            )
+
     module = TrainModule.load_from_checkpoint(checkpoint_path, args=hparams,
                                               map_location=device)
     module.eval()
@@ -279,9 +310,9 @@ def load_enformer_from_checkpoint(checkpoint_path, device=None):
     enformer_wrapper = module.enformer
     enformer_wrapper.eval()
 
-    # Track names are the input features minus 'seq' (Enformer predicts the
-    # non-sequence genomic signals)
-    track_names = [f for f in hparams.input_features if f != 'seq']
+    print(f"[enformer_utils] Loaded {checkpoint_kind} Enformer checkpoint with tracks: {track_names}")
+    if requested_track_names is not None:
+        print(f"[enformer_utils] Restricting perturbation to requested tracks: {requested_track_names}")
 
     return enformer_wrapper, track_names, device
 
@@ -555,6 +586,7 @@ def downsample_to_track_resolution(signal, target_length):
 def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
                           input_track_names,
                           enformer_model, enformer_track_names,
+                          perturb_track_names=None,
                           variant_positions=None, alt_bases=None,
                           ko_start=None, ko_end=None, alt_sequence=None,
                           window=2097152,
@@ -578,6 +610,9 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
     enformer_model : torch.nn.Module
     enformer_track_names : list[str]
         Names of tracks the Enformer model outputs, e.g. ``['ctcf', 'atac', 'h3k27ac', ...]``.
+    perturb_track_names : list[str] or None
+        Subset of ``enformer_track_names`` to apply back onto the experimental
+        tracks. If *None*, apply all Enformer outputs that match input tracks.
     variant_positions : list[int] or None
         0-based positions within *seq_region* for single-base variants.
     alt_bases : list[str] or None
@@ -600,6 +635,8 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
         for diagnostics / plotting.
     """
     num_tracks = len(enformer_track_names)
+    perturb_track_names = (set(perturb_track_names)
+                           if perturb_track_names is not None else None)
 
     # --- 1. Build ALT sequence ---
     alt_seq = seq_region.copy()
@@ -644,6 +681,8 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
             
 
     for enf_idx, enf_name in enumerate(enformer_track_names):
+        if perturb_track_names is not None and enf_name not in perturb_track_names:
+            continue
         if enf_name == 'ctcf' and ctcf_region is not None:
             ctcf_region = _apply_to_track(ctcf_region, enf_idx)
             print(f"[enformer_seq] Applied delta to CTCF track")
@@ -671,6 +710,7 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
         'wt_pred': wt_pred,
         'alt_pred': alt_pred,
         'enformer_track_names': enformer_track_names,
+        'perturbed_track_names': list(perturb_track_names) if perturb_track_names is not None else list(enformer_track_names),
     }
 
     return ctcf_region, atac_region, other_regions, enformer_results
@@ -827,9 +867,23 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
 
     # also write fc bigwig for reference
     fc_out_path = f'tmp/{track_name}_enformer_fold_change.bw'
+    fc_signal = fold_change[:, enformer_track_idx].copy()
+    if len(fc_signal) != window:
+        fc_signal = downsample_to_track_resolution(fc_signal, window)
+    fc_values = list(fc_signal.astype(float))
+    fc_merged_intervals = []
+    prev_pos = positions[0]
+    prev_val = fc_values[0]
+    for i in range(1, len(positions)):
+        if fc_values[i] != prev_val:
+            fc_merged_intervals.append((prev_pos, positions[i], prev_val))
+            prev_pos = positions[i]
+            prev_val = fc_values[i]
+    fc_merged_intervals.append((prev_pos, positions[-1] + 1, prev_val))
+
     out_bw = pyBigWig.open(fc_out_path, 'w')
     out_bw.addHeader(header_list)   
-    for s, e, v in merged_intervals:
+    for s, e, v in fc_merged_intervals:
         out_bw.addEntries([chr_name], [s], [e], [float(v)])
     out_bw.close()
     print(f"[enformer_seq] Wrote enformer fold-change bigwig: {fc_out_path}")
