@@ -589,6 +589,7 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
                           perturb_track_names=None,
                           variant_positions=None, alt_bases=None,
                           ko_start=None, ko_end=None, alt_sequence=None,
+                          alt_seq_region=None,
                           window=2097152,
                           delta_mode='multiplicative', cap=10.0,
                           device=None):
@@ -621,6 +622,10 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
         Region to replace with *alt_sequence* (0-based within seq_region).
     alt_sequence : str or None
         Replacement bases for ``[ko_start, ko_end)``.
+    alt_seq_region : np.ndarray or None
+        Fully materialized ALT sequence to compare against *seq_region*.
+        When provided, it takes precedence over the variant / replacement
+        arguments above.
     window : int
     delta_mode : str
         ``'multiplicative'`` or ``'additive'``.
@@ -639,17 +644,28 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
                            if perturb_track_names is not None else None)
 
     # --- 1. Build ALT sequence ---
-    alt_seq = seq_region.copy()
-    if variant_positions is not None and alt_bases is not None:
-        for pos, alt in zip(variant_positions, alt_bases):
-            alt_seq = apply_variant_to_seq(alt_seq, pos, alt)
-            ref_idx = seq_region[pos, :4].argmax()
-            ref_base = 'ATCG'[ref_idx]
-            print(f"[enformer_seq] Variant at bp {pos}: {ref_base} -> {alt.upper()}")
-    if ko_start is not None and ko_end is not None and alt_sequence is not None:
-        alt_seq = apply_alt_sequence(alt_seq, ko_start, ko_end, alt_sequence)
-        print(f"[enformer_seq] Replaced region [{ko_start}, {ko_end}) with alt sequence "
-              f"(length {len(alt_sequence)})")
+    if alt_seq_region is not None:
+        alt_seq = alt_seq_region.copy()
+        print('[enformer_seq] Using precomputed cumulative ALT sequence')
+    else:
+        alt_seq = seq_region.copy()
+        if variant_positions is not None and alt_bases is not None:
+            for pos, alt in zip(variant_positions, alt_bases):
+                alt_seq = apply_variant_to_seq(alt_seq, pos, alt)
+                ref_idx = seq_region[pos, :4].argmax()
+                ref_base = 'ATCG'[ref_idx]
+                print(f"[enformer_seq] Variant at bp {pos}: {ref_base} -> {alt.upper()}")
+                # print surrounding context for debugging
+                context_start = max(0, pos - 5)
+                context_end = min(len(seq_region), pos + 6)
+                context_seq = ''.join(
+                    'ATCGN'[seq_region[i, :5].argmax()] for i in range(context_start, context_end)
+                )
+                print(f"  Context: {context_seq} (variant at position {pos - context_start})")
+        if ko_start is not None and ko_end is not None and alt_sequence is not None:
+            alt_seq = apply_alt_sequence(alt_seq, ko_start, ko_end, alt_sequence)
+            print(f"[enformer_seq] Replaced region [{ko_start}, {ko_end}) with alt sequence "
+                  f"(length {len(alt_sequence)})")
 
     # --- 2. Compute Enformer delta ---
     fold_change, delta, wt_pred, alt_pred = compute_enformer_delta(

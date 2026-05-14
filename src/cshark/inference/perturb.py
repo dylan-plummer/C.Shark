@@ -1139,106 +1139,53 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             else:
                 deletion_widths.append(1)
 
+    def _resolve_alt_string(raw_alt, rel_start, rel_end, current_seq_region, label):
+        idx_to_base = {0: 'a', 1: 't', 2: 'c', 3: 'g', 4: 'n'}
+        raw_alt_lower = raw_alt.lower()
+        if raw_alt_lower == 'reverse':
+            rc = reverse_complement(current_seq_region[rel_start:rel_end, :])
+            alt_string = ''.join(idx_to_base[row.argmax()] for row in rc)
+            print(f'[{label}] Using reverse-complement of '
+                  f'{chr_name}:{start + rel_start}-{start + rel_end}')
+            return alt_string
+        if raw_alt_lower == 'shuffle':
+            sub = current_seq_region[rel_start:rel_end, :].copy()
+            idxs = np.arange(sub.shape[0])
+            np.random.shuffle(idxs)
+            sub = sub[idxs, :]
+            alt_string = ''.join(idx_to_base[row.argmax()] for row in sub)
+            print(f'[{label}] Using shuffled bases of '
+                  f'{chr_name}:{start + rel_start}-{start + rel_end}')
+            return alt_string
+        if raw_alt_lower == 'random':
+            bases = 'acgt'
+            alt_string = ''.join(np.random.choice(list(bases)) for _ in range(rel_end - rel_start))
+            print(f'[{label}] Using random bases for '
+                  f'{chr_name}:{start + rel_start}-{start + rel_end}')
+            return alt_string
+        return raw_alt
+
     # ---------------------------------------------------------------
     # Apply perturbations
     # ---------------------------------------------------------------
     enformer_seq_active = False
     hierarchical_active = hierarchical_rad21_model is not None
+    pending_track_perturbations = []
 
     if deletion_starts is not None and deletion_widths is not None:
         for ko_idx, (deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height) in enumerate(
                 zip(deletion_starts, deletion_widths, ko_data_types, ko_mode, peak_height)):
+            raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
 
             # --- enformer_seq mode: Enformer delta on tracks ----------
             if knockout_mode == 'enformer_seq':
                 deletion_start -= 1  # convert to 0-based indexing
                 enformer_seq_active = True
-                raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
                 rel_start = deletion_start - start
                 rel_end = rel_start + deletion_width
-
-                # Resolve special --alt keywords into concrete base strings
-                idx_to_base = {0: 'a', 1: 't', 2: 'c', 3: 'g', 4: 'n'}
-                if raw_alt.lower() == 'reverse':
-                    rc = reverse_complement(seq_region[rel_start:rel_end, :])
-                    alt_string = ''.join(idx_to_base[row.argmax()] for row in rc)
-                    print(f'[enformer_seq] Using reverse-complement of '
-                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
-                elif raw_alt.lower() == 'shuffle':
-                    sub = seq_region[rel_start:rel_end, :].copy()
-                    idxs = np.arange(sub.shape[0])
-                    np.random.shuffle(idxs)
-                    sub = sub[idxs, :]
-                    alt_string = ''.join(idx_to_base[row.argmax()] for row in sub)
-                    print(f'[enformer_seq] Using shuffled bases of '
-                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
-                elif raw_alt.lower() == 'random':
-                    bases = 'acgt'
-                    alt_string = ''.join(np.random.choice(list(bases)) for _ in range(deletion_width))
-                    print(f'[enformer_seq] Using random bases for '
-                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
-                else:
-                    alt_string = raw_alt
-
-                print(f'[enformer_seq] Loading Enformer model for sequence-based perturbation...')
-                enf_target_tracks = enformer_tracks if enformer_tracks is not None else ['ctcf', 'atac', 'rad21']
-                enf_species = 'mouse' if 'mm10' in (assembly or '') else 'human'
-                if enformer_model_path is not None:
-                    enformer_model, enformer_track_names, enf_device = load_enformer_from_checkpoint(
-                        enformer_model_path, enformer_tracks=enf_target_tracks)
-                else:
-                    enformer_model, enformer_track_names, enf_device = load_enformer_pretrained(
-                        target_tracks=enf_target_tracks, species=enf_species)
-
-                # Determine how to express the edit to enformer_seq_knockout
-                if len(alt_string) == 1:
-                    # Single-base variant
-                    enf_var_positions = [rel_start]
-                    enf_alt_bases = [alt_string]
-                    enf_ko_start, enf_ko_end, enf_alt_seq = None, None, None
-                else:
-                    # Multi-base replacement
-                    enf_var_positions, enf_alt_bases = None, None
-                    enf_ko_start = rel_start
-                    enf_ko_end = rel_start + len(alt_string)
-                    enf_alt_seq = alt_string
-
-                ctcf_region, atac_region, other_regions, enformer_results = enformer_seq_knockout(
-                    seq_region, ctcf_region, atac_region, other_regions,
-                    input_track_names,
-                    enformer_model, enformer_track_names,
-                    perturb_track_names=enf_target_tracks,
-                    variant_positions=enf_var_positions, alt_bases=enf_alt_bases,
-                    ko_start=enf_ko_start, ko_end=enf_ko_end, alt_sequence=enf_alt_seq,
-                    window=window,
-                    delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
-                    device=enf_device,
-                )
-                print('[enformer_seq] Enformer delta applied to experimental tracks.')
-
-                # Write enformer-modified bigwig tracks for plotting
-                perturbed_track_names = set(enformer_results.get('perturbed_track_names', []))
-                for enf_idx, enf_name in enumerate(enformer_results['enformer_track_names']):
-                    if enf_name in perturbed_track_names and enf_name in input_track_names:
-                        track_path = input_track_paths[input_track_names.index(enf_name)]
-                        write_tmp_enformer_ko_bigwig(
-                            track_path,
-                            enformer_results['fold_change'],
-                            enformer_results['delta'],
-                            enf_idx, enf_name,
-                            chr_name, start, window=window,
-                            delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
-                        )
-                        write_tmp_enformer_delta_bigwig(
-                            track_path,
-                            enformer_results['fold_change'],
-                            enformer_results['delta'],
-                            enf_idx, enf_name,
-                            chr_name, start, window=window,
-                            delta_mode='additive',
-                        )
-
-                # Also apply the alt sequence to the DNA so C.Shark sees it
+                alt_string = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, 'enformer_seq')
+                print(f'[enformer_seq] Queued {len(alt_string)} base(s) at '
+                      f'{chr_name}:{deletion_start} (rel {rel_start}): {alt_string.upper()}')
                 for bp_offset, base in enumerate(alt_string):
                     abs_pos = rel_start + bp_offset
                     if 0 <= abs_pos < seq_region.shape[0]:
@@ -1254,32 +1201,9 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             # --- seq mode: modify the DNA sequence only ---------------
             if knockout_mode == 'seq':
                 deletion_start -= 1  # convert to 0-based indexing
-                raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
                 rel_start = deletion_start - start
                 rel_end = rel_start + deletion_width
-
-                # Resolve special --alt keywords into concrete base strings
-                idx_to_base = {0: 'a', 1: 't', 2: 'c', 3: 'g', 4: 'n'}
-                if raw_alt.lower() == 'reverse':
-                    rc = reverse_complement(seq_region[rel_start:rel_end, :])
-                    alt_string = ''.join(idx_to_base[row.argmax()] for row in rc)
-                    print(f'[seq] Using reverse-complement of '
-                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
-                elif raw_alt.lower() == 'shuffle':
-                    sub = seq_region[rel_start:rel_end, :].copy()
-                    idxs = np.arange(sub.shape[0])
-                    np.random.shuffle(idxs)
-                    sub = sub[idxs, :]
-                    alt_string = ''.join(idx_to_base[row.argmax()] for row in sub)
-                    print(f'[seq] Using shuffled bases of '
-                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
-                elif raw_alt.lower() == 'random':
-                    bases = 'acgt'
-                    alt_string = ''.join(np.random.choice(list(bases)) for _ in range(deletion_width))
-                    print(f'[seq] Using random bases for '
-                          f'{chr_name}:{deletion_start}-{deletion_start + deletion_width}')
-                else:
-                    alt_string = raw_alt
+                alt_string = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, 'seq')
 
                 print(f'[seq] Substituting {len(alt_string)} base(s) at '
                       f'{chr_name}:{deletion_start} (rel {rel_start}): {alt_string.upper()}')
@@ -1321,13 +1245,73 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     seq2_path=seq2_path, window=right_pad_bp,
                     ctcf_log2=ctcf_log2, bigwig_log=bigwig_log_transform)
                 right_del_pad = (right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other)
-            seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(
-                    chr_name, start, deletion_start, deletion_width,
-                    seq_region, ctcf_region, atac_region, other_regions,
-                    ko_data=[ko_data_type], ko_channels=[ko_channel],
-                    channel_offset=channel_offset,
-                    ko_mode=[knockout_mode], peak_height=ko_height,
-                    left_del_pad=left_del_pad, right_del_pad=right_del_pad)
+            pending_track_perturbations.append((
+                deletion_start,
+                deletion_width,
+                ko_data_type,
+                ko_channel,
+                channel_offset,
+                knockout_mode,
+                ko_height,
+                left_del_pad,
+                right_del_pad,
+            ))
+
+    if enformer_seq_active:
+        print('[enformer_seq] Loading Enformer model for cumulative sequence perturbation...')
+        enf_target_tracks = enformer_tracks if enformer_tracks is not None else ['ctcf', 'atac', 'rad21']
+        enf_species = 'mouse' if 'mm10' in (assembly or '') else 'human'
+        if enformer_model_path is not None:
+            enformer_model, enformer_track_names, enf_device = load_enformer_from_checkpoint(
+                enformer_model_path, enformer_tracks=enf_target_tracks)
+        else:
+            enformer_model, enformer_track_names, enf_device = load_enformer_pretrained(
+                target_tracks=enf_target_tracks, species=enf_species)
+
+        ctcf_region, atac_region, other_regions, enformer_results = enformer_seq_knockout(
+            seq_region_wt, ctcf_region, atac_region, other_regions,
+            input_track_names,
+            enformer_model, enformer_track_names,
+            perturb_track_names=enf_target_tracks,
+            alt_seq_region=seq_region,
+            window=window,
+            delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
+            device=enf_device,
+        )
+        print(f'[enformer_seq] Enformer delta applied to cumulative sequence edits with mode {enformer_delta_mode} and cap {enformer_delta_cap}.')
+
+        perturbed_track_names = set(enformer_results.get('perturbed_track_names', []))
+        enformer_perturbed_track_names = {track_name.lower() for track_name in perturbed_track_names}
+        for enf_idx, enf_name in enumerate(enformer_results['enformer_track_names']):
+            if enf_name in perturbed_track_names and enf_name in input_track_names:
+                track_path = input_track_paths[input_track_names.index(enf_name)]
+                write_tmp_enformer_ko_bigwig(
+                    track_path,
+                    enformer_results['fold_change'],
+                    enformer_results['delta'],
+                    enf_idx, enf_name,
+                    chr_name, start, window=window,
+                    delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
+                )
+                write_tmp_enformer_delta_bigwig(
+                    track_path,
+                    enformer_results['fold_change'],
+                    enformer_results['delta'],
+                    enf_idx, enf_name,
+                    chr_name, start, window=window,
+                    delta_mode='additive',
+                )
+    else:
+        enformer_perturbed_track_names = set()
+
+    for deletion_start, deletion_width, ko_data_type, ko_channel, channel_offset, knockout_mode, ko_height, left_del_pad, right_del_pad in pending_track_perturbations:
+        seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(
+                chr_name, start, deletion_start, deletion_width,
+                seq_region, ctcf_region, atac_region, other_regions,
+                ko_data=[ko_data_type], ko_channels=[ko_channel],
+                channel_offset=channel_offset,
+                ko_mode=[knockout_mode], peak_height=ko_height,
+                left_del_pad=left_del_pad, right_del_pad=right_del_pad)
 
     # --- Hierarchical update ---
     # If a hierarchical model is provided, propagate the perturbation through
@@ -1395,6 +1379,38 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             )
         else:
             print('[hierarchical] Warning: rad21 not in input tracks, skipping hierarchical update.')
+
+    # Rewrite Enformer KO plotting tracks from the final in-memory inputs so
+    # the plotted signal matches the exact features consumed by the model.
+    if enformer_perturbed_track_names:
+        other_offset = 0
+        if 'ctcf' in input_track_names:
+            other_offset += 1
+        if 'atac' in input_track_names:
+            other_offset += 1
+        other_track_names = input_track_names[other_offset:]
+        for track_name in sorted(enformer_perturbed_track_names):
+            if track_name not in input_track_names:
+                continue
+            track_path = input_track_paths[input_track_names.index(track_name)]
+            if track_name == 'ctcf':
+                track_values = ctcf_region
+            elif track_name == 'atac':
+                track_values = atac_region
+            elif other_regions is not None and track_name in other_track_names:
+                track_values = other_regions[other_track_names.index(track_name)]
+            else:
+                track_values = None
+            if track_values is not None:
+                write_tmp_pred_bigwig(
+                    track_path,
+                    track_values,
+                    track_name,
+                    chr_name,
+                    start,
+                    suffix='enformer_ko',
+                    window=window,
+                )
 
     # Prediction
     # Prediction
@@ -1473,6 +1489,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
         if track_name in plot_track_names or track_name in input_track_names:
             # write bigwig files for pred
             write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred_before, track_name, chr_name, start, suffix='pred_WT')
+            write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred - ctcf_pred_before, track_name, chr_name, start, suffix='pred_diff')
             if plot_pred_log2fc:
                 ctcf_log2fc = np.clip(ctcf_log2fc, -1, 1)  # clip to avoid extreme values
                 #ctcf_log2fc[(ctcf_pred_before < 0.2) | (ctcf_pred < 0.2)] = 0  # set to zero if original signal is low
@@ -1609,6 +1626,26 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
     lines = tracks.split('\n')
     lines = [line + '\n' for line in lines]
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'pink', 'brown', 'gray', 'cyan', 'magenta', 'yellow', 'red', 'blue', 'green', 'orange', 'purple', 'pink']
+    ko_track_names = {track_name.lower() for track_name in ko_data}
+
+    def resolve_ko_display_track(track_name, track_path):
+        canonical_track_name = track_name.lower()
+        if canonical_track_name.startswith('predicted_'):
+            canonical_track_name = canonical_track_name[len('predicted_'):]
+
+        display_track_path = track_path
+        if hierarchical_active and canonical_track_name == 'rad21':
+            if os.path.exists('tmp/rad21_hierarchical_perturbed.bw'):
+                display_track_path = 'tmp/rad21_hierarchical_perturbed.bw'
+            elif os.path.exists('tmp/rad21_hierarchical_ko_pred.bw'):
+                display_track_path = 'tmp/rad21_hierarchical_ko_pred.bw'
+        elif canonical_track_name in ko_track_names and os.path.exists(f'tmp/{track_name}_ko.bw'):
+            display_track_path = f'tmp/{track_name}_ko.bw'
+        elif canonical_track_name in enformer_perturbed_track_names and os.path.exists(f'tmp/{track_name}_enformer_ko.bw'):
+            display_track_path = f'tmp/{track_name}_enformer_ko.bw'
+
+        return canonical_track_name, display_track_path
+
     with open('tmp/tmp_tracks.ini', 'w') as f:
         for line in lines:
             if 'arcs.bed' in line:
@@ -1618,27 +1655,39 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 # write additional tracks for each input track
                 for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                     track_name = os.path.basename(track_path).split('.')[0]
-                    canonical_track_name = track_name.lower()
-                    if canonical_track_name.startswith('predicted_'):
-                        canonical_track_name = canonical_track_name[len('predicted_'):]
+                    canonical_track_name, display_track_path = resolve_ko_display_track(track_name, track_path)
                     track_max = None
-                    display_track_path = track_path
-                    if hierarchical_active and canonical_track_name == 'rad21':
-                        if os.path.exists('tmp/rad21_hierarchical_perturbed.bw'):
-                            display_track_path = 'tmp/rad21_hierarchical_perturbed.bw'
-                        elif os.path.exists('tmp/rad21_hierarchical_ko_pred.bw'):
-                            display_track_path = 'tmp/rad21_hierarchical_ko_pred.bw'
-                    if os.path.exists(display_track_path):
-                        f.write(f'[{track_name}]\n')
-                        f.write(f'file = {display_track_path}\n')
+                    is_model_input = track_name in input_track_names
+                    final_track_path = display_track_path if os.path.exists(display_track_path) else None
+                    wt_track_path = track_path if os.path.exists(track_path) else None
+                    if is_model_input and wt_track_path is not None:
+                        f.write(f'[{track_name} WT]\n')
+                        f.write(f'file = {wt_track_path}\n')
                         f.write('height = 2\n')
                         f.write(f'color = {colors[track_i]}\n')
-                        f.write(f'title = {track_name}\n')
+                        f.write(f'title = {track_name} WT\n')
                         f.write('min_value = 0\n')
-                        track_max = get_axis_range_from_bigwig(display_track_path, chr_name, start)
-                        if track_max is not None:
-                            f.write(f'max_value = {track_max}\n')
+                        wt_track_max = get_axis_range_from_bigwig(wt_track_path, chr_name, start)
+                        if wt_track_max is not None:
+                            f.write(f'max_value = {wt_track_max}\n')
                         f.write('number_of_bins = 512\n\n')
+                        track_max = wt_track_max
+                    if final_track_path is not None and (not is_model_input or final_track_path != wt_track_path):
+                        final_title = f'{track_name} KO' if is_model_input else track_name
+                        f.write(f'[{track_name}]\n')
+                        f.write(f'file = {final_track_path}\n')
+                        f.write('height = 2\n')
+                        f.write(f'color = {colors[track_i]}\n')
+                        f.write(f'title = {final_title}\n')
+                        f.write('min_value = 0\n')
+                        final_track_max = get_axis_range_from_bigwig(final_track_path, chr_name, start)
+                        if final_track_max is not None:
+                            f.write(f'max_value = {final_track_max}\n')
+                        f.write('number_of_bins = 512\n\n')
+                        track_max = final_track_max
+                    elif track_max is None and final_track_path is not None:
+                        track_max = get_axis_range_from_bigwig(final_track_path, chr_name, start)
+                    if final_track_path is not None or wt_track_path is not None:
                         if canonical_track_name == 'ctcf' and ctcf_motif_p is not None:
                             #if 'ctcf_motif.bed' in os.listdir('tmp'):
                             f.write('[CTCF motif]\n')
@@ -1651,26 +1700,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write('file_type = bed\n')
                             f.write('fontsize = 10\n')
                             f.write('display = interleaved\n')
-                        if track_name in ko_data:
-                            f.write(f'[{track_name} KO]\n')
-                            f.write(f'file = tmp/{track_name}_ko.bw\n')
-                            f.write('height = 2\n')
-                            f.write(f'color = {colors[track_i]}\n')
-                            f.write(f'title = {track_name} KO\n')
-                            f.write('min_value = 0\n')
-                            if track_max is not None:
-                                f.write(f'max_value = {track_max}\n')
-                            f.write('number_of_bins = 512\n\n')
-                        if enformer_seq_active and os.path.exists(f'tmp/{track_name}_enformer_ko.bw'):
-                            f.write(f'[{track_name} Enformer KO]\n')
-                            f.write(f'file = tmp/{track_name}_enformer_ko.bw\n')
-                            f.write('height = 2\n')
-                            f.write(f'color = {colors[track_i]}\n')
-                            f.write(f'title = {track_name} Enformer KO\n')
-                            f.write('min_value = 0\n')
-                            if track_max is not None:
-                                f.write(f'max_value = {track_max}\n')
-                            f.write('number_of_bins = 512\n\n')
                         if hierarchical_active and canonical_track_name == 'rad21':
                             # Hierarchical RAD21 WT prediction
                             if os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
@@ -1711,22 +1740,23 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             track_name.lower() == 'rad21' and
                             os.path.exists('tmp/rad21_hierarchical_ko_pred.bw')):
                             pred_ko_file = 'tmp/rad21_hierarchical_ko_pred.bw'
-                        f.write(f'[{track_name} pred]\n')
-                        f.write(f'file = {pred_ko_file}\n')
-                        f.write('height = 2\n')
-                        if plot_pred_log2fc:
-                            f.write(f'title = {track_name} log2FC\n')
-                            f.write(f'color = red\n')
-                            f.write('negative_color = blue\n')
-                            f.write('min_value = -1\n')
-                            f.write('max_value = 1\n')
-                        else:
-                            f.write(f'title = {track_name} pred KO\n')
-                            f.write(f'color = {colors[track_i]}\n')
-                            f.write('min_value = 0\n')
-                            if track_max is not None:
-                                f.write(f'max_value = {track_max}\n')
-                        f.write('number_of_bins = 512\n\n')
+                        if os.path.exists(pred_ko_file):
+                            f.write(f'[{track_name} pred]\n')
+                            f.write(f'file = {pred_ko_file}\n')
+                            f.write('height = 2\n')
+                            if plot_pred_log2fc:
+                                f.write(f'title = {track_name} log2FC\n')
+                                f.write(f'color = red\n')
+                                f.write('negative_color = blue\n')
+                                f.write('min_value = -1\n')
+                                f.write('max_value = 1\n')
+                            else:
+                                f.write(f'title = {track_name} pred KO\n')
+                                f.write(f'color = {colors[track_i]}\n')
+                                f.write('min_value = 0\n')
+                                if track_max is not None:
+                                    f.write(f'max_value = {track_max}\n')
+                            f.write('number_of_bins = 512\n\n')
 
                 f.write('[KO pred]\n')
                 f.write('file = tmp/tmp.cool\n')
@@ -1899,7 +1929,19 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     if track_max is not None:
                                         f.write(f'max_value = {track_max}\n')
                                     f.write('number_of_bins = 512\n\n')
-                                if enformer_seq_active and os.path.exists(f'tmp/{track_name}_enformer_delta.bw'):
+                                if (enformer_seq_active and canonical_track_name in enformer_perturbed_track_names and
+                                    os.path.exists(f'tmp/{track_name}_enformer_delta.bw')):
+                                    enformer_ko_file = f'tmp/{track_name}_enformer_ko.bw'
+                                    if os.path.exists(enformer_ko_file):
+                                        f.write(f'[{track_name} Enformer KO]\n')
+                                        f.write(f'file = {enformer_ko_file}\n')
+                                        f.write('height = 2\n')
+                                        f.write(f'color = {colors[track_i]}\n')
+                                        f.write(f'title = {track_name} Enformer KO\n')
+                                        f.write('min_value = 0\n')
+                                        if track_max is not None:
+                                            f.write(f'max_value = {track_max}\n')
+                                        f.write('number_of_bins = 512\n\n')
                                     f.write(f'[{track_name} Enformer Delta]\n')
                                     f.write(f'file = tmp/{track_name}_enformer_delta.bw\n')
                                     f.write('height = 2\n')
@@ -1935,27 +1977,26 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                             f.write(f'max_value = {track_max}\n')
                                         f.write('number_of_bins = 512\n\n')
                             if track_name in plot_pred_bigwigs:
-                                pred_ko_file = f'tmp/{track_name}_pred_KO.bw'
+                                pred_diff_file = f'tmp/{track_name}_pred_diff.bw'
+                                if (plot_pred_log2fc and os.path.exists(f'tmp/{track_name}_pred_KO.bw')):
+                                    pred_diff_file = f'tmp/{track_name}_pred_KO.bw'
                                 if (not plot_pred_log2fc and hierarchical_active and
                                     track_name.lower() == 'rad21' and
-                                    os.path.exists('tmp/rad21_hierarchical_ko_pred.bw')):
-                                    pred_ko_file = 'tmp/rad21_hierarchical_ko_pred.bw'
-                                f.write(f'[{track_name} pred]\n')
-                                f.write(f'file = {pred_ko_file}\n')
-                                f.write('height = 2\n')
-                                if plot_pred_log2fc:
-                                    f.write(f'title = {track_name} log2FC\n')
-                                    f.write(f'color = red\n')
+                                    os.path.exists('tmp/rad21_hierarchical_delta.bw')):
+                                    pred_diff_file = 'tmp/rad21_hierarchical_delta.bw'
+                                if os.path.exists(pred_diff_file):
+                                    f.write(f'[{track_name} pred diff]\n')
+                                    f.write(f'file = {pred_diff_file}\n')
+                                    f.write('height = 2\n')
+                                    f.write('color = red\n')
                                     f.write('negative_color = blue\n')
+                                    if plot_pred_log2fc:
+                                        f.write(f'title = {track_name} pred log2FC\n')
+                                    else:
+                                        f.write(f'title = {track_name} pred delta\n')
                                     f.write('min_value = -1\n')
                                     f.write('max_value = 1\n')
-                                else:
-                                    f.write(f'title = {track_name} pred KO\n')
-                                    f.write(f'color = {colors[track_i]}\n')
-                                    f.write('min_value = 0\n')
-                                    if track_max is not None:
-                                        f.write(f'max_value = {track_max}\n')
-                                f.write('number_of_bins = 512\n\n')
+                                    f.write('number_of_bins = 512\n\n')
                  
                         # add the ground truth hic matrix
                         f.write('[Diff]\n')
