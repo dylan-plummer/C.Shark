@@ -1276,6 +1276,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             alt_seq_region=seq_region,
             window=window,
             delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
+            track_is_log1p=bigwig_log_transform,
             device=enf_device,
         )
         print(f'[enformer_seq] Enformer delta applied to cumulative sequence edits with mode {enformer_delta_mode} and cap {enformer_delta_cap}.')
@@ -1299,7 +1300,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     enformer_results['delta'],
                     enf_idx, enf_name,
                     chr_name, start, window=window,
-                    delta_mode='additive',
+                    delta_mode=enformer_delta_mode,
                 )
     else:
         enformer_perturbed_track_names = set()
@@ -1402,6 +1403,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
             else:
                 track_values = None
             if track_values is not None:
+                if bigwig_log_transform:
+                    track_values = np.expm1(track_values)
                 write_tmp_pred_bigwig(
                     track_path,
                     track_values,
@@ -1947,8 +1950,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     f.write('height = 2\n')
                                     f.write(f'color = red\n')
                                     f.write(f'negative_color = blue\n')
-                                    # delta_label = 'log2FC' if enformer_delta_mode == 'multiplicative' else 'delta'
-                                    delta_label = 'delta'
+                                    delta_label = 'log2FC' if enformer_delta_mode == 'multiplicative' else 'delta'
                                     f.write(f'title = {track_name} Enformer {delta_label}\n')
                                     f.write('min_value = -0.5\n')
                                     f.write('max_value = 0.5\n')

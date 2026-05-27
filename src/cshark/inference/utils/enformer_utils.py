@@ -521,7 +521,7 @@ def compute_enformer_delta(model, wt_seq, alt_seq, num_tracks, device=None,
 
 
 def apply_enformer_delta_to_track(track, fold_change_1d, mode='multiplicative',
-                                  cap=10.0):
+                                  cap=10.0, track_is_log1p=True):
     """Apply the Enformer-predicted delta to an experimental 1D track.
 
     Parameters
@@ -536,6 +536,9 @@ def apply_enformer_delta_to_track(track, fold_change_1d, mode='multiplicative',
         ``'additive'``       — add the raw delta to track.
     cap : float
         Upper bound on fold-change to prevent extreme outliers.
+    track_is_log1p : bool
+        If True, ``track`` is treated as log1p-transformed input-space signal,
+        so perturbations are applied in linear space and converted back.
 
     Returns
     -------
@@ -544,9 +547,17 @@ def apply_enformer_delta_to_track(track, fold_change_1d, mode='multiplicative',
     track = track.copy()
     if mode == 'multiplicative':
         fc = np.clip(fold_change_1d, 1.0 / cap, cap)
-        track = track * fc
+        if track_is_log1p:
+            track_lin = np.expm1(track)
+            track = np.log1p(np.clip(track_lin * fc, 0, None))
+        else:
+            track = track * fc
     elif mode == 'additive':
-        track = track + fold_change_1d
+        if track_is_log1p:
+            track_lin = np.expm1(track)
+            track = np.log1p(np.clip(track_lin + fold_change_1d, 0, None))
+        else:
+            track = track + fold_change_1d
     else:
         raise ValueError(f"Unknown delta mode: '{mode}'. Use 'multiplicative' or 'additive'.")
     # Ensure non-negative signal
@@ -592,6 +603,7 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
                           alt_seq_region=None,
                           window=2097152,
                           delta_mode='multiplicative', cap=10.0,
+                          track_is_log1p=True,
                           device=None):
     """Perform the **enformer_seq** knockout.
 
@@ -630,6 +642,8 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
     delta_mode : str
         ``'multiplicative'`` or ``'additive'``.
     cap : float
+    track_is_log1p : bool
+        Whether experimental tracks are in log1p space.
     device : torch.device or None
 
     Returns
@@ -683,15 +697,19 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
             fc_1d = fold_change[:, enformer_track_idx]
             fc_resampled = downsample_to_track_resolution(fc_1d, track_len)
             return apply_enformer_delta_to_track(track, fc_resampled,
-                                                  mode='multiplicative', cap=cap)
+                                                  mode='multiplicative', cap=cap,
+                                                  track_is_log1p=track_is_log1p)
         elif delta_mode == 'additive':
             d_1d = delta[:, enformer_track_idx]
             d_resampled = downsample_to_track_resolution(d_1d, track_len)
             return apply_enformer_delta_to_track(track, d_resampled,
-                                                  mode='additive', cap=cap)
+                                                  mode='additive', cap=cap,
+                                                  track_is_log1p=track_is_log1p)
         else:  # use raw predictions without fold-change or delta transformation
             pred_1d = alt_pred[:, enformer_track_idx]
             pred_resampled = downsample_to_track_resolution(pred_1d, track_len)
+            if track_is_log1p:
+                pred_resampled = np.log1p(np.clip(pred_resampled, 0, None))
             return pred_resampled
             
             
