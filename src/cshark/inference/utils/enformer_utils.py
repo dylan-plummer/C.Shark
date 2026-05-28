@@ -31,14 +31,14 @@ EN_DICT = {'a': 0, 't': 1, 'c': 2, 'g': 3, 'n': 4}
 # Matches the target_map used in TrainModule (hierarchical_predict_with_enformer.py).
 # Species-specific mappings are keyed as ``(species, track_name)``.
 DEFAULT_TARGET_MAP = {
-    'ctcf':     {'human': 'CTCF:H1-hESC',            'mouse': 'CTCF'},
-    'atac':     {'human': 'DNASE:H1-hESC',            'mouse': 'DNASE'},
-    'rad21':    {'human': 'CHIP:RAD21:H1-hESC',       'mouse': 'RAD21'},
-    'h3k27ac':  {'human': 'CHIP:H3K27ac:H1-hESC',     'mouse': 'H3K27ac'},
-    'h3k4me3':  {'human': 'CHIP:H3K4me3:H1-hESC',     'mouse': 'H3K4me3'},
-    'h3k9me3':  {'human': 'CHIP:H3K9me3:H1-hESC',     'mouse': 'H3K9me3'},
-    'h3k36me3': {'human': 'CHIP:H3K36me3:H1-hESC',    'mouse': 'H3K36me3'},
-    'h3k27me3': {'human': 'CHIP:H3K27me3:H1-hESC',    'mouse': 'H3K27me3'},
+    'ctcf':     {'human': 'CTCF:H1-hESC',             'mouse': 'CHIP:CTCF:C57BL/6 ES-Bruce4'},
+    'atac':     {'human': 'DNASE:H1-hESC',            'mouse': 'DNASE:129 ES-E14'},
+    'rad21':    {'human': 'CHIP:RAD21:H1-hESC',       'mouse': 'CHIP:RAD21:DBA/2 MEL cell line'},
+    'h3k27ac':  {'human': 'CHIP:H3K27ac:H1-hESC',     'mouse': 'CHIP:H3K27ac:C57BL/6 ES-Bruce4'},
+    'h3k4me3':  {'human': 'CHIP:H3K4me3:H1-hESC',     'mouse': 'CHIP:H3K4me3:129 ES-E14'},
+    'h3k9me3':  {'human': 'CHIP:H3K9me3:H1-hESC',     'mouse': 'CHIP:H3K9me3:C57BL/6 ES-Bruce4'},
+    'h3k36me3': {'human': 'CHIP:H3K36me3:H1-hESC',    'mouse': 'CHIP:H3K36me3:129 ES-E14'},
+    'h3k27me3': {'human': 'CHIP:H3K27me3:H1-hESC',    'mouse': 'CHIP:H3K27me3:C57BL/6 ES-Bruce4'},
 }
 
 
@@ -62,6 +62,7 @@ def get_target_indices(species: str, target: str) -> np.ndarray:
     Returns
     -------
     indices : np.ndarray of int
+        Zero-based indices into the selected Enformer species head.
     """
     import pandas as pd
     targets_file = (
@@ -69,8 +70,9 @@ def get_target_indices(species: str, target: str) -> np.ndarray:
         f"manuscripts/cross2020/targets_{species}.txt"
     )
     targets_df = pd.read_csv(targets_file, sep='\t')
+    idx_offset = targets_df['index'].min()
     mask = targets_df['description'].str.contains(target, case=False)
-    indices = targets_df[mask]['index'].values
+    indices = targets_df[mask]['index'].values - idx_offset
     if len(indices) == 0:
         raise ValueError(
             f"No Enformer tracks found for target '{target}' in species "
@@ -224,6 +226,11 @@ def load_enformer_pretrained(target_tracks=None, species='human',
             # Treat the name itself as a target description for flexibility
             desc = track_name
         indices = get_target_indices(species, desc)
+        if len(indices) > 1:
+            print(
+                f"[enformer_utils] Found {len(indices)} Enformer heads for "
+                f"'{desc}'. Using index {int(indices[0])}."
+            )
         track_indices.append(int(indices[0]))
         resolved_names.append(track_name)
 
@@ -506,6 +513,10 @@ def compute_enformer_delta(model, wt_seq, alt_seq, num_tracks, device=None,
         Per-bp ratio ALT / WT.  Values > 1 indicate increase, < 1 decrease.
     delta : np.ndarray, shape (seq_len, num_tracks)
         Per-bp additive difference ALT − WT.
+    fold_change_log1p : np.ndarray, shape (seq_len, num_tracks)
+        Per-bp multiplicative effect in log1p space, i.e. ``(1 + ALT) / (1 + WT)``.
+    log1p_delta : np.ndarray, shape (seq_len, num_tracks)
+        Per-bp additive difference in log1p space, i.e. ``log1p(ALT) - log1p(WT)``.
     wt_pred : np.ndarray
     alt_pred : np.ndarray
     """
@@ -516,8 +527,12 @@ def compute_enformer_delta(model, wt_seq, alt_seq, num_tracks, device=None,
 
     delta = alt_pred - wt_pred
     fold_change = alt_pred / np.clip(wt_pred, epsilon, None)
+    log1p_wt_pred = np.log1p(np.clip(wt_pred, 0, None))
+    log1p_alt_pred = np.log1p(np.clip(alt_pred, 0, None))
+    log1p_delta = log1p_alt_pred - log1p_wt_pred
+    fold_change_log1p = np.exp(log1p_delta)
 
-    return fold_change, delta, wt_pred, alt_pred
+    return fold_change, delta, fold_change_log1p, log1p_delta, wt_pred, alt_pred
 
 
 def apply_enformer_delta_to_track(track, fold_change_1d, mode='multiplicative',
@@ -682,7 +697,7 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
                   f"(length {len(alt_sequence)})")
 
     # --- 2. Compute Enformer delta ---
-    fold_change, delta, wt_pred, alt_pred = compute_enformer_delta(
+    fold_change, delta, fold_change_log1p, log1p_delta, wt_pred, alt_pred = compute_enformer_delta(
         enformer_model, seq_region, alt_seq, num_tracks,
         device=device, epsilon=1e-6,
     )
@@ -694,14 +709,20 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
             return track
         track_len = len(track)
         if delta_mode == 'multiplicative':
-            fc_1d = fold_change[:, enformer_track_idx]
+            # For log1p-transformed experimental inputs, apply the Enformer effect
+            # in the same transformed space to avoid unstable raw ALT / WT ratios.
+            fc_1d = (fold_change_log1p[:, enformer_track_idx]
+                     if track_is_log1p else fold_change[:, enformer_track_idx])
             fc_resampled = downsample_to_track_resolution(fc_1d, track_len)
             return apply_enformer_delta_to_track(track, fc_resampled,
                                                   mode='multiplicative', cap=cap,
                                                   track_is_log1p=track_is_log1p)
         elif delta_mode == 'additive':
-            d_1d = delta[:, enformer_track_idx]
+            d_1d = (log1p_delta[:, enformer_track_idx]
+                    if track_is_log1p else delta[:, enformer_track_idx])
             d_resampled = downsample_to_track_resolution(d_1d, track_len)
+            if track_is_log1p:
+                return np.clip(track + d_resampled, 0, None)
             return apply_enformer_delta_to_track(track, d_resampled,
                                                   mode='additive', cap=cap,
                                                   track_is_log1p=track_is_log1p)
@@ -740,7 +761,9 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
 
     enformer_results = {
         'fold_change': fold_change,
+        'fold_change_log1p': fold_change_log1p,
         'delta': delta,
+        'log1p_delta': log1p_delta,
         'wt_pred': wt_pred,
         'alt_pred': alt_pred,
         'enformer_track_names': enformer_track_names,
@@ -755,9 +778,12 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
 # ---------------------------------------------------------------------------
 
 def write_tmp_enformer_ko_bigwig(bigwig_path, fold_change, delta,
+                                  fold_change_log1p,
+                                  log1p_delta,
                                   enformer_track_idx, track_name,
                                   chr_name, start, window=2_097_152,
-                                  delta_mode='multiplicative', cap=10.0):
+                                  delta_mode='multiplicative', cap=10.0,
+                                  track_is_log1p=True):
     """Read an experimental bigwig and write an enformer-perturbed version.
 
     The original signal is read at bp resolution, the Enformer-predicted
@@ -772,6 +798,10 @@ def write_tmp_enformer_ko_bigwig(bigwig_path, fold_change, delta,
         Per-bp fold-change (ALT / WT) from Enformer.
     delta : np.ndarray, shape (bp_length, num_tracks)
         Per-bp additive delta from Enformer.
+    fold_change_log1p : np.ndarray, shape (bp_length, num_tracks)
+        Per-bp multiplicative effect in log1p space.
+    log1p_delta : np.ndarray, shape (bp_length, num_tracks)
+        Per-bp additive delta in log1p space.
     enformer_track_idx : int
         Column index into *fold_change* / *delta* for this track.
     track_name : str
@@ -792,17 +822,25 @@ def write_tmp_enformer_ko_bigwig(bigwig_path, fold_change, delta,
     bw.close()
 
     if delta_mode == 'multiplicative':
-        fc = fold_change[:, enformer_track_idx]
+        fc = (fold_change_log1p[:, enformer_track_idx]
+              if track_is_log1p else fold_change[:, enformer_track_idx])
         # Resample if lengths differ
         if len(fc) != len(original):
             fc = downsample_to_track_resolution(fc, len(original))
         fc = np.clip(fc, 1.0 / cap, cap)
-        modified = original * fc
+        if track_is_log1p:
+            modified = (original + 1.0) * fc - 1.0
+        else:
+            modified = original * fc
     else:
-        d = delta[:, enformer_track_idx]
+        d = (log1p_delta[:, enformer_track_idx]
+             if track_is_log1p else delta[:, enformer_track_idx])
         if len(d) != len(original):
             d = downsample_to_track_resolution(d, len(original))
-        modified = original + d
+        if track_is_log1p:
+            modified = np.expm1(np.clip(np.log1p(np.clip(original, 0, None)) + d, 0, None))
+        else:
+            modified = original + d
     modified = np.clip(modified, 0, None)
 
     out_path = f'tmp/{track_name}_enformer_ko.bw'
@@ -831,9 +869,12 @@ def write_tmp_enformer_ko_bigwig(bigwig_path, fold_change, delta,
 
 
 def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
+                                     fold_change_log1p,
+                                     log1p_delta,
                                      enformer_track_idx, track_name,
                                      chr_name, start, window=2_097_152,
-                                     delta_mode='multiplicative'):
+                                     delta_mode='multiplicative',
+                                     track_is_log1p=True):
     """Write the raw Enformer delta (or log2 fold-change) as a bigwig.
 
     This produces a track centred around zero that is suitable for a
@@ -852,6 +893,8 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
         chromosome header).
     fold_change : np.ndarray, shape (bp_length, num_tracks)
     delta : np.ndarray, shape (bp_length, num_tracks)
+    fold_change_log1p : np.ndarray, shape (bp_length, num_tracks)
+    log1p_delta : np.ndarray, shape (bp_length, num_tracks)
     enformer_track_idx : int
     track_name : str
     chr_name : str
@@ -866,11 +909,13 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
     bw.close()
 
     if delta_mode == 'multiplicative':
-        fc = fold_change[:, enformer_track_idx].copy()
+        fc = (fold_change_log1p[:, enformer_track_idx].copy()
+              if track_is_log1p else fold_change[:, enformer_track_idx].copy())
         fc = np.clip(fc, 1e-6, None)  # avoid log(0)
         signal = np.log2(fc)
     else:
-        signal = delta[:, enformer_track_idx].copy()
+        signal = (log1p_delta[:, enformer_track_idx].copy()
+                  if track_is_log1p else delta[:, enformer_track_idx].copy())
 
     # Resample to window length if needed
     if len(signal) != window:
@@ -901,7 +946,8 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
 
     # also write fc bigwig for reference
     fc_out_path = f'tmp/{track_name}_enformer_fold_change.bw'
-    fc_signal = fold_change[:, enformer_track_idx].copy()
+    fc_signal = (fold_change_log1p[:, enformer_track_idx].copy()
+                 if track_is_log1p else fold_change[:, enformer_track_idx].copy())
     if len(fc_signal) != window:
         fc_signal = downsample_to_track_resolution(fc_signal, window)
     fc_values = list(fc_signal.astype(float))

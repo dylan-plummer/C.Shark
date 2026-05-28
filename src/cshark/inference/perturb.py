@@ -1290,17 +1290,23 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     track_path,
                     enformer_results['fold_change'],
                     enformer_results['delta'],
+                    enformer_results['fold_change_log1p'],
+                    enformer_results['log1p_delta'],
                     enf_idx, enf_name,
                     chr_name, start, window=window,
                     delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
+                    track_is_log1p=bigwig_log_transform,
                 )
                 write_tmp_enformer_delta_bigwig(
                     track_path,
                     enformer_results['fold_change'],
                     enformer_results['delta'],
+                    enformer_results['fold_change_log1p'],
+                    enformer_results['log1p_delta'],
                     enf_idx, enf_name,
                     chr_name, start, window=window,
                     delta_mode=enformer_delta_mode,
+                    track_is_log1p=bigwig_log_transform,
                 )
     else:
         enformer_perturbed_track_names = set()
