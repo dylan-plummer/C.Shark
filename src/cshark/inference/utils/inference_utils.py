@@ -184,6 +184,7 @@ def get_axis_range_from_bigwig(bigwig_path, chr_name, start, window=2097152, q=0
     values = np.array(bw.values(chr_name, start, start + window))
     values = np.nan_to_num(values, nan = 0.0)
     lim = np.quantile(values, q=q)
+    #lim = np.max(values)
     return lim if lim != 0 else None
 
 

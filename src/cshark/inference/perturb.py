@@ -187,6 +187,8 @@ def main():
                         help='min value for color scale of diff matrix', required=False)
     parser.add_argument('--max-val-diff', dest='max_val_diff', type=float, default=0.5,
                         help='max value for color scale of diff matrix', required=False)
+    parser.add_argument('--plot-bigwig-q', dest='plot_bigwig_q', type=float, default=0.995,
+                        help='Quantile cutoff used to set bigwig plot max values (default: %(default)s)', required=False)
     parser.add_argument('--ctcf-motif-p', dest='ctcf_motif_p', type=int, default=None,
                         help='max p-value (transformed) to display motif (see https://jaspar2020.genereg.net/genome-tracks/)', required=False)
     parser.add_argument('--no-plots', dest='no_plots', 
@@ -285,6 +287,7 @@ def main():
                     min_val_true=args.min_val_true, max_val_true=args.max_val_true,
                     min_val_pred=args.min_val_pred, max_val_pred=args.max_val_pred, plot_diff=args.plot_diff,
                     min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff,
+                    plot_bigwig_q=args.plot_bigwig_q,
                     peak_height=args.peak_height,
                     ctcf_motif_p=args.ctcf_motif_p,
                     undo_log=args.hic_log_transform,
@@ -961,7 +964,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     bigwig_log_transform=True,
                     plot_bigwigs=[], plot_pred_bigwigs=[], plot_pred_log2fc=False,
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None, plot_diff=False,
-                    min_val_diff=-0.5, max_val_diff=0.5,
+                    min_val_diff=-0.5, max_val_diff=0.5, plot_bigwig_q=0.995,
                     peak_height=2.0, ctcf_motif_p=500,
                     undo_log=True,
                     ctcf_log2=False, 
@@ -1676,7 +1679,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write(f'color = {colors[track_i]}\n')
                         f.write(f'title = {track_name} WT\n')
                         f.write('min_value = 0\n')
-                        wt_track_max = get_axis_range_from_bigwig(wt_track_path, chr_name, start)
+                        wt_track_max = get_axis_range_from_bigwig(wt_track_path, chr_name, start, q=plot_bigwig_q)
                         if wt_track_max is not None:
                             f.write(f'max_value = {wt_track_max}\n')
                         f.write('number_of_bins = 512\n\n')
@@ -1689,13 +1692,13 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         f.write(f'color = {colors[track_i]}\n')
                         f.write(f'title = {final_title}\n')
                         f.write('min_value = 0\n')
-                        final_track_max = get_axis_range_from_bigwig(final_track_path, chr_name, start)
+                        final_track_max = get_axis_range_from_bigwig(final_track_path, chr_name, start, q=plot_bigwig_q)
                         if final_track_max is not None:
                             f.write(f'max_value = {final_track_max}\n')
                         f.write('number_of_bins = 512\n\n')
                         track_max = final_track_max
                     elif track_max is None and final_track_path is not None:
-                        track_max = get_axis_range_from_bigwig(final_track_path, chr_name, start)
+                        track_max = get_axis_range_from_bigwig(final_track_path, chr_name, start, q=plot_bigwig_q)
                     if final_track_path is not None or wt_track_path is not None:
                         if canonical_track_name == 'ctcf' and ctcf_motif_p is not None:
                             #if 'ctcf_motif.bed' in os.listdir('tmp'):
@@ -1800,7 +1803,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                         for track_i, (track_name, track_path) in enumerate(zip(input_track_names + plot_track_names, input_track_paths + plot_track_paths)):
                             track_name = os.path.basename(track_path).split('.')[0]
                             try:
-                                track_max = get_axis_range_from_bigwig(track_path, chr_name, start)
+                                track_max = get_axis_range_from_bigwig(track_path, chr_name, start, q=plot_bigwig_q)
                             except Exception as e:
                                 print(f'Error getting axis range for {track_path}: {e}')
                                 continue
@@ -1837,8 +1840,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             canonical_track_name = canonical_track_name[len('predicted_'):]
                         track_max = None
                         display_track_path = track_path
-                        if hierarchical_active and canonical_track_name == 'rad21' and os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
-                            display_track_path = 'tmp/rad21_hierarchical_wt_pred.bw'
                         if os.path.exists(display_track_path):
                             f.write(f'[{track_name}]\n')
                             f.write(f'file = {display_track_path}\n')
@@ -1846,7 +1847,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write(f'color = {colors[track_i]}\n')
                             f.write(f'title = {track_name}\n')
                             f.write('min_value = 0\n')
-                            track_max = get_axis_range_from_bigwig(display_track_path, chr_name, start)
+                            track_max = get_axis_range_from_bigwig(display_track_path, chr_name, start, q=plot_bigwig_q)
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
                             f.write('number_of_bins = 512\n\n')
@@ -1912,11 +1913,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                 canonical_track_name = canonical_track_name[len('predicted_'):]
                             track_max = None
                             display_track_path = track_path
-                            if hierarchical_active and canonical_track_name == 'rad21':
-                                if os.path.exists('tmp/rad21_hierarchical_perturbed.bw'):
-                                    display_track_path = 'tmp/rad21_hierarchical_perturbed.bw'
-                                elif os.path.exists('tmp/rad21_hierarchical_ko_pred.bw'):
-                                    display_track_path = 'tmp/rad21_hierarchical_ko_pred.bw'
                             if os.path.exists(display_track_path):
                                 f.write(f'[{track_name}]\n')
                                 f.write(f'file = {display_track_path}\n')
@@ -1924,7 +1920,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                 f.write(f'color = {colors[track_i]}\n')
                                 f.write(f'title = {track_name}\n')
                                 f.write('min_value = 0\n')
-                                track_max = get_axis_range_from_bigwig(display_track_path, chr_name, start)
+                                track_max = get_axis_range_from_bigwig(display_track_path, chr_name, start, q=plot_bigwig_q)
                                 if track_max is not None:
                                     f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
