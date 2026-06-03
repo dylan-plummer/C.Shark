@@ -1308,7 +1308,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     enformer_results['log1p_delta'],
                     enf_idx, enf_name,
                     chr_name, start, window=window,
-                    delta_mode=enformer_delta_mode,
+                    delta_mode='additive',
                     track_is_log1p=bigwig_log_transform,
                 )
     else:
@@ -1653,8 +1653,6 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                 display_track_path = 'tmp/rad21_hierarchical_ko_pred.bw'
         elif canonical_track_name in ko_track_names and os.path.exists(f'tmp/{track_name}_ko.bw'):
             display_track_path = f'tmp/{track_name}_ko.bw'
-        elif canonical_track_name in enformer_perturbed_track_names and os.path.exists(f'tmp/{track_name}_enformer_ko.bw'):
-            display_track_path = f'tmp/{track_name}_enformer_ko.bw'
 
         return canonical_track_name, display_track_path
 
@@ -1712,6 +1710,17 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                             f.write('file_type = bed\n')
                             f.write('fontsize = 10\n')
                             f.write('display = interleaved\n')
+                        if (enformer_seq_active and canonical_track_name in enformer_perturbed_track_names and
+                            os.path.exists(f'tmp/{track_name}_enformer_ko.bw')):
+                            f.write(f'[{track_name} Enformer KO]\n')
+                            f.write(f'file = tmp/{track_name}_enformer_ko.bw\n')
+                            f.write('height = 2\n')
+                            f.write(f'color = {colors[track_i]}\n')
+                            f.write(f'title = {track_name} Enformer KO\n')
+                            f.write('min_value = 0\n')
+                            if track_max is not None:
+                                f.write(f'max_value = {track_max}\n')
+                            f.write('number_of_bins = 512\n\n')
                         if hierarchical_active and canonical_track_name == 'rad21':
                             # Hierarchical RAD21 WT prediction
                             if os.path.exists('tmp/rad21_hierarchical_wt_pred.bw'):
@@ -1952,7 +1961,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     f.write('height = 2\n')
                                     f.write(f'color = red\n')
                                     f.write(f'negative_color = blue\n')
-                                    delta_label = 'log2FC' if enformer_delta_mode == 'multiplicative' else 'delta'
+                                    delta_label = 'delta'
                                     f.write(f'title = {track_name} Enformer {delta_label}\n')
                                     f.write('min_value = -0.5\n')
                                     f.write('max_value = 0.5\n')

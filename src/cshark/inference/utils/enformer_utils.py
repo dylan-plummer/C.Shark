@@ -709,23 +709,17 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
             return track
         track_len = len(track)
         if delta_mode == 'multiplicative':
-            # For log1p-transformed experimental inputs, apply the Enformer effect
-            # in the same transformed space to avoid unstable raw ALT / WT ratios.
-            fc_1d = (fold_change_log1p[:, enformer_track_idx]
-                     if track_is_log1p else fold_change[:, enformer_track_idx])
+            fc_1d = fold_change[:, enformer_track_idx]
             fc_resampled = downsample_to_track_resolution(fc_1d, track_len)
             return apply_enformer_delta_to_track(track, fc_resampled,
-                                                  mode='multiplicative', cap=cap,
-                                                  track_is_log1p=track_is_log1p)
+                                                 mode='multiplicative', cap=cap,
+                                                 track_is_log1p=track_is_log1p)
         elif delta_mode == 'additive':
-            d_1d = (log1p_delta[:, enformer_track_idx]
-                    if track_is_log1p else delta[:, enformer_track_idx])
+            d_1d = delta[:, enformer_track_idx]
             d_resampled = downsample_to_track_resolution(d_1d, track_len)
-            if track_is_log1p:
-                return np.clip(track + d_resampled, 0, None)
             return apply_enformer_delta_to_track(track, d_resampled,
-                                                  mode='additive', cap=cap,
-                                                  track_is_log1p=track_is_log1p)
+                                                 mode='additive', cap=cap,
+                                                 track_is_log1p=track_is_log1p)
         else:  # use raw predictions without fold-change or delta transformation
             pred_1d = alt_pred[:, enformer_track_idx]
             pred_resampled = downsample_to_track_resolution(pred_1d, track_len)
@@ -822,25 +816,17 @@ def write_tmp_enformer_ko_bigwig(bigwig_path, fold_change, delta,
     bw.close()
 
     if delta_mode == 'multiplicative':
-        fc = (fold_change_log1p[:, enformer_track_idx]
-              if track_is_log1p else fold_change[:, enformer_track_idx])
+        fc = fold_change[:, enformer_track_idx]
         # Resample if lengths differ
         if len(fc) != len(original):
             fc = downsample_to_track_resolution(fc, len(original))
         fc = np.clip(fc, 1.0 / cap, cap)
-        if track_is_log1p:
-            modified = (original + 1.0) * fc - 1.0
-        else:
-            modified = original * fc
+        modified = original * fc
     else:
-        d = (log1p_delta[:, enformer_track_idx]
-             if track_is_log1p else delta[:, enformer_track_idx])
+        d = delta[:, enformer_track_idx]
         if len(d) != len(original):
             d = downsample_to_track_resolution(d, len(original))
-        if track_is_log1p:
-            modified = np.expm1(np.clip(np.log1p(np.clip(original, 0, None)) + d, 0, None))
-        else:
-            modified = original + d
+        modified = original + d
     modified = np.clip(modified, 0, None)
 
     out_path = f'tmp/{track_name}_enformer_ko.bw'
@@ -909,13 +895,11 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
     bw.close()
 
     if delta_mode == 'multiplicative':
-        fc = (fold_change_log1p[:, enformer_track_idx].copy()
-              if track_is_log1p else fold_change[:, enformer_track_idx].copy())
+        fc = fold_change[:, enformer_track_idx].copy()
         fc = np.clip(fc, 1e-6, None)  # avoid log(0)
         signal = np.log2(fc)
     else:
-        signal = (log1p_delta[:, enformer_track_idx].copy()
-                  if track_is_log1p else delta[:, enformer_track_idx].copy())
+        signal = delta[:, enformer_track_idx].copy()
 
     # Resample to window length if needed
     if len(signal) != window:
@@ -946,8 +930,7 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
 
     # also write fc bigwig for reference
     fc_out_path = f'tmp/{track_name}_enformer_fold_change.bw'
-    fc_signal = (fold_change_log1p[:, enformer_track_idx].copy()
-                 if track_is_log1p else fold_change[:, enformer_track_idx].copy())
+    fc_signal = fold_change[:, enformer_track_idx].copy()
     if len(fc_signal) != window:
         fc_signal = downsample_to_track_resolution(fc_signal, window)
     fc_values = list(fc_signal.astype(float))
