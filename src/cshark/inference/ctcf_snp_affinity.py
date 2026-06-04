@@ -8,10 +8,22 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.font_manager import FontProperties
+from matplotlib.patches import PathPatch
+from matplotlib.textpath import TextPath
+from matplotlib.transforms import Affine2D
 
 
 BASE_TO_INDEX = {'A': 0, 'T': 1, 'C': 2, 'G': 3, 'N': 4}
 RC_TRANS = str.maketrans('ATCGN', 'TAGCN')
+LOGO_BASES = ('A', 'C', 'G', 'T')
+LOGO_COLORS = {
+    'A': '#2ca02c',
+    'C': '#1f77b4',
+    'G': '#ff7f0e',
+    'T': '#d62728',
+}
+LOGO_FONT = FontProperties(family='DejaVu Sans', weight='bold')
 
 
 def parse_args():
@@ -143,6 +155,66 @@ def pwm_score(seq, pwm):
     return float(np.dot(encoded.ravel(), pwm.ravel()) / pwm.shape[0])
 
 
+def pwm_logo_heights(pwm):
+    probabilities = np.column_stack([pwm[:, BASE_TO_INDEX[base]] for base in LOGO_BASES])
+    row_sums = probabilities.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0.0] = 1.0
+    probabilities = probabilities / row_sums
+    with np.errstate(divide='ignore', invalid='ignore'):
+        entropy_terms = np.where(probabilities > 0.0, probabilities * np.log2(probabilities), 0.0)
+    info_content = np.clip(np.log2(len(LOGO_BASES)) + entropy_terms.sum(axis=1), 0.0, None)
+    return probabilities * info_content[:, None]
+
+
+def draw_logo_letter(ax, base, x0, y0, height):
+    if height <= 0.0:
+        return
+
+    text = TextPath((0, 0), base, size=1, prop=LOGO_FONT)
+    bounds = text.get_extents()
+    width = 0.9
+    scale_x = width / bounds.width
+    scale_y = height / bounds.height
+    transform = Affine2D().scale(scale_x, scale_y).translate(
+        x0 + (1.0 - width) / 2.0 - bounds.x0 * scale_x,
+        y0 - bounds.y0 * scale_y,
+    )
+    ax.add_patch(
+        PathPatch(
+            text,
+            transform=transform + ax.transData,
+            facecolor=LOGO_COLORS[base],
+            edgecolor='none',
+        )
+    )
+
+
+def draw_pwm_logo(ax, pwm):
+    heights = pwm_logo_heights(pwm)
+    max_height = 0.0
+    for pos_idx in range(pwm.shape[0]):
+        letters = sorted(
+            ((LOGO_BASES[base_idx], heights[pos_idx, base_idx]) for base_idx in range(len(LOGO_BASES))),
+            key=lambda item: item[1],
+        )
+        y_offset = 0.0
+        for base, height in letters:
+            draw_logo_letter(ax, base, pos_idx, y_offset, height)
+            y_offset += height
+        max_height = max(max_height, y_offset)
+
+    tick_positions = np.arange(pwm.shape[0]) + 0.5
+    ax.set_xlim(0, pwm.shape[0])
+    ax.set_ylim(0.0, max(1.25, max_height * 1.25))
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels([str(idx) for idx in range(1, pwm.shape[0] + 1)])
+    ax.set_ylabel('Bits')
+    ax.set_xlabel('Motif position')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    return ax.get_ylim()[1]
+
+
 def apply_alt_allele(reference_seq, pos0, alt, ref=None):
     alt = alt.upper()
     if any(base not in BASE_TO_INDEX for base in alt):
@@ -228,6 +300,37 @@ def apply_alt_alleles(reference_seq, variants, zero_based=False):
     return alt_seq
 
 
+def build_variant_annotations(variants, positions0, ref_scored_seq, alt_scored_seq,
+                              motif_start0, motif_end0, strand, pwm):
+    annotations = []
+    motif_len = pwm.shape[0]
+
+    for variant, pos0 in zip(variants, positions0):
+        allele_len = len(variant['alt'])
+        if strand == '-':
+            scored_start = motif_end0 - (pos0 + allele_len)
+        else:
+            scored_start = pos0 - motif_start0
+
+        for offset in range(allele_len):
+            rel_pos = scored_start + offset
+            ref_base = ref_scored_seq[rel_pos]
+            alt_base = alt_scored_seq[rel_pos]
+            genomic_pos = int(variant['pos']) + (offset if strand == '+' else allele_len - 1 - offset)
+            ref_contribution = pwm[rel_pos, BASE_TO_INDEX[ref_base]] / motif_len
+            alt_contribution = pwm[rel_pos, BASE_TO_INDEX[alt_base]] / motif_len
+            annotations.append({
+                'genomic_pos': genomic_pos,
+                'motif_pos': rel_pos + 1,
+                'ref_base': ref_base,
+                'alt_base': alt_base,
+                'delta_score': alt_contribution - ref_contribution,
+            })
+
+    annotations.sort(key=lambda item: item['motif_pos'])
+    return annotations
+
+
 def score_variants(reference_by_chrom, variants, pwm, scan_flank, zero_based=False, result_id=None):
     if not variants:
         raise ValueError('At least one variant is required for scoring')
@@ -273,6 +376,17 @@ def score_variants(reference_by_chrom, variants, pwm, scan_flank, zero_based=Fal
     if result_id is None:
         result_id = variants[0]['id'] if len(variants) == 1 else 'all_snps'
 
+    variant_annotations = build_variant_annotations(
+        variants,
+        positions,
+        best_hit['ref_scored_seq'],
+        alt_scored_seq,
+        motif_start0,
+        motif_end0,
+        best_hit['strand'],
+        pwm,
+    )
+
     return {
         'id': result_id,
         'analysis_type': 'single' if len(variants) == 1 else 'combined',
@@ -290,6 +404,7 @@ def score_variants(reference_by_chrom, variants, pwm, scan_flank, zero_based=Fal
         'ref_score': best_hit['ref_score'],
         'alt_score': alt_score,
         'delta_score': alt_score - best_hit['ref_score'],
+        'variant_annotations': variant_annotations,
     }
 
 
@@ -322,6 +437,73 @@ def plot_scores(results_df, out_path, tf_name):
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+
+
+def plot_variant_motif_logos(results, pwm, out_path, tf_name):
+    if not results:
+        raise ValueError('At least one result is required for motif logo plotting')
+
+    fig_width = max(10, 0.55 * pwm.shape[0] + 4)
+    fig_height = max(3.5, 3.0 * len(results))
+    fig, axes = plt.subplots(len(results), 1, figsize=(fig_width, fig_height), squeeze=False)
+    axes = axes.ravel()
+
+    for ax, record in zip(axes, results):
+        draw_pwm_logo(ax, pwm)
+        ax.set_title(
+            f"{record['id']} | {record['chrom']}:{record['pos']} | strand {record['motif_strand']} | total Δ={record['delta_score']:+.3f}",
+            fontsize=10,
+            loc='left',
+        )
+
+        for annotation_idx, annotation in enumerate(record['variant_annotations']):
+            x0 = annotation['motif_pos'] - 1
+            x_center = x0 + 0.5
+            delta = annotation['delta_score']
+            color = 'firebrick' if delta < 0 else 'seagreen' if delta > 0 else 'dimgray'
+            label_offset = annotation_idx % 2
+
+            ax.axvspan(x0, x0 + 1, color=color, alpha=0.18, linewidth=0)
+            ax.axvline(x_center, color=color, linestyle='--', linewidth=1.1, alpha=0.8)
+            ax.text(
+                x_center,
+                1.02 + 0.08 * label_offset,
+                str(annotation['genomic_pos']),
+                color=color,
+                fontsize=8,
+                fontweight='bold',
+                ha='center',
+                va='bottom',
+                transform=ax.get_xaxis_transform(),
+                clip_on=False,
+            )
+            ax.text(
+                x_center,
+                -0.20 - 0.12 * label_offset,
+                f"{annotation['ref_base']}>{annotation['alt_base']}\nΔ={delta:+.2f}",
+                color=color,
+                fontsize=8,
+                ha='center',
+                va='top',
+                transform=ax.get_xaxis_transform(),
+                clip_on=False,
+            )
+
+    fig.suptitle(
+        f'{tf_name} motif logo with variant placement',
+        fontsize=13,
+        y=0.995,
+    )
+    fig.text(
+        0.5,
+        0.01,
+        'Shaded motif positions mark altered bases; color reflects the local ALT-REF PWM contribution change.',
+        ha='center',
+        fontsize=9,
+    )
+    fig.subplots_adjust(top=0.9, bottom=0.12, hspace=1.0)
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -380,14 +562,23 @@ def main():
         failure_msg = pd.DataFrame(failures).to_string(index=False) if failures else 'No successful records.'
         raise RuntimeError(f'Failed to score all variants.\n{failure_msg}')
 
-    results_df = pd.DataFrame(records)
+    tabular_records = []
+    for record in records:
+        export_record = record.copy()
+        export_record.pop('variant_annotations', None)
+        tabular_records.append(export_record)
+
+    results_df = pd.DataFrame(tabular_records)
     results_path = out_prefix.with_name(f'{out_prefix.name}_scores.tsv')
     plot_path = out_prefix.with_name(f'{out_prefix.name}_scores.png')
+    motif_plot_path = out_prefix.with_name(f'{out_prefix.name}_motif_logo.png')
     results_df.to_csv(results_path, sep='\t', index=False)
     plot_scores(results_df, plot_path, motif.name)
+    plot_variant_motif_logos(records, pwm, motif_plot_path, motif.name)
 
     print(f'Saved {len(results_df)} scored variants to {results_path}')
     print(f'Saved plot to {plot_path}')
+    print(f'Saved motif logo plot to {motif_plot_path}')
     if failures:
         failure_path = out_prefix.with_name(f'{out_prefix.name}_failures.tsv')
         pd.DataFrame(failures).to_csv(failure_path, sep='\t', index=False)
