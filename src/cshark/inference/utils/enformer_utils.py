@@ -41,6 +41,16 @@ DEFAULT_TARGET_MAP = {
     'h3k27me3': {'human': 'CHIP:H3K27me3:H1-hESC',    'mouse': 'CHIP:H3K27me3:C57BL/6 ES-Bruce4'},
 }
 
+GM12878_TARGET_MAP = {
+    'ctcf':     'CTCF:GM12878',
+    'atac':     'DNASE:GM12878',
+    'rad21':    'CHIP:RAD21:GM12878',
+    'h3k27ac':  'CHIP:H3K27ac:GM12878',
+    'h3k4me3':  'CHIP:H3K4me3:GM12878',
+    'h3k36me3': 'CHIP:H3K36me3:GM12878',
+    'h3k27me3': 'CHIP:H3K27me3:GM12878',
+}
+
 
 # ---------------------------------------------------------------------------
 # Enformer target index resolution
@@ -175,7 +185,7 @@ class EnformerHeadAdapterWrapper(torch.nn.Module):
 # Model loading
 # ---------------------------------------------------------------------------
 
-def load_enformer_pretrained(target_tracks=None, species='human',
+def load_enformer_pretrained(target_tracks=None, species='human', celltype=None,
                              load_pretrained_heads=True, device=None):
     """Load the pre-trained Enformer and wrap it for a specific set of tracks.
 
@@ -222,6 +232,10 @@ def load_enformer_pretrained(target_tracks=None, species='human',
                     f"species '{species}'.  Add it to DEFAULT_TARGET_MAP or "
                     f"use load_enformer_from_checkpoint instead."
                 )
+            if celltype is not None:
+                if 'GM12878' in celltype:
+                    if track_name in GM12878_TARGET_MAP:
+                        desc = GM12878_TARGET_MAP.get(track_name)
         else:
             # Treat the name itself as a target description for flexibility
             desc = track_name
