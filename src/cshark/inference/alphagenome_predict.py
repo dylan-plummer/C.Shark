@@ -177,8 +177,8 @@ def alphagenome_predict(seq_str, model, organism_index=0, contact_head=0,
     """
     dna_onehot = sequence_to_onehot_tensor(seq_str).unsqueeze(0).to(device)
 
-    # --- GPU memory saving #3: request only 128-bp resolution ----------
-    # We only need pair_activations (64×64 at 2048 bp).  Passing
+    # --- GPU memory saving #3: request only contact maps at 128-bp resolution
+    # We only need contact maps (64×64 at 2048 bp).  Passing
     # resolutions=(128,) tells the model to skip the decoder up-sampling
     # back to 131,072 positions and the expensive 1bp embeddings,
     # saving ~1+ GB of GPU memory per forward pass.
@@ -186,10 +186,31 @@ def alphagenome_predict(seq_str, model, organism_index=0, contact_head=0,
         dna_onehot,
         organism_index=organism_index,
         resolutions=(128,),
+        heads=('contact_maps',),
     )
 
-    # pair_activations: (B, S, S, 28)  channels_last
-    contacts = preds['pair_activations']
+    contact_key = None
+    for key in ('contact_maps', 'pair_activations'):
+        if key in preds:
+            contact_key = key
+            break
+
+    if contact_key is None:
+        raise RuntimeError(
+            "AlphaGenome did not return contact-map predictions "
+            "('contact_maps' or 'pair_activations'). "
+            f"Returned keys: {list(preds.keys())}. "
+            f"contact_maps_head is None: {getattr(model, 'contact_maps_head', None) is None}. "
+            "This usually means the loaded model/runtime has the contact-map head disabled."
+        )
+
+    # contact maps: (B, S, S, 28)  channels_last
+    contacts = preds[contact_key]
+    if contact_head < 0 or contact_head >= contacts.shape[-1]:
+        raise ValueError(
+            f"--contact-head {contact_head} is out of range for "
+            f"{contact_key} with {contacts.shape[-1]} tracks"
+        )
     mat = contacts[0, :, :, contact_head].float().cpu().numpy()
 
     # --- GPU memory saving #4: eagerly free prediction tensors ---------
@@ -284,14 +305,14 @@ def main():
     )
 
     # --- GPU memory saving #2: prune unused prediction heads -----------
-    # We only need pair_activations (contact maps).  Removing the seven
+    # We only need contact maps. Removing the seven
     # genome-track heads (ATAC, DNase, CAGE, RNA-seq, ChIP, …) avoids
     # allocating their forward-pass activations and output tensors.
     pruned_heads = list(model.heads.keys())
     model.heads = nn.ModuleDict()          # drop all genome-track heads
-    model.splice_site_classification_head = None
-    model.splice_site_usage_head = None
-    model.splice_site_junction_head = None
+    model.splice_sites_classification_head = None
+    model.splice_sites_usage_head = None
+    model.splice_sites_junction_head = None
     print(f'Pruned {len(pruned_heads)} unused heads: {pruned_heads}')
 
     model = model.to(device).eval()
