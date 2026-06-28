@@ -9,8 +9,8 @@ No enformer, no pyGenomeTracks.
 The body is byte-identical to the original (only dedented and wrapped): we set
 ``args = cfg`` because the block reads everything via ``args.X`` and PerturbConfig
 exposes all those fields. ``deletion_with_padding`` resolves to the new package's
-verbatim operator. (Model prediction still uses infer.prediction per window here;
-swapping to a cached CSharkModel is a verified follow-up.)
+verbatim operator, and predictions go through a single cached CSharkModel
+(loaded once, reused across all sliding windows -- fixes the old per-window reload).
 """
 import os
 import numpy as np
@@ -31,6 +31,7 @@ from cshark.inference.utils.hierarchical_utils import (
 )
 from cshark.perturb.config import WINDOW
 from cshark.perturb.operators import deletion_with_padding
+from cshark.perturb.models.base import CSharkModel
 
 
 def run_full_chrom(cfg):
@@ -145,6 +146,7 @@ def run_full_chrom(cfg):
     results_1d = {'chrom': [], 'start': [], 'end': []}
     bins_1d = []
 
+    model = None  # CSharkModel: loaded once on first window, reused for all WT/KO preds
     for start, end in tqdm(zip(starts, ends), desc='Predicting', total=len(starts)):
         seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name,
                 start, seq_path, ctcf_path, atac_path, other_feats, window=window)
@@ -174,16 +176,10 @@ def run_full_chrom(cfg):
         if ctcf_region is None:
             num_genomic_features -= 1
 
-        pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path,
-                                              other_regions,
-                                              num_genomic_features=num_genomic_features,
-                                              mat_size=image_scale, diploid=diploid,
-                                              target_1d_length=int(window / args.resolution_1d),
-                                              mid_hidden=mid_hidden,
-                                              seq_filter_size=args.seq_filter_size,
-                                              recon_1d=args.recon_1d,
-                                              undo_log=args.hic_log_transform,
-                                              other_feat_names=input_track_names[2:])
+        if model is None:
+            model = CSharkModel(cfg, num_genomic_features=num_genomic_features, diploid=diploid)
+        pred_before_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
+                                                  other_regions, input_track_names[2:])
         pred_before = pred_before_output['hic']
 
         # Save WT copies for hierarchical delta
@@ -216,16 +212,8 @@ def run_full_chrom(cfg):
         else:
             hierarchical_results_window = None
 
-        pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path,
-                                       other_regions,
-                                       num_genomic_features=num_genomic_features,
-                                       mat_size=image_scale, diploid=diploid,
-                                       target_1d_length=int(window / args.resolution_1d),
-                                       mid_hidden=mid_hidden,
-                                       seq_filter_size=args.seq_filter_size,
-                                       recon_1d=args.recon_1d,
-                                       undo_log=args.hic_log_transform,
-                                       other_feat_names=input_track_names[2:])
+        pred_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
+                                           other_regions, input_track_names[2:])
         pred = pred_output['hic']
 
         write_tmp_cooler(pred, chr_name, start, res=res)
