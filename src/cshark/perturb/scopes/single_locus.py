@@ -44,6 +44,7 @@ from cshark.perturb.dna import en_dict, reverse_complement
 from cshark.perturb.operators import deletion_with_padding, seq_perturb
 from cshark.perturb.output.arcs import write_arcs, write_regions
 from cshark.perturb.output.plots import plot_prediction_matrix
+from cshark.perturb.models.base import CSharkModel
 
 # module-level plotting constants (verbatim from the original perturb.py)
 font_size = 15
@@ -203,16 +204,11 @@ def run_single_locus(cfg):
     if ctcf_region is None:
         num_genomic_features -= 1
 
+    # Load the main model ONCE (replaces per-call load_default inside infer.prediction).
+    model = CSharkModel(cfg, num_genomic_features=num_genomic_features, diploid=diploid)
     # Baseline prediction (WT)
-    pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path,
-                                          other_regions,
-                                          num_genomic_features=num_genomic_features,
-                                          mat_size=image_scale, diploid=diploid,
-                                          mid_hidden=mid_hidden, seq_filter_size=seq_filter_size,
-                                          target_1d_length=int(window / resolution_1d),
-                                          recon_1d=recon_1d, undo_log=undo_log,
-                                          bigwig_log=bigwig_log_transform,
-                                          other_feat_names=input_track_names[2:])
+    pred_before_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
+                                              other_regions, input_track_names[2:])
     pred_before = pred_before_output['hic']
     if not no_plots:
         plot_prediction_matrix(pred_before, os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred_before.png'), 'Prediction before perturbation')
@@ -479,16 +475,8 @@ def run_single_locus(cfg):
                 )
 
     # KO prediction
-    pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path,
-                                   other_regions,
-                                   num_genomic_features=num_genomic_features,
-                                   mat_size=image_scale,
-                                   target_1d_length=int(window / resolution_1d),
-                                   diploid=diploid, mid_hidden=mid_hidden,
-                                   seq_filter_size=seq_filter_size,
-                                   recon_1d=recon_1d, undo_log=undo_log,
-                                   bigwig_log=bigwig_log_transform,
-                                   other_feat_names=input_track_names[2:])
+    pred_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
+                                       other_regions, input_track_names[2:])
     pred = pred_output['hic']
 
     if not no_plots:

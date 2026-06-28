@@ -68,10 +68,10 @@ class CSharkModel:
     def predict(self, inputs: RegionInputs) -> dict:
         # other_feat_names mirror the original ``input_track_names[2:]`` slice.
         other_feat_names = inputs.track_names[2:] if inputs.track_names else None
-        return self._predict_arrays(inputs.seq, inputs.ctcf, inputs.atac,
-                                    inputs.others, other_feat_names)
+        return self.predict_arrays(inputs.seq, inputs.ctcf, inputs.atac,
+                                   inputs.others, other_feat_names)
 
-    def _predict_arrays(self, seq_region, ctcf_region, atac_region, other_regions, other_feat_names):
+    def predict_arrays(self, seq_region, ctcf_region, atac_region, other_regions, other_feat_names):
         """Faithful port of the non-attn body of ``inference_utils.prediction``."""
         if other_regions is None:
             inputs = preprocess_default(seq_region, ctcf_region, atac_region)
