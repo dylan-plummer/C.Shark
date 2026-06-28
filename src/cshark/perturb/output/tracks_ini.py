@@ -400,3 +400,37 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                     f.write('colormap = bwr\n')
                     f.write('file_type = hic_matrix_square\n\n')
                 f.write(line)
+
+
+def run_pygenometracks(region, celltype, chr_name, deletion_starts, deletion_widths, font_size, no_plots, outname, output_path, plot_diff, plot_ground_truth, plot_width, silent, start, track_label_fraction, window):
+    """Render the .ini files to PNGs via pyGenomeTracks (extracted verbatim)."""
+    if not no_plots:
+        try:
+            region = region if region is not None else f"{chr_name}:{start}-{start + window}"
+
+            if plot_diff:
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks_diff.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+                if silent:
+                    tracks_cmd += ' > /dev/null 2>&1'
+                os.system(tracks_cmd)
+            if plot_ground_truth:
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_true_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+                if silent:
+                    tracks_cmd += ' > /dev/null 2>&1'
+                os.system(tracks_cmd)
+            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_pred_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+            if silent:
+                tracks_cmd += ' > /dev/null 2>&1'
+            os.system(tracks_cmd)
+            if deletion_starts is not None and deletion_widths is not None:
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+                if silent:
+                    tracks_cmd += ' > /dev/null 2>&1'
+                os.system(tracks_cmd)
+        except Exception as e:
+            print(e)
+
+        try:
+            os.rename('tmp/ctcf_motif.bed', 'tmp/ctcf_motifs_detected.bed')
+        except Exception:
+            pass

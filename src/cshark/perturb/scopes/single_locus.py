@@ -43,9 +43,9 @@ from cshark.perturb.config import WINDOW
 from cshark.perturb.dna import en_dict, reverse_complement
 from cshark.perturb.operators import deletion_with_padding, seq_perturb
 from cshark.perturb.output.arcs import write_arcs, write_regions
-from cshark.perturb.output.plots import plot_prediction_matrix
+from cshark.perturb.output.plots import plot_prediction_matrix, plot_pred_1d_tracks
 from cshark.perturb.models.base import CSharkModel
-from cshark.perturb.output.tracks_ini import build_track_inis
+from cshark.perturb.output.tracks_ini import build_track_inis, run_pygenometracks
 from cshark.perturb.models.hierarchical import prepare_rad21_input, apply_rad21_update
 from cshark.perturb.models.enformer import apply_enformer_seq_ko, rewrite_enformer_ko_tracks
 from cshark.perturb.operators.planning import plan_perturbations
@@ -260,46 +260,8 @@ def run_single_locus(cfg):
             pred_1d = pred_1d[left_pad_px:pred_1d.shape[0]-right_pad_px]
 
     # Write 1D track prediction bigwigs (pred_1d is already in linear space from prediction())
-    track_names = model_utils.get_1d_track_names(model_path)
-    if track_names is None:
-        track_names = []
-    for track_idx, track_name in enumerate(track_names):
-        try:
-            ctcf_pred_before = pred_before_1d[:, track_idx]
-            ctcf_pred = pred_1d[:, track_idx]
-        except (IndexError, TypeError):
-            break
-        if track_name not in plot_track_names and track_name not in input_track_names:
-            continue
-        ctcf_log2fc = np.log2((ctcf_pred + 1e-5) / (ctcf_pred_before + 1e-5))
-        log2fc_norm = ctcf_log2fc * ctcf_pred_before
-        ymax = max(np.max(ctcf_pred_before), np.max(ctcf_pred))
-
-        if not no_plots and track_name in plot_track_names:
-            fig, axs = plt.subplots(3, 1, figsize=(10, 5))
-            axs[0].plot(ctcf_pred_before, label='Before', color='blue')
-            axs[0].fill_between(range(len(ctcf_pred_before)), ctcf_pred_before, 0, color='blue', alpha=0.2)
-            axs[0].set_ylim(0, ymax)
-            axs[1].plot(ctcf_pred, label='After', color='orange')
-            axs[1].fill_between(range(len(ctcf_pred)), ctcf_pred, 0, color='orange', alpha=0.2)
-            axs[1].set_ylim(0, ymax)
-            axs[2].plot(log2fc_norm, label='Log2FC', color='green')
-            axs[2].fill_between(range(len(log2fc_norm)), log2fc_norm, 0, color='green', alpha=0.2)
-            axs[0].set_title(f'{track_name.upper()} Before')
-            axs[1].set_title(f'{track_name.upper()} After')
-            axs[2].set_title(f'{track_name.upper()} Log2FC * original signal')
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{track_name}_log2fc.png'), dpi=300)
-            plt.close(fig)
-        if track_name in plot_pred_bigwigs:
-            # pred_1d values are in linear space (expm1 applied in prediction())
-            write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred_before, track_name, chr_name, start, suffix='pred_WT')
-            write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred - ctcf_pred_before, track_name, chr_name, start, suffix='pred_diff')
-            if plot_pred_log2fc:
-                ctcf_log2fc_clipped = np.clip(ctcf_log2fc, -1, 1)
-                write_tmp_pred_bigwig(input_track_paths[0], ctcf_log2fc_clipped, track_name, chr_name, start, suffix='pred_KO')
-            else:
-                write_tmp_pred_bigwig(input_track_paths[0], ctcf_pred, track_name, chr_name, start, suffix='pred_KO')
+    plot_pred_1d_tracks(
+        celltype=celltype, chr_name=chr_name, input_track_names=input_track_names, input_track_paths=input_track_paths, model_path=model_path, no_plots=no_plots, outname=outname, output_path=output_path, plot_pred_bigwigs=plot_pred_bigwigs, plot_pred_log2fc=plot_pred_log2fc, plot_track_names=plot_track_names, pred_1d=pred_1d, pred_before_1d=pred_before_1d, start=start)
 
     plot_ground_truth = False
     if not no_plots:
@@ -363,33 +325,5 @@ def run_single_locus(cfg):
         start=start,
     )
 
-    if not no_plots:
-        try:
-            region = region if region is not None else f"{chr_name}:{start}-{start + window}"
-
-            if plot_diff:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks_diff.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
-                if silent:
-                    tracks_cmd += ' > /dev/null 2>&1'
-                os.system(tracks_cmd)
-            if plot_ground_truth:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_true_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
-                if silent:
-                    tracks_cmd += ' > /dev/null 2>&1'
-                os.system(tracks_cmd)
-            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_pred_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
-            if silent:
-                tracks_cmd += ' > /dev/null 2>&1'
-            os.system(tracks_cmd)
-            if deletion_starts is not None and deletion_widths is not None:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
-                if silent:
-                    tracks_cmd += ' > /dev/null 2>&1'
-                os.system(tracks_cmd)
-        except Exception as e:
-            print(e)
-
-        try:
-            os.rename('tmp/ctcf_motif.bed', 'tmp/ctcf_motifs_detected.bed')
-        except Exception:
-            pass
+    run_pygenometracks(
+        region=region, celltype=celltype, chr_name=chr_name, deletion_starts=deletion_starts, deletion_widths=deletion_widths, font_size=font_size, no_plots=no_plots, outname=outname, output_path=output_path, plot_diff=plot_diff, plot_ground_truth=plot_ground_truth, plot_width=plot_width, silent=silent, start=start, track_label_fraction=track_label_fraction, window=window)
