@@ -48,6 +48,7 @@ from cshark.perturb.models.base import CSharkModel
 from cshark.perturb.output.tracks_ini import build_track_inis
 from cshark.perturb.models.hierarchical import prepare_rad21_input, apply_rad21_update
 from cshark.perturb.models.enformer import apply_enformer_seq_ko, rewrite_enformer_ko_tracks
+from cshark.perturb.operators.planning import plan_perturbations
 
 # module-level plotting constants (verbatim from the original perturb.py)
 font_size = 15
@@ -207,112 +208,8 @@ def run_single_locus(cfg):
         elif ko != 'seq':
             print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
 
-    # Resolve --alt list
-    alt_bp_list = alt_bp if alt_bp is not None else []
-    _alt_keywords = {'reverse', 'shuffle', 'random'}
-    if deletion_starts is not None and deletion_widths is None:
-        deletion_widths = []
-        for i, ds in enumerate(deletion_starts):
-            if i < len(alt_bp_list) and alt_bp_list[i].lower() not in _alt_keywords:
-                deletion_widths.append(max(1, len(alt_bp_list[i])))
-            else:
-                deletion_widths.append(1)
-
-    def _resolve_alt_string(raw_alt, rel_start, rel_end, current_seq_region, label):
-        idx_to_base = {0: 'a', 1: 't', 2: 'c', 3: 'g', 4: 'n'}
-        raw_alt_lower = raw_alt.lower()
-        if raw_alt_lower == 'reverse':
-            rc = reverse_complement(current_seq_region[rel_start:rel_end, :])
-            alt_string = ''.join(idx_to_base[row.argmax()] for row in rc)
-            print(f'[{label}] Using reverse-complement of {chr_name}:{start + rel_start}-{start + rel_end}')
-            return alt_string
-        if raw_alt_lower == 'shuffle':
-            sub = current_seq_region[rel_start:rel_end, :].copy()
-            idxs = np.arange(sub.shape[0])
-            np.random.shuffle(idxs)
-            sub = sub[idxs, :]
-            alt_string = ''.join(idx_to_base[row.argmax()] for row in sub)
-            print(f'[{label}] Using shuffled bases of {chr_name}:{start + rel_start}-{start + rel_end}')
-            return alt_string
-        if raw_alt_lower == 'random':
-            bases = 'acgt'
-            alt_string = ''.join(np.random.choice(list(bases)) for _ in range(rel_end - rel_start))
-            print(f'[{label}] Using random bases for {chr_name}:{start + rel_start}-{start + rel_end}')
-            return alt_string
-        return raw_alt
-
-    # Apply perturbations
-    enformer_seq_active = False
-    hierarchical_active = hierarchical_rad21_model is not None
-    pending_track_perturbations = []
-
-    if deletion_starts is not None and deletion_widths is not None:
-        for ko_idx, (deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height) in enumerate(
-                zip(deletion_starts, deletion_widths, ko_data_types, ko_mode, peak_height)):
-            raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
-
-            if knockout_mode == 'enformer_seq':
-                deletion_start -= 1
-                enformer_seq_active = True
-                rel_start = deletion_start - start
-                rel_end = rel_start + deletion_width
-                alt_string = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, 'enformer_seq')
-                print(f'[enformer_seq] Queued {len(alt_string)} base(s) at '
-                      f'{chr_name}:{deletion_start} (rel {rel_start}): {alt_string.upper()}')
-                for bp_offset, base in enumerate(alt_string):
-                    abs_pos = rel_start + bp_offset
-                    if 0 <= abs_pos < seq_region.shape[0]:
-                        if seq2_path is not None:
-                            seq1 = seq_region[:, :seq_region.shape[1] // 2]
-                            seq2 = seq_region[:, seq_region.shape[1] // 2:]
-                            seq1 = seq_perturb(abs_pos, base, seq1)
-                            seq2 = seq_perturb(abs_pos, base, seq2)
-                            seq_region = np.concatenate((seq1, seq2), axis=1)
-                        else:
-                            seq_region = seq_perturb(abs_pos, base, seq_region)
-                continue
-
-            if knockout_mode == 'seq':
-                deletion_start -= 1
-                rel_start = deletion_start - start
-                rel_end = rel_start + deletion_width
-                alt_string = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, 'seq')
-                print(f'[seq] Substituting {len(alt_string)} base(s) at '
-                      f'{chr_name}:{deletion_start} (rel {rel_start}): {alt_string.upper()}')
-                for bp_offset, base in enumerate(alt_string):
-                    abs_pos = rel_start + bp_offset
-                    if 0 <= abs_pos < seq_region.shape[0]:
-                        if seq2_path is not None:
-                            seq1 = seq_region[:, :seq_region.shape[1] // 2]
-                            seq2 = seq_region[:, seq_region.shape[1] // 2:]
-                            seq1 = seq_perturb(abs_pos, base, seq1)
-                            seq2 = seq_perturb(abs_pos, base, seq2)
-                            seq_region = np.concatenate((seq1, seq2), axis=1)
-                        else:
-                            seq_region = seq_perturb(abs_pos, base, seq_region)
-                continue
-
-            if ko_data_type in input_track_names:
-                ko_channel = input_track_names.index(ko_data_type)
-            else:
-                ko_channel = -1
-            left_del_pad = None
-            right_del_pad = None
-            if knockout_mode in ('del', 'deletion', 'delete'):
-                left_pad_bp = deletion_width // 2
-                right_pad_bp = deletion_width - left_pad_bp
-                left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other = infer.load_region(chr_name,
-                    start - left_pad_bp, seq_path, ctcf_path, atac_path, other_feats,
-                    seq2_path=seq2_path, window=left_pad_bp, bigwig_log=bigwig_log_transform)
-                left_del_pad = (left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other)
-                right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other = infer.load_region(chr_name,
-                    start + window + right_pad_bp, seq_path, ctcf_path, atac_path, other_feats,
-                    seq2_path=seq2_path, window=right_pad_bp, bigwig_log=bigwig_log_transform)
-                right_del_pad = (right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other)
-            pending_track_perturbations.append((
-                deletion_start, deletion_width, ko_data_type, ko_channel,
-                channel_offset, knockout_mode, ko_height, left_del_pad, right_del_pad,
-            ))
+    seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, hierarchical_active = plan_perturbations(
+        alt_bp=alt_bp, atac_path=atac_path, bigwig_log_transform=bigwig_log_transform, channel_offset=channel_offset, chr_name=chr_name, ctcf_path=ctcf_path, deletion_starts=deletion_starts, deletion_widths=deletion_widths, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, ko_data_types=ko_data_types, ko_mode=ko_mode, other_feats=other_feats, peak_height=peak_height, seq2_path=seq2_path, seq_path=seq_path, seq_region=seq_region, start=start, window=window)
 
     ctcf_region, atac_region, other_regions, enformer_perturbed_track_names = apply_enformer_seq_ko(
         assembly=assembly, atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, celltype=celltype, chr_name=chr_name, ctcf_region=ctcf_region, enformer_delta_cap=enformer_delta_cap, enformer_delta_mode=enformer_delta_mode, enformer_model_path=enformer_model_path, enformer_seq_active=enformer_seq_active, enformer_tracks=enformer_tracks, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window)
