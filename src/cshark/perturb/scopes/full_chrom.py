@@ -1,12 +1,430 @@
-"""Full-chromosome perturbation runner (scaffold).
+"""Full-chromosome perturbation runner.
 
-Ports the full-chrom branch of ``main`` (perturb.py lines 260-651): slide 2Mb
-windows across the chromosome, predict WT/KO per window, merge pixel counts,
-write cooler/TSV/bigwig outputs. No plotting.
+Faithful transcription of the full-chrom branch of the original ``main()``
+(perturb.py lines 262-651): slide 2Mb windows across the chromosome (or
+``--region``), predict WT + KO per window, average overlapping pixels, and write
+the aggregated TSV / cooler / hierarchical-RAD21 bed+bigwig / scatter outputs.
+No enformer, no pyGenomeTracks.
 
-    def run_full_chrom(cfg, model, secondaries) -> PerturbResult
+The body is byte-identical to the original (only dedented and wrapped): we set
+``args = cfg`` because the block reads everything via ``args.X`` and PerturbConfig
+exposes all those fields. ``deletion_with_padding`` resolves to the new package's
+verbatim operator. (Model prediction still uses infer.prediction per window here;
+swapping to a cached CSharkModel is a verified follow-up.)
 """
+import os
+import numpy as np
+import pandas as pd
+import cooler
+import seaborn as sns
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from skimage.transform import resize
+
+from cshark.data.data_feature import GenomicFeature, HiCFeature, SequenceFeature
+import cshark.inference.utils.inference_utils as infer
+from cshark.inference.utils.inference_utils import write_tmp_cooler, oe_normalize_cooler
+from cshark.inference.utils.hierarchical_utils import (
+    load_hierarchical_rad21_predictor, hierarchical_rad21_update,
+)
+from cshark.perturb.config import WINDOW
+from cshark.perturb.operators import deletion_with_padding
 
 
-def run_full_chrom(cfg, model, secondaries):
-    raise NotImplementedError("Port full-chrom loop (perturb.py 260-651) onto the shared inner body.")
+def run_full_chrom(cfg):
+    args = cfg
+    other_feats = cfg.other_feats
+    window = WINDOW
+    res = cfg.resolution
+    image_scale = cfg.mat_size
+    chr_name = args.chr_name
+    if args.ctcf_path is not None:
+        bw = GenomicFeature(args.ctcf_path, 'bw')
+        chr_length = bw.length(chr_name)
+    else:
+        seq_file = os.path.join(args.seq_path, f'{chr_name}.fa.gz')
+        seq_feature = SequenceFeature(path=seq_file)
+        chr_length = len(seq_feature)
+    if args.out_file is None:
+        args.out_file = os.path.join(args.output_path, f'{args.outname}_{args.celltype}_{chr_name}_full_chr.tsv')
+    print(f'Chromosome length: {chr_length}')
+
+    seq_path = args.seq_path
+    ctcf_path = args.ctcf_path
+    atac_path = args.atac_path
+    model_path = args.model_path
+    mid_hidden = args.mid_hidden
+    ko_data = args.ko_data
+    ko_mode = args.ko_mode
+    region = args.region
+
+    step_size = int(window / args.n_overlap_preds)
+    if region is not None:
+        if ':' in region:
+            chr_name, region = region.split(':')
+            start, end = region.split('-')
+            region_start = int(start)
+            region_end = int(end)
+        else:
+            start, end = region.split('-')
+            region_start = int(start)
+            region_end = int(end)
+        starts = np.arange(region_start - step_size, region_end + step_size, step_size)
+    else:
+        starts = np.arange(0, chr_length - window, step_size)
+    ends = starts + window
+    results = {'a1': [], 'a2': [], 'WT': [], 'KO': []}
+    if args.oe_norm:
+        results['exp_WT'] = []
+    bins = []
+
+    input_track_names = []
+    input_track_paths = []
+    if ctcf_path is not None:
+        input_track_names.append('ctcf')
+        input_track_paths.append(ctcf_path)
+    if atac_path is not None:
+        input_track_names.append('atac')
+        input_track_paths.append(atac_path)
+    if other_feats is not None:
+        for other_feat in other_feats:
+            input_track_names.append(os.path.basename(other_feat).split('.')[0])
+            input_track_paths.append(other_feat)
+
+    ko_channels = []
+    channel_offset = sum(1 for t in ['ctcf', 'atac'] if t in input_track_names)
+    for ko in ko_data:
+        if ko in input_track_names:
+            ko_channels.append(input_track_names.index(ko))
+        elif ko != 'seq':
+            print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
+
+    diploid = args.seq2_path is not None
+
+    # Load hierarchical RAD21 predictor if requested
+    hierarchical_rad21_model = None
+    hierarchical_rad21_idx = None
+    rad21_other_idx_hier = None
+    use_hierarchical = args.hierarchical_model_path is not None
+    fill_rad21 = False          # whether to predict+insert rad21 each window
+    rad21_insert_other_pos = None
+    if use_hierarchical:
+        hierarchical_rad21_model, hier_all_tracks, hierarchical_rad21_idx, _ = \
+            load_hierarchical_rad21_predictor(args.hierarchical_model_path)
+        other_track_names_hier = input_track_names[channel_offset:]
+        if 'rad21' not in other_track_names_hier:
+            # Predict and insert rad21 from the model rather than disabling
+            from cshark.inference.utils.model_utils import get_all_track_names as _gat
+            main_all_tracks, _, _ = _gat(model_path)
+            if 'rad21' in main_all_tracks:
+                other_main = [t for t in main_all_tracks if t not in ('ctcf', 'atac')]
+                rad21_insert_other_pos = other_main.index('rad21')
+                fill_rad21 = True
+                insert_global = 2 + rad21_insert_other_pos
+                input_track_names.insert(insert_global, 'rad21')
+                input_track_paths.insert(insert_global, 'tmp/rad21_hierarchical_wt_pred.bw')
+                rad21_other_idx_hier = rad21_insert_other_pos
+                print(f'[hierarchical] Will predict RAD21 each window and insert at '
+                      f'other-position {rad21_insert_other_pos}.')
+            else:
+                print('[hierarchical] Warning: rad21 not in main model tracks. Disabling hierarchical.')
+                use_hierarchical = False
+                hierarchical_rad21_model = None
+        else:
+            rad21_other_idx_hier = other_track_names_hier.index('rad21')
+
+    results_hierarchical = {'chrom': [], 'start': [], 'end': []}
+    if use_hierarchical:
+        for col in ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc',
+                    'rad21_perturbed', 'rad21_experimental']:
+            results_hierarchical[col] = []
+
+    track_names = []
+    results_1d = {'chrom': [], 'start': [], 'end': []}
+    bins_1d = []
+
+    for start, end in tqdm(zip(starts, ends), desc='Predicting', total=len(starts)):
+        seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name,
+                start, seq_path, ctcf_path, atac_path, other_feats, window=window)
+
+        # When rad21 was absent from input bigwigs, predict it and insert so
+        # the main model receives the correct number of input channels.
+        if fill_rad21 and rad21_insert_other_pos is not None:
+            from cshark.inference.utils.hierarchical_utils import predict_rad21
+            from cshark.inference.utils.inference_utils import preprocess_default as _pp
+            _inputs = _pp(seq_region, ctcf_region, atac_region, other_regions)
+            rad21_linear = predict_rad21(hierarchical_rad21_model, _inputs, rad21_idx=None)
+            ref_len = len(ctcf_region) if ctcf_region is not None else (
+                len(atac_region) if atac_region is not None else
+                (len(other_regions[0]) if other_regions else len(rad21_linear)))
+            if len(rad21_linear) != ref_len:
+                rad21_linear = np.interp(np.linspace(0, 1, ref_len),
+                                         np.linspace(0, 1, len(rad21_linear)), rad21_linear)
+            rad21_log1p = np.log1p(rad21_linear)
+            if other_regions is None:
+                other_regions = [rad21_log1p]
+            else:
+                other_regions.insert(rad21_insert_other_pos, rad21_log1p)
+
+        num_genomic_features = 2 if other_regions is None else 2 + len(other_regions)
+        if atac_region is None:
+            num_genomic_features -= 1
+        if ctcf_region is None:
+            num_genomic_features -= 1
+
+        pred_before_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path,
+                                              other_regions,
+                                              num_genomic_features=num_genomic_features,
+                                              mat_size=image_scale, diploid=diploid,
+                                              target_1d_length=int(window / args.resolution_1d),
+                                              mid_hidden=mid_hidden,
+                                              seq_filter_size=args.seq_filter_size,
+                                              recon_1d=args.recon_1d,
+                                              undo_log=args.hic_log_transform,
+                                              other_feat_names=input_track_names[2:])
+        pred_before = pred_before_output['hic']
+
+        # Save WT copies for hierarchical delta
+        if use_hierarchical:
+            seq_region_wt = seq_region.copy()
+            ctcf_region_wt = ctcf_region.copy() if ctcf_region is not None else None
+            atac_region_wt = atac_region.copy() if atac_region is not None else None
+            other_regions_wt = [r.copy() for r in other_regions] if other_regions is not None else None
+            experimental_rad21 = other_regions[rad21_other_idx_hier].copy()
+
+        seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(
+            chr_name, start, start, window, seq_region, ctcf_region,
+            atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels,
+            channel_offset=channel_offset, ko_mode=ko_mode,
+            peak_height=args.peak_height)
+
+        if use_hierarchical and other_regions is not None:
+            # Use the tensor position of rad21 (not the checkpoint's internal idx)
+            rad21_tensor_idx = input_track_names.index('rad21')
+            other_regions, hierarchical_results_window = hierarchical_rad21_update(
+                hierarchical_rad21_model, rad21_tensor_idx,
+                seq_region_wt, ctcf_region_wt, atac_region_wt, other_regions_wt,
+                seq_region, ctcf_region, atac_region, other_regions,
+                experimental_rad21,
+                input_track_names,
+                delta_mode=args.hierarchical_delta_mode,
+                cap=args.hierarchical_delta_cap,
+                window=window,
+            )
+        else:
+            hierarchical_results_window = None
+
+        pred_output = infer.prediction(seq_region, ctcf_region, atac_region, model_path,
+                                       other_regions,
+                                       num_genomic_features=num_genomic_features,
+                                       mat_size=image_scale, diploid=diploid,
+                                       target_1d_length=int(window / args.resolution_1d),
+                                       mid_hidden=mid_hidden,
+                                       seq_filter_size=args.seq_filter_size,
+                                       recon_1d=args.recon_1d,
+                                       undo_log=args.hic_log_transform,
+                                       other_feat_names=input_track_names[2:])
+        pred = pred_output['hic']
+
+        write_tmp_cooler(pred, chr_name, start, res=res)
+        write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool', res=res)
+        pred_cooler = cooler.Cooler('tmp/tmp.cool')
+        pred_before_cooler = cooler.Cooler('tmp/tmp_before.cool')
+        wt_pixels = pred_before_cooler.pixels()[:].rename(columns={'count': 'WT'})
+        ko_pixels = pred_cooler.pixels()[:].rename(columns={'count': 'KO'})
+
+        if args.oe_norm:
+            ctcf_filename = os.path.basename(ctcf_path).split('.')[0]
+            hic_path = ctcf_path.replace('genomic_features', 'hic_matrix').replace(f'/{ctcf_filename}.bw', '') + f'/{chr_name}.npz'
+            hic = HiCFeature(path=hic_path)
+            gt_res = 10000 if res == 8192 else (5000 if res == 4096 else res)
+            mat = hic.get(start, window=int(window), res=gt_res)
+            mat = resize(mat, (int(image_scale), int(image_scale)), anti_aliasing=True, preserve_range=True)
+            mat += 0.01
+            write_tmp_cooler(mat, chr_name, start, window=(int(window * 2)), out_file='tmp/tmp_true.cool', res=res)
+            true_pixels = cooler.Cooler('tmp/tmp_true.cool').pixels()[:].rename(columns={'count': 'exp_WT'})
+            pixels = wt_pixels.merge(ko_pixels, how='outer').merge(true_pixels, how='outer')
+            results['exp_WT'].extend(pixels['exp_WT'].tolist())
+        else:
+            pixels = wt_pixels.merge(ko_pixels, how='outer')
+        results['a1'].extend(pixels['bin1_id'].tolist())
+        results['a2'].extend(pixels['bin2_id'].tolist())
+        results['WT'].extend(pixels['WT'].tolist())
+        results['KO'].extend(pixels['KO'].tolist())
+        bins.append(pred_before_cooler.bins()[:])
+
+        # Collect hierarchical results
+        if use_hierarchical and hierarchical_results_window is not None:
+            wt_pred_h = hierarchical_results_window['wt_pred']
+            ko_pred_h = hierarchical_results_window['ko_pred']
+            delta_h = hierarchical_results_window['delta']
+            fc_h = hierarchical_results_window['fold_change']
+            perturbed_h = hierarchical_results_window['perturbed_rad21']
+            n_bins_h = len(wt_pred_h)
+            res_h = int(window / n_bins_h)
+            bin_range_h = np.int32(np.linspace(start, start + window - res_h, n_bins_h))
+            results_hierarchical['chrom'].extend([chr_name] * n_bins_h)
+            results_hierarchical['start'].extend(bin_range_h.tolist())
+            results_hierarchical['end'].extend((bin_range_h + res_h).tolist())
+            results_hierarchical['rad21_WT_pred'].extend(wt_pred_h.tolist())
+            results_hierarchical['rad21_KO_pred'].extend(ko_pred_h.tolist())
+            results_hierarchical['rad21_delta'].extend(delta_h.tolist())
+            results_hierarchical['rad21_fc'].extend(fc_h.tolist())
+            # perturbed_h is log1p (or None in prediction-only mode)
+            if perturbed_h is not None:
+                if len(perturbed_h) != n_bins_h:
+                    perturbed_h = np.interp(np.linspace(0, 1, n_bins_h),
+                                            np.linspace(0, 1, len(perturbed_h)), perturbed_h)
+                results_hierarchical['rad21_perturbed'].extend(perturbed_h.tolist())
+            else:
+                results_hierarchical['rad21_perturbed'].extend([float('nan')] * n_bins_h)
+            # Experimental RAD21 (only available when rad21 bigwig provided)
+            if experimental_rad21 is not None:
+                exp_rad21_h = experimental_rad21.copy()
+                if len(exp_rad21_h) != n_bins_h:
+                    exp_rad21_h = np.interp(np.linspace(0, 1, n_bins_h),
+                                            np.linspace(0, 1, len(exp_rad21_h)), exp_rad21_h)
+                results_hierarchical['rad21_experimental'].extend(exp_rad21_h.tolist())
+            else:
+                results_hierarchical['rad21_experimental'].extend([float('nan')] * n_bins_h)
+
+    try:
+        os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
+    except Exception as e:
+        print(f"Error creating directory: {e}")
+    if not args.out_file.endswith('.tsv'):
+        args.out_file += '.tsv'
+
+    res_df = pd.DataFrame(results).groupby(['a1', 'a2']).mean().reset_index()
+    res_df['a1'] = 'A_' + res_df['a1'].astype(str)
+    res_df['a2'] = 'A_' + res_df['a2'].astype(str)
+    print(res_df)
+    bins_df = pd.concat(bins, ignore_index=True).drop_duplicates().reset_index(drop=True)
+    bins_df['bin_id'] = 'A_' + bins_df.index.astype(str)
+    print(bins_df)
+    chr_map = bins_df.set_index('bin_id')['chrom'].to_dict()
+    start_map = bins_df.set_index('bin_id')['start'].to_dict()
+    end_map = bins_df.set_index('bin_id')['end'].to_dict()
+    res_df['chrom1'] = res_df['a1'].map(chr_map)
+    res_df['chrom2'] = res_df['a2'].map(chr_map)
+    res_df['start1'] = res_df['a1'].map(start_map)
+    res_df['start2'] = res_df['a2'].map(start_map)
+    res_df['end1'] = res_df['a1'].map(end_map)
+    res_df['end2'] = res_df['a2'].map(end_map)
+    res_df = res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO'] +
+                    (['exp_WT'] if args.oe_norm else [])]
+    if region is not None:
+        res_df = res_df[(res_df['start1'] >= region_start) & (res_df['end1'] <= region_end) &
+                        (res_df['start2'] >= region_start) & (res_df['end2'] <= region_end)]
+        bins_df = bins_df[(bins_df['start'] >= region_start) & (bins_df['end'] <= region_end)]
+    res_df.to_csv(args.out_file, sep='\t', header=True, index=False)
+    bins_df.to_csv(args.out_file.replace('.tsv', '_bins.tsv'), sep='\t', header=False, index=False)
+
+    # Cooler outputs
+    bins_cooler_df = bins_df[['chrom', 'start', 'end']].copy()
+    bins_cooler_df.reset_index(inplace=True)
+    wt_cooler_df = res_df[['a1', 'a2', 'WT']].rename(columns={'WT': 'count'})
+    ko_cooler_df = res_df[['a1', 'a2', 'KO']].rename(columns={'KO': 'count'})
+    for df in [wt_cooler_df, ko_cooler_df]:
+        df['bin1_id'] = df['a1'].map(lambda x: int(x.replace('A_', '')))
+        df['bin2_id'] = df['a2'].map(lambda x: int(x.replace('A_', '')))
+    wt_cooler_df = wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
+    ko_cooler_df = ko_cooler_df[['bin1_id', 'bin2_id', 'count']]
+    cooler.create_cooler(args.out_file.replace('.tsv', '_WT.cool'), bins_cooler_df, wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
+    cooler.create_cooler(args.out_file.replace('.tsv', '_KO.cool'), bins_cooler_df, ko_cooler_df, ordered=True, dtypes={'count': 'float32'})
+
+    if args.oe_norm:
+        exp_wt_cooler_df = res_df[['a1', 'a2', 'exp_WT']].rename(columns={'exp_WT': 'count'})
+        exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
+        exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+        exp_wt_cooler_df = exp_wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
+        cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT.cool'), bins_cooler_df, exp_wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
+
+        dist_norm_res_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_WT.cool')))
+        dist_norm_res_KO_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_KO.cool')))
+        dist_norm_res_exp_WT_df = oe_normalize_cooler(cooler.Cooler(args.out_file.replace('.tsv', '_exp_WT.cool')))
+        dist_norm_res_df = dist_norm_res_WT_df.merge(dist_norm_res_KO_df, on=['bin1_id', 'bin2_id'], suffixes=('_WT', '_KO'))
+        dist_norm_res_df = dist_norm_res_df.merge(dist_norm_res_exp_WT_df, on=['bin1_id', 'bin2_id'])
+        dist_norm_res_df = dist_norm_res_df.rename(columns={'count': 'exp_WT', 'count_WT': 'WT', 'count_KO': 'KO'})
+        dist_norm_res_df['a1'] = res_df['a1']
+        dist_norm_res_df['a2'] = res_df['a2']
+        for col in ['WT', 'KO', 'exp_WT']:
+            dist_norm_res_df[col] = dist_norm_res_df[col].round(3)
+        dist_norm_res_df['chrom1'] = chr_name
+        dist_norm_res_df['chrom2'] = chr_name
+        dist_norm_res_df['start1'] = dist_norm_res_df['a1'].map(start_map)
+        dist_norm_res_df['end1'] = dist_norm_res_df['a1'].map(end_map)
+        dist_norm_res_df['start2'] = dist_norm_res_df['a2'].map(start_map)
+        dist_norm_res_df['end2'] = dist_norm_res_df['a2'].map(end_map)
+        dist_norm_res_df.dropna(inplace=True)
+        dist_norm_res_df = dist_norm_res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO', 'exp_WT']]
+        for col in ['start1', 'end1', 'start2', 'end2']:
+            dist_norm_res_df[col] = dist_norm_res_df[col].astype(int)
+        dist_norm_res_df = dist_norm_res_df[(dist_norm_res_df['WT'] >= 1e-4) | (dist_norm_res_df['KO'] >= 1e-4) | (dist_norm_res_df['exp_WT'] >= 1e-4)].reset_index(drop=True)
+        dist_norm_res_df.to_csv(args.out_file.replace('.tsv', '_oe_norm.tsv'), sep='\t', header=True, index=False)
+        for suffix, norm_df in [('_WT_oe_norm', dist_norm_res_WT_df), ('_KO_oe_norm', dist_norm_res_KO_df), ('_exp_WT_oe_norm', dist_norm_res_exp_WT_df)]:
+            cooler.create_cooler(args.out_file.replace('.tsv', f'{suffix}.cool'), bins_cooler_df, norm_df[['bin1_id', 'bin2_id', 'count']], ordered=True, dtypes={'count': 'float32'})
+
+    # Save hierarchical RAD21 predictions
+    if use_hierarchical and len(results_hierarchical['chrom']) > 0:
+        res_hier_df = pd.DataFrame(results_hierarchical).groupby(['chrom', 'start', 'end']).mean().reset_index()
+        hier_col_names = ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc',
+                          'rad21_perturbed', 'rad21_experimental']
+        res_hier_df = res_hier_df[['chrom', 'start', 'end'] + hier_col_names]
+        if region is not None:
+            res_hier_df = res_hier_df[(res_hier_df['start'] >= region_start) & (res_hier_df['end'] <= region_end)]
+        hier_out_path = args.out_file.replace('.tsv', '_hierarchical_rad21.bed')
+        for col in hier_col_names:
+            res_hier_df[col] = res_hier_df[col].round(4)
+        res_hier_df.to_csv(hier_out_path, sep='\t', header=True, index=False)
+        print(f'[hierarchical] Saved to {hier_out_path}')
+
+        import pyBigWig
+        rad21_bw_base = input_track_paths[input_track_names.index('rad21')]
+        _bw_ref = pyBigWig.open(rad21_bw_base)
+        header_list = list(_bw_ref.chroms().items())
+        _bw_ref.close()
+        hier_sorted = res_hier_df.sort_values('start').reset_index(drop=True)
+        for bw_out_path, col_name in [
+            (args.out_file.replace('.tsv', '_hierarchical_rad21_WT.bw'), 'rad21_WT_pred'),
+            (args.out_file.replace('.tsv', '_hierarchical_rad21_KO.bw'), 'rad21_KO_pred'),
+            # perturbed stored as log1p in results; convert to linear for bigwig
+            (args.out_file.replace('.tsv', '_hierarchical_rad21_perturbed_linear.bw'), 'rad21_perturbed'),
+            (args.out_file.replace('.tsv', '_hierarchical_rad21_experimental.bw'), 'rad21_experimental'),
+            (args.out_file.replace('.tsv', '_hierarchical_rad21_delta.bw'), 'rad21_delta'),
+        ]:
+            out_bw = pyBigWig.open(bw_out_path, 'w')
+            out_bw.addHeader(header_list)
+            values = hier_sorted[col_name].astype(float).tolist()
+            if col_name == 'rad21_perturbed':
+                # stored as log1p — convert to linear for visualization
+                values = np.expm1(np.clip(values, 0, None)).tolist()
+            elif col_name == 'rad21_experimental':
+                # stored as log1p — convert to linear
+                values = np.expm1(np.clip(values, 0, None)).tolist()
+            out_bw.addEntries(hier_sorted['chrom'].tolist(),
+                              hier_sorted['start'].astype(int).tolist(),
+                              ends=hier_sorted['end'].astype(int).tolist(),
+                              values=values)
+            out_bw.close()
+            print(f'[hierarchical] Wrote {bw_out_path}')
+
+        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+        sns.scatterplot(data=res_hier_df, x='rad21_WT_pred', y='rad21_KO_pred', alpha=0.5, ax=axs[0])
+        axs[0].set_title('Hierarchical RAD21 WT vs KO')
+        axs[0].set_aspect('equal', adjustable='box')
+        axs[1].hist(res_hier_df['rad21_delta'], bins=50, alpha=0.7)
+        axs[1].set_title('RAD21 Delta Distribution')
+        axs[2].hist(res_hier_df['rad21_fc'], bins=50, alpha=0.7)
+        axs[2].set_title('RAD21 Fold Change Distribution')
+        plt.tight_layout()
+        plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_hierarchical_rad21.png'), dpi=300)
+        plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    sns.scatterplot(data=res_df, x='WT', y='KO', ax=ax)
+    ax.set_title('WT vs KO')
+    plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_scatter.png'), dpi=300)
+    plt.close(fig)
