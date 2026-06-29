@@ -88,7 +88,8 @@ def _redistribute_rad21_alleles(ref_set, alt_set, *, seq_region, other_regions_w
 
 def _predict_and_write_allele(cfg, label, *, model, seq_region, ctcf_a, atac_a, other_a,
                               input_track_names, input_track_paths, pred_before, pred_before_1d,
-                              enformer_perturbed_track_names, plot_track_names, plot_track_paths,
+                              enformer_perturbed_track_names, extra_perturbed=frozenset(),
+                              plot_track_names, plot_track_paths,
                               deletion_starts, deletion_widths, res, image_scale, window):
     """Run the model on one allele's track set and write its full output set,
     with a ``_<label>`` filename prefix. Mirrors single_locus lines ~234-329 for
@@ -116,10 +117,15 @@ def _predict_and_write_allele(cfg, label, *, model, seq_region, ctcf_a, atac_a, 
         base += '_'
     allele_outname = f'{base}{label}_'
 
-    # Rewrite the enformer-KO plotting bigwigs from THIS allele's final inputs.
+    # Tracks shown as "<track> SNP perturb": the enformer-redistributed ones, plus
+    # rad21 (hierarchical per-allele redistribution) when present -- so the perturbed
+    # rad21 actually appears on the figure instead of only its WT track.
+    plot_perturbed = set(enformer_perturbed_track_names) | set(extra_perturbed)
+
+    # Write the perturbed plotting bigwigs from THIS allele's final inputs.
     rewrite_enformer_ko_tracks(
         atac_region=atac_a, bigwig_log_transform=bigwig_log_transform, chr_name=chr_name,
-        ctcf_region=ctcf_a, enformer_perturbed_track_names=enformer_perturbed_track_names,
+        ctcf_region=ctcf_a, enformer_perturbed_track_names=plot_perturbed,
         input_track_names=input_track_names, input_track_paths=input_track_paths,
         other_regions=other_a, start=start, window=window)
 
@@ -187,7 +193,7 @@ def _predict_and_write_allele(cfg, label, *, model, seq_region, ctcf_a, atac_a, 
     # prediction. Enformer-KO tracks ARE plotted (rewritten above).
     build_track_inis(
         assembly=assembly, celltype=celltype, chr_name=chr_name, ctcf_motif_p=ctcf_motif_p,
-        ctcf_path=ctcf_path, enformer_perturbed_track_names=enformer_perturbed_track_names,
+        ctcf_path=ctcf_path, enformer_perturbed_track_names=plot_perturbed,
         enformer_seq_active=True, hierarchical_active=False,
         input_track_names=input_track_names, input_track_paths=input_track_paths, ko_data=ko_data,
         max_val_diff=cfg.max_val_diff, max_val_pred=cfg.max_val_pred, max_val_true=cfg.max_val_true,
@@ -201,7 +207,7 @@ def _predict_and_write_allele(cfg, label, *, model, seq_region, ctcf_a, atac_a, 
         deletion_widths=deletion_widths, font_size=font_size, no_plots=no_plots,
         outname=allele_outname, output_path=output_path, plot_diff=plot_diff,
         plot_ground_truth=plot_ground_truth, plot_width=plot_width, silent=silent, start=start,
-        track_label_fraction=track_label_fraction, window=window)
+        track_label_fraction=track_label_fraction, window=window, is_snp=True)
     print(f'[allele-peak-split] Wrote {label} allele outputs (prefix "{allele_outname}").')
 
 
@@ -230,6 +236,12 @@ def run_allele_peak_split(cfg, *, model, seq_region, seq_region_wt,
         input_track_names=input_track_names, hierarchical_rad21_model=hierarchical_rad21_model,
         cap=cap, bigwig_log_transform=cfg.bigwig_log_transform)
 
+    # rad21 is redistributed via the hierarchical per-allele step (not enformer), so
+    # add it to the plotted perturbed-tracks set when a hierarchical model is used --
+    # otherwise its perturbed track never appears (only its WT track would).
+    extra_perturbed = ({'rad21'} if (hierarchical_rad21_model is not None
+                                     and 'rad21' in input_track_names) else set())
+
     # 3. Per allele: predict + full output set.
     for label, (ctcf_a, atac_a, other_a) in (('ref', ref_set), ('alt', alt_set)):
         _predict_and_write_allele(
@@ -237,6 +249,7 @@ def run_allele_peak_split(cfg, *, model, seq_region, seq_region_wt,
             other_a=other_a, input_track_names=input_track_names, input_track_paths=input_track_paths,
             pred_before=pred_before, pred_before_1d=pred_before_1d,
             enformer_perturbed_track_names=enformer_perturbed_track_names,
+            extra_perturbed=extra_perturbed,
             plot_track_names=plot_track_names, plot_track_paths=plot_track_paths,
             deletion_starts=deletion_starts, deletion_widths=deletion_widths,
             res=res, image_scale=image_scale, window=window)

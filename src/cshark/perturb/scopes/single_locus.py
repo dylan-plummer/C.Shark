@@ -345,4 +345,4 @@ def run_single_locus(cfg):
     )
 
     run_pygenometracks(
-        region=region, celltype=celltype, chr_name=chr_name, deletion_starts=deletion_starts, deletion_widths=deletion_widths, font_size=font_size, no_plots=no_plots, outname=outname, output_path=output_path, plot_diff=plot_diff, plot_ground_truth=plot_ground_truth, plot_width=plot_width, silent=silent, start=start, track_label_fraction=track_label_fraction, window=window)
+        region=region, celltype=celltype, chr_name=chr_name, deletion_starts=deletion_starts, deletion_widths=deletion_widths, font_size=font_size, no_plots=no_plots, outname=outname, output_path=output_path, plot_diff=plot_diff, plot_ground_truth=plot_ground_truth, plot_width=plot_width, silent=silent, start=start, track_label_fraction=track_label_fraction, window=window, is_snp=enformer_seq_active)

@@ -112,11 +112,11 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                             f.write('display = interleaved\n')
                         if (enformer_seq_active and canonical_track_name in enformer_perturbed_track_names and
                                 os.path.exists(f'tmp/{track_name}_enformer_ko.bw')):
-                            f.write(f'[{track_name} Enformer KO]\n')
+                            f.write(f'[{track_name} SNP perturb]\n')
                             f.write(f'file = tmp/{track_name}_enformer_ko.bw\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
-                            f.write(f'title = {track_name} Enformer KO\n')
+                            f.write(f'title = {track_name} SNP perturb\n')
                             f.write('min_value = 0\n')
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
@@ -331,21 +331,21 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                                     os.path.exists(f'tmp/{track_name}_enformer_delta.bw')):
                                 enformer_ko_file = f'tmp/{track_name}_enformer_ko.bw'
                                 if os.path.exists(enformer_ko_file):
-                                    f.write(f'[{track_name} Enformer KO]\n')
+                                    f.write(f'[{track_name} SNP perturb]\n')
                                     f.write(f'file = {enformer_ko_file}\n')
                                     f.write('height = 2\n')
                                     f.write(f'color = {colors[track_i]}\n')
-                                    f.write(f'title = {track_name} Enformer KO\n')
+                                    f.write(f'title = {track_name} SNP perturb\n')
                                     f.write('min_value = 0\n')
                                     if track_max is not None:
                                         f.write(f'max_value = {track_max}\n')
                                     f.write('number_of_bins = 512\n\n')
-                                f.write(f'[{track_name} Enformer Delta]\n')
+                                f.write(f'[{track_name} SNP delta]\n')
                                 f.write(f'file = tmp/{track_name}_enformer_delta.bw\n')
                                 f.write('height = 2\n')
                                 f.write('color = red\n')
                                 f.write('negative_color = blue\n')
-                                f.write(f'title = {track_name} Enformer delta\n')
+                                f.write(f'title = {track_name} SNP delta\n')
                                 f.write('min_value = -0.5\n')
                                 f.write('max_value = 0.5\n')
                                 f.write('number_of_bins = 512\n\n')
@@ -402,28 +402,40 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                 f.write(line)
 
 
-def run_pygenometracks(region, celltype, chr_name, deletion_starts, deletion_widths, font_size, no_plots, outname, output_path, plot_diff, plot_ground_truth, plot_width, silent, start, track_label_fraction, window):
-    """Render the .ini files to PNGs via pyGenomeTracks (extracted verbatim)."""
+def run_pygenometracks(region, celltype, chr_name, deletion_starts, deletion_widths, font_size, no_plots, outname, output_path, plot_diff, plot_ground_truth, plot_width, silent, start, track_label_fraction, window, is_snp=False):
+    """Render the .ini files to PNGs via pyGenomeTracks (extracted verbatim).
+
+    ``is_snp`` (enformer_seq perturbation) switches the output filename tags from
+    the legacy ``ctcf_ko_*`` to ``snp_perturb_*`` so SNP figures are named for the
+    perturbation type. Default False preserves the legacy names for KO/deletion runs.
+    """
     if not no_plots:
         try:
             region = region if region is not None else f"{chr_name}:{start}-{start + window}"
 
+            if is_snp:
+                tag_main, tag_pred, tag_true, tag_diff = (
+                    'snp_perturb_tracks', 'snp_pred_tracks', 'snp_true_tracks', 'snp_perturb_tracks_diff')
+            else:
+                tag_main, tag_pred, tag_true, tag_diff = (
+                    'ctcf_ko_tracks', 'ctcf_pred_tracks', 'ctcf_true_tracks', 'ctcf_ko_tracks_diff')
+
             if plot_diff:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks_diff.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_diff.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{tag_diff}.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
                 if silent:
                     tracks_cmd += ' > /dev/null 2>&1'
                 os.system(tracks_cmd)
             if plot_ground_truth:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_true_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_true.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{tag_true}.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
                 if silent:
                     tracks_cmd += ' > /dev/null 2>&1'
                 os.system(tracks_cmd)
-            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_pred_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+            tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks_pred.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{tag_pred}.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
             if silent:
                 tracks_cmd += ' > /dev/null 2>&1'
             os.system(tracks_cmd)
             if deletion_starts is not None and deletion_widths is not None:
-                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_ctcf_ko_tracks.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
+                tracks_cmd = f"pyGenomeTracks --tracks tmp/tmp_tracks.ini -o {os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_{tag_main}.png')} --region {region} --fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}"
                 if silent:
                     tracks_cmd += ' > /dev/null 2>&1'
                 os.system(tracks_cmd)
