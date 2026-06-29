@@ -53,6 +53,7 @@ class PerturbConfig:
     deletion_start: Optional[List[int]] = None   # --ko-start
     deletion_width: Optional[List[int]] = None   # --ko-width
     peak_height: Any = 2.0                       # scalar or list (argparse nargs='+')
+    allele_peak_split: bool = False               # opt-in allele-specific peak redistribution (ref/alt)
     alt_bp: Optional[List[str]] = None           # --alt
     end_padding_type: str = 'zero'               # --padding
 

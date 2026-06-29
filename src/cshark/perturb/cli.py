@@ -148,6 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--enformer-tracks', dest='enformer_tracks', type=str, nargs='+', default=['ctcf', 'atac'],
                         help='Target track names for Enformer delta predictions')
 
+    parser.add_argument('--allele-peak-split', dest='allele_peak_split', action='store_true',
+                        help='Allele-specific peak redistribution: instead of applying the Enformer fold-change directly to the bulk track, split each bulk track into ref/alt allele tracks (shares 1/(1+fc) and fc/(1+fc), x2) and emit a separate Hi-C prediction per allele. Opt-in; default off keeps the direct-apply behavior.')
+
     # Hierarchical RAD21 predictor params
     parser.add_argument('--hierarchical-model', dest='hierarchical_model_path', type=str, default=None,
                         help='Path to the hierarchical RAD21 predictor checkpoint (.ckpt).')

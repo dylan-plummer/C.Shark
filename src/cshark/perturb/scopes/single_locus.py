@@ -211,6 +211,25 @@ def run_single_locus(cfg):
     seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, hierarchical_active = plan_perturbations(
         alt_bp=alt_bp, atac_path=atac_path, bigwig_log_transform=bigwig_log_transform, channel_offset=channel_offset, chr_name=chr_name, ctcf_path=ctcf_path, deletion_starts=deletion_starts, deletion_widths=deletion_widths, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, ko_data_types=ko_data_types, ko_mode=ko_mode, other_feats=other_feats, peak_height=peak_height, seq2_path=seq2_path, seq_path=seq_path, seq_region=seq_region, start=start, window=window)
 
+    # --- opt-in allele-specific peak redistribution (--allele-peak-split) ---
+    # Only meaningful with an enformer_seq perturbation (it needs the WT-vs-ALT
+    # Enformer predictions). The existing path below is left completely untouched;
+    # when the flag is off (or there is no enformer_seq) we never enter this branch.
+    if cfg.allele_peak_split and enformer_seq_active:
+        from cshark.perturb.scopes.allele_split import run_allele_peak_split
+        return run_allele_peak_split(
+            cfg, model=model, seq_region=seq_region, seq_region_wt=seq_region_wt,
+            ctcf_region=ctcf_region, atac_region=atac_region, other_regions=other_regions,
+            other_regions_wt=other_regions_wt, input_track_names=input_track_names,
+            input_track_paths=input_track_paths, pred_before=pred_before,
+            pred_before_1d=pred_before_1d, plot_track_names=plot_track_names,
+            plot_track_paths=plot_track_paths, hierarchical_rad21_model=hierarchical_rad21_model,
+            deletion_starts=deletion_starts, deletion_widths=deletion_widths,
+            res=res, image_scale=image_scale, window=window)
+    if cfg.allele_peak_split and not enformer_seq_active:
+        print('[allele-peak-split] WARNING: --allele-peak-split needs an enformer_seq '
+              'perturbation (--ko seq --ko-mode enformer_seq); using the standard path.')
+
     ctcf_region, atac_region, other_regions, enformer_perturbed_track_names = apply_enformer_seq_ko(
         assembly=assembly, atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, celltype=celltype, chr_name=chr_name, ctcf_region=ctcf_region, enformer_delta_cap=enformer_delta_cap, enformer_delta_mode=enformer_delta_mode, enformer_model_path=enformer_model_path, enformer_seq_active=enformer_seq_active, enformer_tracks=enformer_tracks, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window)
 
