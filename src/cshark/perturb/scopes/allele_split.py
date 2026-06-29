@@ -253,7 +253,9 @@ def _write_compare_ini(ini_path, *, order, heatmap_cool, heatmap_title, perturbe
         assembly = 'hg38'
     data_root = ctcf_path[:ctcf_path.index(f'/{assembly}/')]
     lines = [ln + '\n' for ln in get_tracks(data_root, celltype, assembly).split('\n')]
-    REF_COLOR, ALT_COLOR = '#245C86', '#B0612B'
+    # Colour by ROW POSITION within each pair: first row red, second row blue.
+    # So in order (ref, alt) -> ref red / alt blue; in (alt, ref) -> alt red / ref blue.
+    ROW_COLORS = ('#FF0000', '#454FA5')
     with open(ini_path, 'w') as f:
         for line in lines:
             if 'arcs.bed' in line:
@@ -263,14 +265,14 @@ def _write_compare_ini(ini_path, *, order, heatmap_cool, heatmap_title, perturbe
                     ref_bw = f'tmp/{tname}_ref_snp_perturb.bw'
                     tmax = (get_axis_range_from_bigwig(ref_bw, chr_name, start, q=plot_bigwig_q)
                             if os.path.exists(ref_bw) else None)
-                    for allele in order:
+                    for ci, allele in enumerate(order):
                         bwp = f'tmp/{tname}_{allele}_snp_perturb.bw'
                         if not os.path.exists(bwp):
                             continue
                         f.write(f'[{allele} {tname} SNP perturb]\n')
                         f.write(f'file = {bwp}\n')
                         f.write('height = 2\n')
-                        f.write(f'color = {REF_COLOR if allele == "ref" else ALT_COLOR}\n')
+                        f.write(f'color = {ROW_COLORS[ci]}\n')
                         f.write(f'title = {allele} {tname} SNP perturb\n')
                         f.write('min_value = 0\n')
                         if tmax is not None:
