@@ -235,14 +235,23 @@ def apply_enformer_peak_split(assembly, atac_region, bigwig_log_transform, cellt
             target_tracks=enf_target_tracks, species=enf_species, celltype=celltype)
 
     # Run on WT (reference) vs ALT seq; we only consume wt_pred/alt_pred below.
+    # IMPORTANT: enformer_seq_knockout REASSIGNS other_regions[i] in place (the
+    # delta-applied track), which would mutate the caller's list. We need the
+    # PRISTINE WT tracks as E for redistribution, so hand it copies and keep the
+    # originals untouched. (ctcf/atac are reassigned locally inside that function,
+    # not via the list, so they are already safe -- but we copy for symmetry.)
+    _ctcf = ctcf_region.copy() if ctcf_region is not None else None
+    _atac = atac_region.copy() if atac_region is not None else None
+    _other = [r.copy() for r in other_regions] if other_regions is not None else None
     _, _, _, enformer_results = enformer_seq_knockout(
-        seq_region_wt, ctcf_region, atac_region, other_regions,
+        seq_region_wt, _ctcf, _atac, _other,
         input_track_names, enformer_model, enformer_track_names,
         perturb_track_names=enf_target_tracks, alt_seq_region=seq_region,
         window=window, delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
         track_is_log1p=bigwig_log_transform, device=enf_device,
     )
 
+    # Redistribute using the ORIGINAL (WT bulk) experimental tracks as E.
     ref_set, alt_set = redistribute_enformer_alleles(
         ctcf_region, atac_region, other_regions, input_track_names,
         enformer_results, cap=enformer_delta_cap, track_is_log1p=bigwig_log_transform)
