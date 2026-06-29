@@ -29,8 +29,11 @@ from skimage.transform import resize
 
 from cshark.data.data_feature import HiCFeature
 from cshark.inference.utils import plot_utils
-from cshark.inference.utils.inference_utils import write_tmp_cooler, preprocess_default
+from cshark.inference.utils.inference_utils import (
+    write_tmp_cooler, preprocess_default, write_tmp_pred_bigwig, get_axis_range_from_bigwig,
+)
 from cshark.inference.utils.hierarchical_utils import predict_rad21
+from cshark.inference.tracks_files import get_tracks
 
 from cshark.perturb.output.arcs import write_arcs, write_regions
 from cshark.perturb.output.plots import plot_prediction_matrix, plot_pred_1d_tracks
@@ -209,6 +212,83 @@ def _predict_and_write_allele(cfg, label, *, model, seq_region, ctcf_a, atac_a, 
         plot_ground_truth=plot_ground_truth, plot_width=plot_width, silent=silent, start=start,
         track_label_fraction=track_label_fraction, window=window, is_snp=True)
     print(f'[allele-peak-split] Wrote {label} allele outputs (prefix "{allele_outname}").')
+    return pred
+
+
+def _write_allele_perturb_bigwigs(label, ctcf_a, atac_a, other_a, *, input_track_names,
+                                  input_track_paths, perturbed_tracks, chr_name, start, window,
+                                  bigwig_log_transform):
+    """Write tmp/<track>_<label>_snp_perturb.bw for each perturbed track of ONE allele,
+    so both alleles' tracks are simultaneously available for the comparison .ini files."""
+    other_offset = sum(1 for t in ['ctcf', 'atac'] if t in input_track_names)
+    other_names = input_track_names[other_offset:]
+    for tname in input_track_names:
+        if tname not in perturbed_tracks:
+            continue
+        if tname == 'ctcf':
+            arr = ctcf_a
+        elif tname == 'atac':
+            arr = atac_a
+        elif other_a is not None and tname in other_names:
+            arr = other_a[other_names.index(tname)]
+        else:
+            arr = None
+        if arr is None:
+            continue
+        vals = np.expm1(arr) if bigwig_log_transform else arr
+        tpath = input_track_paths[input_track_names.index(tname)]
+        write_tmp_pred_bigwig(tpath, vals, tname, chr_name, start,
+                              suffix=f'{label}_snp_perturb', window=window)
+
+
+def _write_compare_ini(ini_path, *, order, heatmap_cool, heatmap_title, perturbed_in_order,
+                       chr_name, start, ctcf_path, celltype, assembly, plot_bigwig_q,
+                       min_val_diff, max_val_diff):
+    """Build one cross-allele comparison .ini: for each perturbed track, two interleaved
+    rows (ref/alt in `order`), then an allele-difference Hi-C heatmap. ref=blue, alt=orange;
+    the two alleles of a track share a max so they are visually comparable."""
+    if '/mm10/' in ctcf_path:
+        assembly = 'mm10'
+    elif '/hg38/' in ctcf_path:
+        assembly = 'hg38'
+    data_root = ctcf_path[:ctcf_path.index(f'/{assembly}/')]
+    lines = [ln + '\n' for ln in get_tracks(data_root, celltype, assembly).split('\n')]
+    REF_COLOR, ALT_COLOR = '#245C86', '#B0612B'
+    with open(ini_path, 'w') as f:
+        for line in lines:
+            if 'arcs.bed' in line:
+                line = line.replace('arcs.bed', 'arcs_ko.bed')
+            if '[Genes]' in line:
+                for tname in perturbed_in_order:
+                    ref_bw = f'tmp/{tname}_ref_snp_perturb.bw'
+                    tmax = (get_axis_range_from_bigwig(ref_bw, chr_name, start, q=plot_bigwig_q)
+                            if os.path.exists(ref_bw) else None)
+                    for allele in order:
+                        bwp = f'tmp/{tname}_{allele}_snp_perturb.bw'
+                        if not os.path.exists(bwp):
+                            continue
+                        f.write(f'[{allele} {tname} SNP perturb]\n')
+                        f.write(f'file = {bwp}\n')
+                        f.write('height = 2\n')
+                        f.write(f'color = {REF_COLOR if allele == "ref" else ALT_COLOR}\n')
+                        f.write(f'title = {allele} {tname} SNP perturb\n')
+                        f.write('min_value = 0\n')
+                        if tmax is not None:
+                            f.write(f'max_value = {tmax}\n')
+                        f.write('number_of_bins = 512\n\n')
+                f.write(f'[{heatmap_title}]\n')
+                f.write(f'file = {heatmap_cool}\n')
+                f.write(f'min_value = {min_val_diff}\n')
+                f.write(f'max_value = {max_val_diff}\n')
+                f.write('colormap = bwr\n')
+                f.write('file_type = hic_matrix_square\n\n')
+            f.write(line)
+        f.write('\n')
+        f.write('[deletion]')
+        f.write('# bed file with regions to highlight\n')
+        f.write('file = tmp/regions.bed\n')
+        f.write('alpha = 0.25\n')
+        f.write('type = vhighlight\n')
 
 
 def run_allele_peak_split(cfg, *, model, seq_region, seq_region_wt,
@@ -242,9 +322,10 @@ def run_allele_peak_split(cfg, *, model, seq_region, seq_region_wt,
     extra_perturbed = ({'rad21'} if (hierarchical_rad21_model is not None
                                      and 'rad21' in input_track_names) else set())
 
-    # 3. Per allele: predict + full output set.
+    # 3. Per allele: predict + full output set (capture each allele's Hi-C prediction).
+    preds = {}
     for label, (ctcf_a, atac_a, other_a) in (('ref', ref_set), ('alt', alt_set)):
-        _predict_and_write_allele(
+        preds[label] = _predict_and_write_allele(
             cfg, label, model=model, seq_region=seq_region, ctcf_a=ctcf_a, atac_a=atac_a,
             other_a=other_a, input_track_names=input_track_names, input_track_paths=input_track_paths,
             pred_before=pred_before, pred_before_1d=pred_before_1d,
@@ -253,4 +334,50 @@ def run_allele_peak_split(cfg, *, model, seq_region, seq_region_wt,
             plot_track_names=plot_track_names, plot_track_paths=plot_track_paths,
             deletion_starts=deletion_starts, deletion_widths=deletion_widths,
             res=res, image_scale=image_scale, window=window)
+
+    # 4. Cross-allele comparison: two interleaved .ini files + allele-difference heatmaps.
+    #    File 1: per-track row order (ref, alt) + heatmap (alt - ref)
+    #    File 2: per-track row order (alt, ref) + heatmap (ref - alt)
+    if not cfg.no_plots and preds.get('ref') is not None and preds.get('alt') is not None:
+        plot_perturbed = set(enformer_perturbed_track_names) | set(extra_perturbed)
+        # Both alleles' perturbed tracks written under distinct names so they coexist.
+        for label, (ctcf_a, atac_a, other_a) in (('ref', ref_set), ('alt', alt_set)):
+            _write_allele_perturb_bigwigs(
+                label, ctcf_a, atac_a, other_a, input_track_names=input_track_names,
+                input_track_paths=input_track_paths, perturbed_tracks=plot_perturbed,
+                chr_name=cfg.chr_name, start=cfg.start, window=window,
+                bigwig_log_transform=cfg.bigwig_log_transform)
+        # Allele-difference contact maps.
+        write_tmp_cooler(preds['alt'] - preds['ref'], cfg.chr_name, cfg.start,
+                         out_file='tmp/tmp_alt_minus_ref.cool', res=res)
+        write_tmp_cooler(preds['ref'] - preds['alt'], cfg.chr_name, cfg.start,
+                         out_file='tmp/tmp_ref_minus_alt.cool', res=res)
+        perturbed_in_order = [t for t in input_track_names if t in plot_perturbed]
+        _write_compare_ini(
+            'tmp/tmp_tracks_compare_alt_minus_ref.ini', order=('ref', 'alt'),
+            heatmap_cool='tmp/tmp_alt_minus_ref.cool', heatmap_title='alt - ref',
+            perturbed_in_order=perturbed_in_order, chr_name=cfg.chr_name, start=cfg.start,
+            ctcf_path=cfg.ctcf_path, celltype=cfg.celltype, assembly=cfg.assembly,
+            plot_bigwig_q=cfg.plot_bigwig_q, min_val_diff=cfg.min_val_diff, max_val_diff=cfg.max_val_diff)
+        _write_compare_ini(
+            'tmp/tmp_tracks_compare_ref_minus_alt.ini', order=('alt', 'ref'),
+            heatmap_cool='tmp/tmp_ref_minus_alt.cool', heatmap_title='ref - alt',
+            perturbed_in_order=perturbed_in_order, chr_name=cfg.chr_name, start=cfg.start,
+            ctcf_path=cfg.ctcf_path, celltype=cfg.celltype, assembly=cfg.assembly,
+            plot_bigwig_q=cfg.plot_bigwig_q, min_val_diff=cfg.min_val_diff, max_val_diff=cfg.max_val_diff)
+        base = cfg.outname
+        if base and not base.endswith('_'):
+            base += '_'
+        region = cfg.region if cfg.region is not None else f"{cfg.chr_name}:{cfg.start}-{cfg.start + window}"
+        for ini, tag in (('tmp/tmp_tracks_compare_alt_minus_ref.ini', 'snp_compare_alt_minus_ref'),
+                         ('tmp/tmp_tracks_compare_ref_minus_alt.ini', 'snp_compare_ref_minus_alt')):
+            out_png = os.path.join(cfg.output_path,
+                                   f'{base}{cfg.celltype}_{cfg.chr_name}_{cfg.start}_{tag}.png')
+            cmd = (f"pyGenomeTracks --tracks {ini} -o {out_png} --region {region} "
+                   f"--fontSize {font_size} --plotWidth {plot_width} --trackLabelFraction {track_label_fraction}")
+            if cfg.silent:
+                cmd += ' > /dev/null 2>&1'
+            os.system(cmd)
+        print('[allele-peak-split] Wrote 2 cross-allele comparison .ini + figures (alt-ref, ref-alt).')
+
     print('[allele-peak-split] Done: ref + alt allele predictions written.')
