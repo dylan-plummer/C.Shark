@@ -151,6 +151,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--allele-peak-split', dest='allele_peak_split', action='store_true',
                         help='Allele-specific peak redistribution: instead of applying the Enformer fold-change directly to the bulk track, split each bulk track into ref/alt allele tracks (shares 1/(1+fc) and fc/(1+fc), x2) and emit a separate Hi-C prediction per allele. Opt-in; default off keeps the direct-apply behavior.')
 
+    # Haplotype peak-redistribution from PROVIDED predictions (function #2)
+    parser.add_argument('--allele-haplotype', dest='allele_haplotype', action='store_true',
+                        help='Haplotype peak redistribution from PROVIDED whole-genome Enformer '
+                             'predictions: split each WT bulk track into maternal/paternal alleles '
+                             'using --maternal-pred/--paternal-pred ratios (2*E*frac, CAP), run '
+                             'hierarchical RAD21 per allele, and predict per allele using each '
+                             'haplotype sequence (--maternal-seq/--paternal-seq). Single-locus (--start) only.')
+    parser.add_argument('--maternal-pred', dest='maternal_pred', nargs='*', action=ParseKwargs,
+                        help='Maternal Enformer prediction bigwigs (key=value: track=bigwig). Tracks '
+                             'lacking both maternal+paternal preds keep their WT bulk track in both alleles.')
+    parser.add_argument('--paternal-pred', dest='paternal_pred', nargs='*', action=ParseKwargs,
+                        help='Paternal Enformer prediction bigwigs (key=value: track=bigwig).')
+    parser.add_argument('--maternal-seq', dest='maternal_seq_path', required=False,
+                        help='Per-chromosome .fa.gz dir for the maternal haplotype (main-model seq for the maternal allele).')
+    parser.add_argument('--paternal-seq', dest='paternal_seq_path', required=False,
+                        help='Per-chromosome .fa.gz dir for the paternal haplotype.')
+
     # Hierarchical RAD21 predictor params
     parser.add_argument('--hierarchical-model', dest='hierarchical_model_path', type=str, default=None,
                         help='Path to the hierarchical RAD21 predictor checkpoint (.ckpt).')
@@ -182,6 +199,9 @@ def main():
     cfg = PerturbConfig.from_args(args)
 
     # Deferred imports: these pull in torch via cshark.inference.utils.
+    if cfg.allele_haplotype:
+        from cshark.perturb.scopes.allele_split import run_allele_haplotype
+        return run_allele_haplotype(cfg)
     if cfg.start is not None:
         from cshark.perturb.scopes.single_locus import run_single_locus
         return run_single_locus(cfg)

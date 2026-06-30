@@ -31,7 +31,7 @@ class TrackSpec:
     kind: str = 'bigwig'
 
 
-def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enformer_perturbed_track_names, enformer_seq_active, hierarchical_active, input_track_names, input_track_paths, ko_data, max_val_diff, max_val_pred, max_val_true, min_val_diff, min_val_pred, min_val_true, plot_bigwig_q, plot_diff, plot_ground_truth, plot_pred_bigwigs, plot_pred_log2fc, plot_track_names, plot_track_paths, start):
+def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enformer_perturbed_track_names, enformer_seq_active, hierarchical_active, input_track_names, input_track_paths, ko_data, max_val_diff, max_val_pred, max_val_true, min_val_diff, min_val_pred, min_val_true, plot_bigwig_q, plot_diff, plot_ground_truth, plot_pred_bigwigs, plot_pred_log2fc, plot_track_names, plot_track_paths, start, perturb_label='SNP perturb'):
     if '/mm10/' in ctcf_path:
         assembly = 'mm10'
     elif '/hg38/' in ctcf_path:
@@ -112,11 +112,11 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                             f.write('display = interleaved\n')
                         if (enformer_seq_active and canonical_track_name in enformer_perturbed_track_names and
                                 os.path.exists(f'tmp/{track_name}_enformer_ko.bw')):
-                            f.write(f'[{track_name} SNP perturb]\n')
+                            f.write(f'[{track_name} {perturb_label}]\n')
                             f.write(f'file = tmp/{track_name}_enformer_ko.bw\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
-                            f.write(f'title = {track_name} SNP perturb\n')
+                            f.write(f'title = {track_name} {perturb_label}\n')
                             f.write('min_value = 0\n')
                             if track_max is not None:
                                 f.write(f'max_value = {track_max}\n')
@@ -331,11 +331,11 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                                     os.path.exists(f'tmp/{track_name}_enformer_delta.bw')):
                                 enformer_ko_file = f'tmp/{track_name}_enformer_ko.bw'
                                 if os.path.exists(enformer_ko_file):
-                                    f.write(f'[{track_name} SNP perturb]\n')
+                                    f.write(f'[{track_name} {perturb_label}]\n')
                                     f.write(f'file = {enformer_ko_file}\n')
                                     f.write('height = 2\n')
                                     f.write(f'color = {colors[track_i]}\n')
-                                    f.write(f'title = {track_name} SNP perturb\n')
+                                    f.write(f'title = {track_name} {perturb_label}\n')
                                     f.write('min_value = 0\n')
                                     if track_max is not None:
                                         f.write(f'max_value = {track_max}\n')
@@ -402,20 +402,25 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                 f.write(line)
 
 
-def run_pygenometracks(region, celltype, chr_name, deletion_starts, deletion_widths, font_size, no_plots, outname, output_path, plot_diff, plot_ground_truth, plot_width, silent, start, track_label_fraction, window, is_snp=False):
+def run_pygenometracks(region, celltype, chr_name, deletion_starts, deletion_widths, font_size, no_plots, outname, output_path, plot_diff, plot_ground_truth, plot_width, silent, start, track_label_fraction, window, fig_kind=None):
     """Render the .ini files to PNGs via pyGenomeTracks (extracted verbatim).
 
-    ``is_snp`` (enformer_seq perturbation) switches the output filename tags from
-    the legacy ``ctcf_ko_*`` to ``snp_perturb_*`` so SNP figures are named for the
-    perturbation type. Default False preserves the legacy names for KO/deletion runs.
+    ``fig_kind`` selects the output filename tags by perturbation type:
+    ``None`` -> legacy ``ctcf_ko_*`` (KO / deletion runs);
+    ``'snp'`` -> ``snp_perturb_*`` (enformer_seq / allele-peak-split);
+    ``'hap'`` -> ``hap_perturb_*`` (haplotype redistribution). Default None preserves
+    the legacy names.
     """
     if not no_plots:
         try:
             region = region if region is not None else f"{chr_name}:{start}-{start + window}"
 
-            if is_snp:
+            if fig_kind == 'snp':
                 tag_main, tag_pred, tag_true, tag_diff = (
                     'snp_perturb_tracks', 'snp_pred_tracks', 'snp_true_tracks', 'snp_perturb_tracks_diff')
+            elif fig_kind == 'hap':
+                tag_main, tag_pred, tag_true, tag_diff = (
+                    'hap_perturb_tracks', 'hap_pred_tracks', 'hap_true_tracks', 'hap_perturb_tracks_diff')
             else:
                 tag_main, tag_pred, tag_true, tag_diff = (
                     'ctcf_ko_tracks', 'ctcf_pred_tracks', 'ctcf_true_tracks', 'ctcf_ko_tracks_diff')

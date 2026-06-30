@@ -54,6 +54,11 @@ class PerturbConfig:
     deletion_width: Optional[List[int]] = None   # --ko-width
     peak_height: Any = 2.0                       # scalar or list (argparse nargs='+')
     allele_peak_split: bool = False               # opt-in allele-specific peak redistribution (ref/alt)
+    allele_haplotype: bool = False                # opt-in haplotype redistribution from PROVIDED preds (maternal/paternal)
+    maternal_pred: Dict[str, str] = field(default_factory=dict)   # --maternal-pred track=bigwig (whole-genome Enformer preds)
+    paternal_pred: Dict[str, str] = field(default_factory=dict)   # --paternal-pred track=bigwig
+    maternal_seq_path: Optional[str] = None       # --maternal-seq (per-chrom .fa.gz dir for the maternal haplotype)
+    paternal_seq_path: Optional[str] = None       # --paternal-seq
     alt_bp: Optional[List[str]] = None           # --alt
     end_padding_type: str = 'zero'               # --padding
 
@@ -113,6 +118,8 @@ class PerturbConfig:
         other_feats = [v for k, v in bigwigs.items() if k not in ('ctcf', 'atac')]
         if not other_feats:
             other_feats = None
+        maternal_pred = dict(args.maternal_pred) if getattr(args, 'maternal_pred', None) else {}
+        paternal_pred = dict(args.paternal_pred) if getattr(args, 'paternal_pred', None) else {}
 
         # Map only the known dataclass fields from the namespace.
         known = {f for f in cls.__dataclass_fields__}
@@ -124,5 +131,7 @@ class PerturbConfig:
             ctcf_path=bigwigs.get('ctcf'),
             atac_path=bigwigs.get('atac'),
             other_feats=other_feats,
+            maternal_pred=maternal_pred,
+            paternal_pred=paternal_pred,
         )
         return cls(**kwargs)

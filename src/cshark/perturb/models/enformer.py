@@ -10,6 +10,7 @@
 Verbatim logic from the original single_deletion.
 """
 import numpy as np
+import pyBigWig
 
 from cshark.inference.utils.inference_utils import write_tmp_pred_bigwig
 from cshark.inference.utils.enformer_utils import (
@@ -260,3 +261,83 @@ def apply_enformer_peak_split(assembly, atac_region, bigwig_log_transform, cellt
     enformer_perturbed_track_names = {t.lower() for t in perturbed_track_names}
     print(f'[allele-peak-split] Built ref/alt allele track sets (CAP={enformer_delta_cap}).')
     return ref_set, alt_set, enformer_perturbed_track_names, enformer_results
+
+
+# ---------------------------------------------------------------------------
+# Allele redistribution from EXTERNALLY-PROVIDED predictions (function #2)
+#
+# Same math as the Enformer path, but the maternal/paternal peak ratio comes
+# from whole-genome prediction bigwigs the user computed offline (by running
+# Enformer on the maternal/paternal haplotype FASTAs) instead of running
+# Enformer per locus. Only tracks that have BOTH a maternal and a paternal
+# prediction bigwig are redistributed; every other input track keeps its WT
+# bulk value unchanged in both alleles (e.g. h3k9me3 / h3k36me3 that lack
+# allele-specific predictions still feed the hierarchical / main model as WT).
+# ---------------------------------------------------------------------------
+
+def _read_bigwig_window(path, chr_name, start, window, length):
+    """Read a bigwig over [start, start+window) -> linear per-base array of len `length`."""
+    bw = pyBigWig.open(path)
+    vals = np.array(bw.values(chr_name, start, start + window), dtype=np.float64)
+    bw.close()
+    vals = np.nan_to_num(vals, nan=0.0)
+    if len(vals) != length:
+        vals = np.interp(np.linspace(0, 1, length), np.linspace(0, 1, len(vals)), vals)
+    return vals
+
+
+def redistribute_from_provided_preds(ctcf_region, atac_region, other_regions, input_track_names,
+                                     maternal_pred_paths, paternal_pred_paths,
+                                     chr_name, start, window,
+                                     cap=REDISTRIBUTION_CAP, track_is_log1p=True):
+    """Build (maternal, paternal) allele track sets from provided prediction bigwigs.
+
+    ``maternal_pred_paths`` / ``paternal_pred_paths``: dict track_name -> bigwig path.
+    For each track in BOTH dicts: read M and P over the window and split the WT bulk
+    track E via ``redistribute_by_allele_ratio`` (out = min(2*E*frac, cap),
+    frac = M/(M+P)). Tracks absent from the dicts are copied unchanged (WT) into both.
+
+    Returns (mat_set, pat_set, redistributed_track_names) where each set is
+    (ctcf, atac, other_regions) and redistributed_track_names is the lowercase set
+    of tracks that actually got allele-specific values.
+    """
+    mat_ctcf = ctcf_region.copy() if ctcf_region is not None else None
+    pat_ctcf = ctcf_region.copy() if ctcf_region is not None else None
+    mat_atac = atac_region.copy() if atac_region is not None else None
+    pat_atac = atac_region.copy() if atac_region is not None else None
+    mat_other = [r.copy() for r in other_regions] if other_regions is not None else None
+    pat_other = [r.copy() for r in other_regions] if other_regions is not None else None
+
+    other_offset = sum(1 for t in ['ctcf', 'atac'] if t in input_track_names)
+    other_track_names = input_track_names[other_offset:]
+
+    redistributed = set()
+    for tname in input_track_names:
+        if tname not in maternal_pred_paths or tname not in paternal_pred_paths:
+            continue  # no allele preds for this track -> keep WT bulk in both alleles
+        if tname == 'ctcf' and ctcf_region is not None:
+            E = ctcf_region
+        elif tname == 'atac' and atac_region is not None:
+            E = atac_region
+        elif other_regions is not None and tname in other_track_names:
+            E = other_regions[other_track_names.index(tname)]
+        else:
+            continue
+        L = len(E)
+        M = _read_bigwig_window(maternal_pred_paths[tname], chr_name, start, window, L)
+        P = _read_bigwig_window(paternal_pred_paths[tname], chr_name, start, window, L)
+        out_mat, out_pat = redistribute_by_allele_ratio(E, M, P, cap=cap, track_is_log1p=track_is_log1p)
+        if tname == 'ctcf':
+            mat_ctcf, pat_ctcf = out_mat, out_pat
+        elif tname == 'atac':
+            mat_atac, pat_atac = out_mat, out_pat
+        else:
+            j = other_track_names.index(tname)
+            mat_other[j] = out_mat
+            pat_other[j] = out_pat
+        redistributed.add(tname)
+        print(f'[allele-haplotype] Redistributed {tname} from provided maternal/paternal preds')
+    if not redistributed:
+        print('[allele-haplotype] WARNING: no track had both maternal & paternal preds; '
+              'both alleles equal the WT bulk.')
+    return (mat_ctcf, mat_atac, mat_other), (pat_ctcf, pat_atac, pat_other), redistributed
