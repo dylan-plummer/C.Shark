@@ -24,6 +24,8 @@ allele is processed fully and sequentially, so the shared ``tmp/`` scratch files
 are produced and consumed before the next allele overwrites them.
 """
 import os
+import re
+import shutil
 import numpy as np
 from skimage.transform import resize
 
@@ -88,6 +90,46 @@ def _redistribute_rad21_alleles(set_a, set_b, *, seq_a, seq_b, other_regions_wt,
     b_other[rad21_other_idx] = out_b
     print('[allele-split] Redistributed RAD21 (hierarchical) into both alleles')
     return (a_ctcf, a_atac, a_other), (b_ctcf, b_atac, b_other)
+
+
+def _snapshot_allele_tmp(label, *, input_track_names):
+    """Preserve THIS allele's shared tmp/ artifacts in tmp/<label>/ so the other
+    allele's run doesn't overwrite them (ref/alt each keep their own cool/ini/bed/bigwig).
+
+    The copied .ini files have their relative references (`tmp/...` and the un-prefixed
+    `arcs_*.bed`) rewritten to ABSOLUTE paths inside tmp/<label>/, so each allele's .ini
+    stays self-contained and re-renderable. Purely additive: the shared tmp/ and the
+    per-allele PNGs are left untouched.
+    """
+    dst = os.path.join('tmp', label)
+    os.makedirs(dst, exist_ok=True)
+    abs_dst = os.path.abspath(dst)
+
+    names = ['tmp.cool', 'tmp.cool.csv', 'tmp_before.cool', 'tmp_before.cool.csv',
+             'tmp_diff.cool', 'tmp_diff.cool.csv', 'tmp_true.cool', 'tmp_true.cool.csv',
+             'regions.bed', 'arcs.bed', 'arcs_ko.bed', 'arcs_diff.bed', 'arcs_true.bed',
+             'ctcf_motif.bed', 'ctcf_motifs_detected.bed',
+             'tmp_tracks.ini', 'tmp_tracks_pred.ini', 'tmp_tracks_diff.ini', 'tmp_tracks_true.ini']
+    names += [f'{t}_enformer_ko.bw' for t in input_track_names]
+    for n in names:
+        src = os.path.join('tmp', n)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(dst, n))
+
+    for ini in ('tmp_tracks.ini', 'tmp_tracks_pred.ini', 'tmp_tracks_diff.ini', 'tmp_tracks_true.ini'):
+        p = os.path.join(dst, ini)
+        if not os.path.isfile(p):
+            continue
+        txt = open(p).read()
+        # motif file is renamed to ctcf_motifs_detected.bed after rendering -> point there
+        txt = txt.replace('file = tmp/ctcf_motif.bed', f'file = {abs_dst}/ctcf_motifs_detected.bed')
+        # 'file = tmp/X' -> absolute path inside tmp/<label>/
+        txt = re.sub(r'file = tmp/(\S+)', lambda m: f'file = {abs_dst}/{m.group(1)}', txt)
+        # un-prefixed arcs bed (resolved by pyGenomeTracks relative to cwd) -> absolute
+        txt = re.sub(r'file = (arcs\S*\.bed)', lambda m: f'file = {abs_dst}/{m.group(1)}', txt)
+        with open(p, 'w') as f:
+            f.write(txt)
+    print(f'[allele-split] Saved {label} tmp artifacts -> {dst}/ (cool/ini/bed/bigwig, ini paths absolutized)')
 
 
 def _predict_and_write_allele(cfg, label, *, model, seq_region, ctcf_a, atac_a, other_a,
@@ -214,7 +256,10 @@ def _predict_and_write_allele(cfg, label, *, model, seq_region, ctcf_a, atac_a, 
         outname=allele_outname, output_path=output_path, plot_diff=plot_diff,
         plot_ground_truth=plot_ground_truth, plot_width=plot_width, silent=silent, start=start,
         track_label_fraction=track_label_fraction, window=window, fig_kind=fig_kind)
-    print(f'[allele-peak-split] Wrote {label} allele outputs (prefix "{allele_outname}").')
+    print(f'[allele-split] Wrote {label} allele outputs (prefix "{allele_outname}").')
+
+    # Preserve this allele's tmp/ artifacts before the next allele overwrites them.
+    _snapshot_allele_tmp(label, input_track_names=input_track_names)
     return pred
 
 
