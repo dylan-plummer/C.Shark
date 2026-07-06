@@ -32,14 +32,14 @@ from skimage.transform import resize
 from cshark.data.data_feature import HiCFeature
 from cshark.inference.utils import plot_utils
 from cshark.inference.utils.inference_utils import (
-    write_tmp_cooler, preprocess_default, write_tmp_pred_bigwig, get_axis_range_from_bigwig,
+    write_tmp_cooler, preprocess_default, write_tmp_pred_bigwig,
 )
 from cshark.inference.utils.hierarchical_utils import predict_rad21
 from cshark.inference.tracks_files import get_tracks
 
 from cshark.perturb.output.arcs import write_arcs, write_regions
 from cshark.perturb.output.plots import plot_prediction_matrix, plot_pred_1d_tracks
-from cshark.perturb.output.tracks_ini import build_track_inis, run_pygenometracks
+from cshark.perturb.output.tracks_ini import build_track_inis, run_pygenometracks, get_axis_range_from_bigwig
 from cshark.perturb.models.enformer import (
     apply_enformer_peak_split, redistribute_by_allele_ratio, rewrite_enformer_ko_tracks,
 )

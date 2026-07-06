@@ -13,8 +13,25 @@ import os
 import pandas as pd
 from importlib.resources import files
 
-from cshark.inference.utils.inference_utils import get_axis_range_from_bigwig
+from cshark.inference.utils.inference_utils import get_axis_range_from_bigwig as _raw_axis_range
 from cshark.inference.tracks_files import get_tracks
+
+
+def _round_half(x):
+    """Round a bigwig-derived axis max to the nearest 0.5 (e.g. 3.39->3.5, 1.52->1.5,
+    0.54->0.5) so track y-axis maxima on the figures are integers or half-integers.
+    A positive track never rounds down to 0 (kept at 0.5) so its axis stays valid."""
+    if x is None:
+        return None
+    r = round(float(x) * 2) / 2
+    if r <= 0 and float(x) > 0:
+        r = 0.5
+    return r
+
+
+def get_axis_range_from_bigwig(*args, **kwargs):
+    """Thin wrapper: same quantile-based axis max, rounded to the nearest 0.5 for display."""
+    return _round_half(_raw_axis_range(*args, **kwargs))
 from dataclasses import dataclass
 from typing import Optional
 
