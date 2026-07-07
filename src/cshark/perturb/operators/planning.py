@@ -45,11 +45,12 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
                 f"--ko seq seq --ko-mode enformer_seq enformer_seq --ko-start P1 P2 --ko-width 1 1 --alt B1 B2"
             )
         missing_alt = [i for i, m in enumerate(ko_mode)
-                       if m in ('seq', 'enformer_seq') and i >= len(alt_bp_list)]
+                       if m in ('seq', 'enformer_seq', 'alphagenome_seq') and i >= len(alt_bp_list)]
         if missing_alt:
             raise ValueError(
-                f"--alt missing for seq/enformer_seq site index(es) {missing_alt}: give one --alt base "
-                f"per perturbation (aligned with --ko-start), otherwise those sites silently become 'N'."
+                f"--alt missing for seq/enformer_seq/alphagenome_seq site index(es) {missing_alt}: give "
+                f"one --alt base per perturbation (aligned with --ko-start), otherwise those sites "
+                f"silently become 'N'."
             )
 
     def _resolve_alt_string(raw_alt, rel_start, rel_end, current_seq_region, label):
