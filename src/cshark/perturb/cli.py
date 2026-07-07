@@ -83,7 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--ko', dest='ko_data', type=str, nargs='+', default=[], required=False,
                         help='name of data modalities to knockout')
     parser.add_argument('--ko-mode', dest='ko_mode', type=str, nargs='+', default=['zero'], required=False,
-                        help='how we simulate the knockout (zero, mean, knockout, shuffle, knockout_shuffle, reverse, reverse_motif, seq, del)')
+                        help='how we simulate the knockout (zero, mean, knockout, shuffle, knockout_shuffle, '
+                             'reverse, reverse_motif, seq, enformer_seq, alphagenome_seq, del)')
     parser.add_argument('--ko-start', dest='deletion_start', nargs='+', type=int, required=False,
                         help='Starting points for deletion.')
     parser.add_argument('--ko-width', dest='deletion_width', nargs='+', type=int, required=False,
@@ -91,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--peak-height', dest='peak_height', nargs='+', type=float, default=2.0,
                         help='Peak height threshold for knockout.')
     parser.add_argument('--alt', dest='alt_bp', type=str, nargs='+', required=False,
-                        help='Alt base(s) for seq / enformer_seq ko-modes.')
+                        help='Alt base(s) for seq / enformer_seq / alphagenome_seq ko-modes.')
     parser.add_argument('--padding', dest='end_padding_type', default='zero',
                         help='Padding type, either zero or follow (default: %(default)s)')
     parser.add_argument('--hide-line', dest='hide_deletion_line', action='store_true',
@@ -146,7 +147,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--enformer-delta-cap', dest='enformer_delta_cap', type=float, default=10.0,
                         help='Cap on fold-change values when using enformer_seq mode (default: 10.0)')
     parser.add_argument('--enformer-tracks', dest='enformer_tracks', type=str, nargs='+', default=['ctcf', 'atac'],
-                        help='Target track names for Enformer delta predictions')
+                        help='Target track names for Enformer/AlphaGenome delta predictions')
+
+    # AlphaGenome-based perturbation params (ko-mode alphagenome_seq).
+    # Operates exactly like enformer_seq but with the AlphaGenome backbone; it
+    # reuses --enformer-tracks / --enformer-delta-mode / --enformer-delta-cap for
+    # track selection and delta application.
+    parser.add_argument('--alphagenome-model', dest='alphagenome_model_path', type=str, default=None,
+                        help='Path to the AlphaGenome checkpoint (.safetensors/.pth); required for ko-mode alphagenome_seq.')
+    parser.add_argument('--alphagenome-metadata', dest='alphagenome_metadata_path', type=str, default=None,
+                        help='Path to the AlphaGenome track-metadata catalog (parquet/csv/tsv) used to resolve '
+                             'track names (ctcf, h3k27ac, ...) to output channels. Falls back to the built-in '
+                             'catalog if omitted and available.')
 
     parser.add_argument('--allele-peak-split', dest='allele_peak_split', action='store_true',
                         help='Allele-specific peak redistribution: instead of applying the Enformer fold-change directly to the bulk track, split each bulk track into ref/alt allele tracks (shares 1/(1+fc) and fc/(1+fc), x2) and emit a separate Hi-C prediction per allele. Opt-in; default off keeps the direct-apply behavior.')

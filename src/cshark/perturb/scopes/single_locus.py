@@ -48,6 +48,7 @@ from cshark.perturb.models.base import CSharkModel
 from cshark.perturb.output.tracks_ini import build_track_inis, run_pygenometracks
 from cshark.perturb.models.hierarchical import prepare_rad21_input, apply_rad21_update
 from cshark.perturb.models.enformer import apply_enformer_seq_ko, rewrite_enformer_ko_tracks
+from cshark.perturb.models.alphagenome import apply_alphagenome_seq_ko
 from cshark.perturb.operators.planning import plan_perturbations
 
 # module-level plotting constants (verbatim from the original perturb.py)
@@ -100,6 +101,8 @@ def run_single_locus(cfg):
     enformer_delta_mode = cfg.enformer_delta_mode
     enformer_delta_cap = cfg.enformer_delta_cap
     enformer_tracks = cfg.enformer_tracks
+    alphagenome_model_path = cfg.alphagenome_model_path
+    alphagenome_metadata_path = cfg.alphagenome_metadata_path
     hierarchical_model_path = cfg.hierarchical_model_path
     hierarchical_delta_mode = cfg.hierarchical_delta_mode
     hierarchical_delta_cap = cfg.hierarchical_delta_cap
@@ -208,7 +211,7 @@ def run_single_locus(cfg):
         elif ko != 'seq':
             print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
 
-    seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, hierarchical_active = plan_perturbations(
+    seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, alphagenome_seq_active, hierarchical_active = plan_perturbations(
         alt_bp=alt_bp, atac_path=atac_path, bigwig_log_transform=bigwig_log_transform, channel_offset=channel_offset, chr_name=chr_name, ctcf_path=ctcf_path, deletion_starts=deletion_starts, deletion_widths=deletion_widths, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, ko_data_types=ko_data_types, ko_mode=ko_mode, other_feats=other_feats, peak_height=peak_height, seq2_path=seq2_path, seq_path=seq_path, seq_region=seq_region, start=start, window=window)
 
     # --- opt-in allele-specific peak redistribution (--allele-peak-split) ---
@@ -233,6 +236,18 @@ def run_single_locus(cfg):
     ctcf_region, atac_region, other_regions, enformer_perturbed_track_names = apply_enformer_seq_ko(
         assembly=assembly, atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, celltype=celltype, chr_name=chr_name, ctcf_region=ctcf_region, enformer_delta_cap=enformer_delta_cap, enformer_delta_mode=enformer_delta_mode, enformer_model_path=enformer_model_path, enformer_seq_active=enformer_seq_active, enformer_tracks=enformer_tracks, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window)
 
+    # AlphaGenome sequence-perturbation KO (drop-in counterpart of enformer_seq).
+    # Writes the same tmp/{track}_enformer_ko.bw / _enformer_delta.bw plotting
+    # bigwigs, so we fold its perturbed-track set into the shared name set below.
+    ctcf_region, atac_region, other_regions, alphagenome_perturbed_track_names = apply_alphagenome_seq_ko(
+        assembly=assembly, atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, celltype=celltype, chr_name=chr_name, ctcf_region=ctcf_region, enformer_delta_cap=enformer_delta_cap, enformer_delta_mode=enformer_delta_mode, enformer_tracks=enformer_tracks, alphagenome_model_path=alphagenome_model_path, alphagenome_metadata_path=alphagenome_metadata_path, alphagenome_seq_active=alphagenome_seq_active, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window)
+
+    # Unified flags/track-set for the (backbone-agnostic) plotting pipeline.
+    seq_model_active = enformer_seq_active or alphagenome_seq_active
+    enformer_perturbed_track_names = set(enformer_perturbed_track_names) | set(alphagenome_perturbed_track_names)
+    # Which backbone's KO/delta bigwigs to (re)write and plot: tmp/{track}_{ko_tool}_ko.bw etc.
+    ko_tool = 'alphagenome' if alphagenome_seq_active else 'enformer'
+
     for deletion_start, deletion_width, ko_data_type, ko_channel, channel_offset, knockout_mode, ko_height, left_del_pad, right_del_pad in pending_track_perturbations:
         seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(
                 chr_name, start, deletion_start, deletion_width,
@@ -248,7 +263,7 @@ def run_single_locus(cfg):
         atac_region=atac_region, atac_region_wt=atac_region_wt, chr_name=chr_name, ctcf_region=ctcf_region, ctcf_region_wt=ctcf_region_wt, hierarchical_delta_cap=hierarchical_delta_cap, hierarchical_delta_mode=hierarchical_delta_mode, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, other_regions_wt=other_regions_wt, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window)
 
     rewrite_enformer_ko_tracks(
-        atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, chr_name=chr_name, ctcf_region=ctcf_region, enformer_perturbed_track_names=enformer_perturbed_track_names, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, start=start, window=window)
+        atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, chr_name=chr_name, ctcf_region=ctcf_region, enformer_perturbed_track_names=enformer_perturbed_track_names, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, start=start, window=window, tool=ko_tool)
 
     # KO prediction
     pred_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
@@ -336,13 +351,13 @@ def run_single_locus(cfg):
     # pyGenomeTracks .ini files (extracted; verbatim logic in output/tracks_ini.py)
     build_track_inis(
         assembly=assembly, celltype=celltype, chr_name=chr_name, ctcf_motif_p=ctcf_motif_p,
-        ctcf_path=ctcf_path, enformer_perturbed_track_names=enformer_perturbed_track_names, enformer_seq_active=enformer_seq_active, hierarchical_active=hierarchical_active,
+        ctcf_path=ctcf_path, enformer_perturbed_track_names=enformer_perturbed_track_names, enformer_seq_active=seq_model_active, hierarchical_active=hierarchical_active,
         input_track_names=input_track_names, input_track_paths=input_track_paths, ko_data=ko_data, max_val_diff=max_val_diff,
         max_val_pred=max_val_pred, max_val_true=max_val_true, min_val_diff=min_val_diff, min_val_pred=min_val_pred,
         min_val_true=min_val_true, plot_bigwig_q=plot_bigwig_q, plot_diff=plot_diff, plot_ground_truth=plot_ground_truth,
         plot_pred_bigwigs=plot_pred_bigwigs, plot_pred_log2fc=plot_pred_log2fc, plot_track_names=plot_track_names, plot_track_paths=plot_track_paths,
-        start=start,
+        start=start, ko_tool=ko_tool,
     )
 
     run_pygenometracks(
-        region=region, celltype=celltype, chr_name=chr_name, deletion_starts=deletion_starts, deletion_widths=deletion_widths, font_size=font_size, no_plots=no_plots, outname=outname, output_path=output_path, plot_diff=plot_diff, plot_ground_truth=plot_ground_truth, plot_width=plot_width, silent=silent, start=start, track_label_fraction=track_label_fraction, window=window, fig_kind=('snp' if enformer_seq_active else None))
+        region=region, celltype=celltype, chr_name=chr_name, deletion_starts=deletion_starts, deletion_widths=deletion_widths, font_size=font_size, no_plots=no_plots, outname=outname, output_path=output_path, plot_diff=plot_diff, plot_ground_truth=plot_ground_truth, plot_width=plot_width, silent=silent, start=start, track_label_fraction=track_label_fraction, window=window, fig_kind=('snp' if seq_model_active else None))

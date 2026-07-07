@@ -64,7 +64,7 @@ def apply_enformer_seq_ko(assembly, atac_region, bigwig_log_transform, celltype,
     return ctcf_region, atac_region, other_regions, enformer_perturbed_track_names
 
 
-def rewrite_enformer_ko_tracks(atac_region, bigwig_log_transform, chr_name, ctcf_region, enformer_perturbed_track_names, input_track_names, input_track_paths, other_regions, start, window):
+def rewrite_enformer_ko_tracks(atac_region, bigwig_log_transform, chr_name, ctcf_region, enformer_perturbed_track_names, input_track_names, input_track_paths, other_regions, start, window, tool='enformer'):
     # Rewrite Enformer KO plotting tracks from final in-memory inputs
     if enformer_perturbed_track_names:
         other_offset = sum(1 for t in ['ctcf', 'atac'] if t in input_track_names)
@@ -87,7 +87,7 @@ def rewrite_enformer_ko_tracks(atac_region, bigwig_log_transform, chr_name, ctcf
                     track_values = np.expm1(track_values)
                 write_tmp_pred_bigwig(
                     track_path, track_values, track_name, chr_name, start,
-                    suffix='enformer_ko', window=window,
+                    suffix=f'{tool}_ko', window=window,
                 )
 
 

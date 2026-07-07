@@ -92,6 +92,11 @@ class PerturbConfig:
     enformer_delta_mode: str = 'multiplicative'
     enformer_delta_cap: float = 10.0
     enformer_tracks: List[str] = field(default_factory=lambda: ['ctcf', 'atac'])
+    # AlphaGenome backbone for the ``alphagenome_seq`` ko-mode. It reuses the
+    # enformer_* delta/track controls above; these two just point at the
+    # AlphaGenome checkpoint and its track-metadata catalog.
+    alphagenome_model_path: Optional[str] = None
+    alphagenome_metadata_path: Optional[str] = None
     hierarchical_model_path: Optional[str] = None
     hierarchical_delta_mode: str = 'multiplicative'
     hierarchical_delta_cap: Optional[float] = None

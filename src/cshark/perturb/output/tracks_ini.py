@@ -31,7 +31,7 @@ class TrackSpec:
     kind: str = 'bigwig'
 
 
-def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enformer_perturbed_track_names, enformer_seq_active, hierarchical_active, input_track_names, input_track_paths, ko_data, max_val_diff, max_val_pred, max_val_true, min_val_diff, min_val_pred, min_val_true, plot_bigwig_q, plot_diff, plot_ground_truth, plot_pred_bigwigs, plot_pred_log2fc, plot_track_names, plot_track_paths, start, perturb_label='SNP perturb'):
+def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enformer_perturbed_track_names, enformer_seq_active, hierarchical_active, input_track_names, input_track_paths, ko_data, max_val_diff, max_val_pred, max_val_true, min_val_diff, min_val_pred, min_val_true, plot_bigwig_q, plot_diff, plot_ground_truth, plot_pred_bigwigs, plot_pred_log2fc, plot_track_names, plot_track_paths, start, perturb_label='SNP perturb', ko_tool='enformer'):
     if '/mm10/' in ctcf_path:
         assembly = 'mm10'
     elif '/hg38/' in ctcf_path:
@@ -111,9 +111,9 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                             f.write('fontsize = 10\n')
                             f.write('display = interleaved\n')
                         if (enformer_seq_active and canonical_track_name in enformer_perturbed_track_names and
-                                os.path.exists(f'tmp/{track_name}_enformer_ko.bw')):
+                                os.path.exists(f'tmp/{track_name}_{ko_tool}_ko.bw')):
                             f.write(f'[{track_name} {perturb_label}]\n')
-                            f.write(f'file = tmp/{track_name}_enformer_ko.bw\n')
+                            f.write(f'file = tmp/{track_name}_{ko_tool}_ko.bw\n')
                             f.write('height = 2\n')
                             f.write(f'color = {colors[track_i]}\n')
                             f.write(f'title = {track_name} {perturb_label}\n')
@@ -328,8 +328,8 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                                     f.write(f'max_value = {track_max}\n')
                                 f.write('number_of_bins = 512\n\n')
                             if (enformer_seq_active and canonical_track_name in enformer_perturbed_track_names and
-                                    os.path.exists(f'tmp/{track_name}_enformer_delta.bw')):
-                                enformer_ko_file = f'tmp/{track_name}_enformer_ko.bw'
+                                    os.path.exists(f'tmp/{track_name}_{ko_tool}_delta.bw')):
+                                enformer_ko_file = f'tmp/{track_name}_{ko_tool}_ko.bw'
                                 if os.path.exists(enformer_ko_file):
                                     f.write(f'[{track_name} {perturb_label}]\n')
                                     f.write(f'file = {enformer_ko_file}\n')
@@ -341,7 +341,7 @@ def build_track_inis(assembly, celltype, chr_name, ctcf_motif_p, ctcf_path, enfo
                                         f.write(f'max_value = {track_max}\n')
                                     f.write('number_of_bins = 512\n\n')
                                 f.write(f'[{track_name} SNP delta]\n')
-                                f.write(f'file = tmp/{track_name}_enformer_delta.bw\n')
+                                f.write(f'file = tmp/{track_name}_{ko_tool}_delta.bw\n')
                                 f.write('height = 2\n')
                                 f.write('color = red\n')
                                 f.write('negative_color = blue\n')

@@ -170,6 +170,8 @@ def main():
                         help='min value for color scale of diff matrix', required=False)
     parser.add_argument('--max-val-diff', dest='max_val_diff', type=float, default=0.5,
                         help='max value for color scale of diff matrix', required=False)
+    parser.add_argument('--track-diff-abs-max', dest='track_diff_abs_max', type=float, default=0.5,
+                        help='absolute max value for 1D diff and delta track color scales (default: %(default)s)', required=False)
     parser.add_argument('--plot-bigwig-q', dest='plot_bigwig_q', type=float, default=0.995,
                         help='Quantile cutoff for bigwig plot max values (default: %(default)s)', required=False)
     parser.add_argument('--ctcf-motif-p', dest='ctcf_motif_p', type=int, default=None,
@@ -244,6 +246,7 @@ def main():
                 min_val_true=args.min_val_true, max_val_true=args.max_val_true,
                 min_val_pred=args.min_val_pred, max_val_pred=args.max_val_pred, plot_diff=args.plot_diff,
                 min_val_diff=args.min_val_diff, max_val_diff=args.max_val_diff,
+                track_diff_abs_max=args.track_diff_abs_max,
                 plot_bigwig_q=args.plot_bigwig_q,
                 peak_height=args.peak_height,
                 ctcf_motif_p=args.ctcf_motif_p,
@@ -660,6 +663,7 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                     plot_bigwigs=[], plot_pred_bigwigs=[], plot_pred_log2fc=False,
                     min_val_true=1.0, max_val_true=None, min_val_pred=0.1, max_val_pred=None,
                     plot_diff=False, min_val_diff=-0.5, max_val_diff=0.5,
+                    track_diff_abs_max=0.5,
                     plot_bigwig_q=0.995, peak_height=2.0, ctcf_motif_p=500,
                     undo_log=True, no_plots=False, silent=False,
                     enformer_model_path=None, enformer_delta_mode='multiplicative',
@@ -1541,8 +1545,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                 f.write('color = red\n')
                                 f.write('negative_color = blue\n')
                                 f.write(f'title = {track_name} Enformer delta\n')
-                                f.write('min_value = -0.5\n')
-                                f.write('max_value = 0.5\n')
+                                f.write(f'min_value = {-track_diff_abs_max}\n')
+                                f.write(f'max_value = {track_diff_abs_max}\n')
                                 f.write('number_of_bins = 512\n\n')
                             if hierarchical_active and canonical_track_name == 'rad21':
                                 if os.path.exists('tmp/rad21_hierarchical_delta.bw'):
@@ -1552,8 +1556,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     f.write('color = red\n')
                                     f.write('negative_color = blue\n')
                                     f.write('title = RAD21 Hier. Delta\n')
-                                    f.write('min_value = -0.5\n')
-                                    f.write('max_value = 0.5\n')
+                                    f.write(f'min_value = {-track_diff_abs_max}\n')
+                                    f.write(f'max_value = {track_diff_abs_max}\n')
                                     f.write('number_of_bins = 512\n\n')
                                 if os.path.exists('tmp/rad21_hierarchical_perturbed.bw'):
                                     f.write('[RAD21 Perturbed (model input)]\n')
@@ -1583,8 +1587,8 @@ def single_deletion(output_path, outname, celltype, chr_name, start, deletion_st
                                     f.write(f'title = {track_name} pred log2FC\n')
                                 else:
                                     f.write(f'title = {track_name} pred delta\n')
-                                f.write('min_value = -1\n')
-                                f.write('max_value = 1\n')
+                                f.write(f'min_value = {-track_diff_abs_max}\n')
+                                f.write(f'max_value = {track_diff_abs_max}\n')
                                 f.write('number_of_bins = 512\n\n')
 
                     f.write('[Diff]\n')

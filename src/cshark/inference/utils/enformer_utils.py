@@ -791,12 +791,13 @@ def write_tmp_enformer_ko_bigwig(bigwig_path, fold_change, delta,
                                   enformer_track_idx, track_name,
                                   chr_name, start, window=2_097_152,
                                   delta_mode='multiplicative', cap=10.0,
-                                  track_is_log1p=True):
-    """Read an experimental bigwig and write an enformer-perturbed version.
+                                  track_is_log1p=True, tool='enformer'):
+    """Read an experimental bigwig and write a sequence-model-perturbed version.
 
-    The original signal is read at bp resolution, the Enformer-predicted
+    The original signal is read at bp resolution, the model-predicted
     fold-change (or additive delta) is applied, and the result is written
-    to ``tmp/{track_name}_enformer_ko.bw``.
+    to ``tmp/{track_name}_{tool}_ko.bw`` (``tool`` is 'enformer' or
+    'alphagenome' depending on the backbone that produced the delta).
 
     Parameters
     ----------
@@ -843,7 +844,7 @@ def write_tmp_enformer_ko_bigwig(bigwig_path, fold_change, delta,
         modified = original + d
     modified = np.clip(modified, 0, None)
 
-    out_path = f'tmp/{track_name}_enformer_ko.bw'
+    out_path = f'tmp/{track_name}_{tool}_ko.bw'
     out_bw = pyBigWig.open(out_path, 'w')
     out_bw.addHeader(header_list)
 
@@ -865,7 +866,7 @@ def write_tmp_enformer_ko_bigwig(bigwig_path, fold_change, delta,
         out_bw.addEntries([chr_name], [s], [e], [float(v)])
 
     out_bw.close()
-    print(f"[enformer_seq] Wrote enformer KO bigwig: {out_path}")
+    print(f"[{tool}_seq] Wrote {tool} KO bigwig: {out_path}")
 
 
 def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
@@ -874,7 +875,7 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
                                      enformer_track_idx, track_name,
                                      chr_name, start, window=2_097_152,
                                      delta_mode='multiplicative',
-                                     track_is_log1p=True):
+                                     track_is_log1p=True, tool='enformer'):
     """Write the raw Enformer delta (or log2 fold-change) as a bigwig.
 
     This produces a track centred around zero that is suitable for a
@@ -919,7 +920,7 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
     if len(signal) != window:
         signal = downsample_to_track_resolution(signal, window)
 
-    out_path = f'tmp/{track_name}_enformer_delta.bw'
+    out_path = f'tmp/{track_name}_{tool}_delta.bw'
     out_bw = pyBigWig.open(out_path, 'w')
     out_bw.addHeader(header_list)
 
@@ -940,10 +941,10 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
         out_bw.addEntries([chr_name], [s], [e], [float(v)])
 
     out_bw.close()
-    print(f"[enformer_seq] Wrote enformer delta bigwig: {out_path}")
+    print(f"[{tool}_seq] Wrote {tool} delta bigwig: {out_path}")
 
     # also write fc bigwig for reference
-    fc_out_path = f'tmp/{track_name}_enformer_fold_change.bw'
+    fc_out_path = f'tmp/{track_name}_{tool}_fold_change.bw'
     fc_signal = fold_change[:, enformer_track_idx].copy()
     if len(fc_signal) != window:
         fc_signal = downsample_to_track_resolution(fc_signal, window)
@@ -963,4 +964,4 @@ def write_tmp_enformer_delta_bigwig(bigwig_path, fold_change, delta,
     for s, e, v in fc_merged_intervals:
         out_bw.addEntries([chr_name], [s], [e], [float(v)])
     out_bw.close()
-    print(f"[enformer_seq] Wrote enformer fold-change bigwig: {fc_out_path}")
+    print(f"[{tool}_seq] Wrote {tool} fold-change bigwig: {fc_out_path}")

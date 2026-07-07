@@ -1,8 +1,9 @@
 """Perturbation planning for single-locus runs (extracted from single_locus).
 
 ``plan_perturbations`` is the verbatim ko-mode loop from the original
-``single_deletion`` (perturb.py ~818-923): it applies seq / enformer_seq base
-substitutions to the sequence, flags enformer_seq, and collects the pending
+``single_deletion`` (perturb.py ~818-923): it applies seq / enformer_seq /
+alphagenome_seq base substitutions to the sequence, flags the active
+sequence-model mode, and collects the pending
 track perturbations (with del-padding loaded). Returns the (possibly reassigned)
 seq_region and deletion_widths plus the collected plan.
 """
@@ -50,6 +51,7 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
 
     # Apply perturbations
     enformer_seq_active = False
+    alphagenome_seq_active = False
     hierarchical_active = hierarchical_rad21_model is not None
     pending_track_perturbations = []
 
@@ -58,13 +60,19 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
                 zip(deletion_starts, deletion_widths, ko_data_types, ko_mode, peak_height)):
             raw_alt = alt_bp_list[ko_idx] if ko_idx < len(alt_bp_list) else 'n' * deletion_width
 
-            if knockout_mode == 'enformer_seq':
+            if knockout_mode in ('enformer_seq', 'alphagenome_seq'):
+                # Both modes build the ALT sequence identically; they differ only
+                # in which backbone (Enformer / AlphaGenome) predicts the delta.
+                label = knockout_mode
                 deletion_start -= 1
-                enformer_seq_active = True
+                if knockout_mode == 'enformer_seq':
+                    enformer_seq_active = True
+                else:
+                    alphagenome_seq_active = True
                 rel_start = deletion_start - start
                 rel_end = rel_start + deletion_width
-                alt_string = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, 'enformer_seq')
-                print(f'[enformer_seq] Queued {len(alt_string)} base(s) at '
+                alt_string = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, label)
+                print(f'[{label}] Queued {len(alt_string)} base(s) at '
                       f'{chr_name}:{deletion_start} (rel {rel_start}): {alt_string.upper()}')
                 for bp_offset, base in enumerate(alt_string):
                     abs_pos = rel_start + bp_offset
@@ -120,4 +128,4 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
                 deletion_start, deletion_width, ko_data_type, ko_channel,
                 channel_offset, knockout_mode, ko_height, left_del_pad, right_del_pad,
             ))
-    return seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, hierarchical_active
+    return seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, alphagenome_seq_active, hierarchical_active
