@@ -26,6 +26,32 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
             else:
                 deletion_widths.append(1)
 
+    # Guard against SILENTLY dropping perturbations: the ko lists are zipped
+    # together below, so mismatched lengths would truncate to the shortest and
+    # skip the extra sites (e.g. giving --ko-mode once with two --ko-start would
+    # only perturb the first SNP). Require them to align -- for N sites give N
+    # entries in each of --ko / --ko-mode / --ko-start / --ko-width / --alt.
+    if deletion_starts is not None:
+        n = len(deletion_starts)
+        lengths = {'--ko-start': n,
+                   '--ko-width': len(deletion_widths) if deletion_widths is not None else n,
+                   '--ko': len(ko_data_types),
+                   '--ko-mode': len(ko_mode)}
+        if len(set(lengths.values())) > 1:
+            raise ValueError(
+                f"Mismatched perturbation list lengths {lengths}: --ko / --ko-mode / --ko-start / "
+                f"--ko-width must each have the SAME number of entries (one per perturbation), "
+                f"otherwise extra sites are silently dropped. For N SNPs give N entries in each, e.g. "
+                f"--ko seq seq --ko-mode enformer_seq enformer_seq --ko-start P1 P2 --ko-width 1 1 --alt B1 B2"
+            )
+        missing_alt = [i for i, m in enumerate(ko_mode)
+                       if m in ('seq', 'enformer_seq') and i >= len(alt_bp_list)]
+        if missing_alt:
+            raise ValueError(
+                f"--alt missing for seq/enformer_seq site index(es) {missing_alt}: give one --alt base "
+                f"per perturbation (aligned with --ko-start), otherwise those sites silently become 'N'."
+            )
+
     def _resolve_alt_string(raw_alt, rel_start, rel_end, current_seq_region, label):
         idx_to_base = {0: 'a', 1: 't', 2: 'c', 3: 'g', 4: 'n'}
         raw_alt_lower = raw_alt.lower()
