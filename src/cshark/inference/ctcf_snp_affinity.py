@@ -6,24 +6,77 @@ from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 import numpy as np
 import pandas as pd
 from matplotlib.font_manager import FontProperties
-from matplotlib.patches import PathPatch
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch, PathPatch
 from matplotlib.textpath import TextPath
 from matplotlib.transforms import Affine2D
 
 
+# ---------------------------------------------------------------------------
+# Publication style, ported from figures_lib/_palettes_HiC.r (theme_pub,
+# the PUB_* size/linewidth constants, and the allele / RdBu palettes) so the
+# motif logo matches the manuscript figures.
+# ---------------------------------------------------------------------------
+def _pick_pub_font_family():
+    # HELVETICA_FAMILY <- "Arial" in the R lib; fall back to metric-compatible
+    # Arial clones (Liberation/Nimbus Sans) when Arial itself is not installed.
+    available = {f.name for f in fm.fontManager.ttflist}
+    for name in ('Arial', 'Helvetica', 'Arimo', 'Liberation Sans', 'Nimbus Sans'):
+        if name in available:
+            return name
+    return 'DejaVu Sans'
+
+
+PUB_FONT_FAMILY = _pick_pub_font_family()
+PUB_BASE_TEXT_SIZE = 7        # PUB_BASE_TEXT_SIZE
+PUB_AXIS_TEXT_SIZE = 6        # PUB_AXIS_TEXT_SIZE
+PUB_TITLE_TEXT_SIZE = 7       # PUB_TITLE_TEXT_SIZE
+PUB_DENSE_TEXT_SIZE = 5       # annotation text (~PUB_COMPACT_TEXT_SIZE)
+PUB_AXIS_LINEWIDTH = 0.5      # ~PUB_AXIS_LINEWIDTH (ggplot 0.2 unit)
+PUB_REFERENCE_LINEWIDTH = 0.6
+
+plt.rcParams.update({
+    'font.family': PUB_FONT_FAMILY,
+    'pdf.fonttype': 42,        # keep text editable in vector output
+    'svg.fonttype': 'none',
+    'axes.linewidth': PUB_AXIS_LINEWIDTH,
+    'xtick.major.width': PUB_AXIS_LINEWIDTH,
+    'ytick.major.width': PUB_AXIS_LINEWIDTH,
+    'text.color': 'black',
+    'axes.edgecolor': 'black',
+    'axes.labelcolor': 'black',
+    'xtick.color': 'black',
+    'ytick.color': 'black',
+})
+
 BASE_TO_INDEX = {'A': 0, 'T': 1, 'C': 2, 'G': 3, 'N': 4}
 RC_TRANS = str.maketrans('ATCGN', 'TAGCN')
 LOGO_BASES = ('A', 'C', 'G', 'T')
+# Nucleotide palette deliberately excludes red and blue so those two hues are
+# reserved exclusively for the maternal (red) / paternal (blue) annotations.
 LOGO_COLORS = {
-    'A': '#2ca02c',
-    'C': '#1f77b4',
-    'G': '#ff7f0e',
-    'T': '#d62728',
+    'A': '#2CA02C',   # green
+    'C': '#E69F00',   # orange
+    'G': '#7B3FA0',   # purple (DeltaLike hue from _palettes_HiC.r)
+    'T': '#8C564B',   # brown
 }
-LOGO_FONT = FontProperties(family='DejaVu Sans', weight='bold')
+LOGO_FONT = FontProperties(family=PUB_FONT_FAMILY, weight='bold')
+# ALLELE_SCATTER_PALETTE from the R lib: maternal = RdBu high (red),
+# paternal = RdBu low (blue). Red/blue are reserved for the allele letters.
+MATERNAL_COLOR = '#B2182B'
+PATERNAL_COLOR = '#2166AC'
+PUB_NEUTRAL_GREY = '#7F7F7F'
+# Effect-direction scale (green = gain / Δ>0, red = loss / Δ<0), used for the
+# SNP highlight band (light tint) and the rsID / Δ annotation text (saturated).
+DELTA_POS_COLOR = '#2E8B57'        # seagreen
+DELTA_NEG_COLOR = '#B22222'        # firebrick
+HIGHLIGHT_POS_COLOR = '#C7E9C0'    # light green band (Δ>0)
+HIGHLIGHT_NEG_COLOR = '#FBC9C4'    # light red band (Δ<0)
+HIGHLIGHT_ZERO_COLOR = '#E0E0E0'   # light grey band (Δ==0)
 
 
 def parse_args():
@@ -42,8 +95,19 @@ def parse_args():
                         help='One or more SNP positions on --chrom')
     parser.add_argument('--alts', nargs='+', required=True,
                         help='Alternate bases matching --positions order')
+    parser.add_argument('--rs-ids', nargs='+', default=None,
+                        help='Optional rsID for each SNP, matching --positions order (e.g. rs12345)')
+    parser.add_argument('--maternal-alleles', nargs='+', default=None,
+                        help='Maternal allele base for each SNP, matching --positions order')
+    parser.add_argument('--paternal-alleles', nargs='+', default=None,
+                        help='Paternal allele base for each SNP, matching --positions order')
+    parser.add_argument('--genome-build', default='hg38',
+                        help='Genome assembly/build label shown on plots for --positions (default: %(default)s)')
     parser.add_argument('--out-prefix', required=True,
                         help='Output prefix for result table and plots')
+    parser.add_argument('--plot-format', default='png', choices=['png', 'pdf', 'both'],
+                        help='Image format for the plots: png (raster), pdf (vector, '
+                             'editable text), or both (default: %(default)s)')
     parser.add_argument('--scan-flank', type=int, default=20,
                         help='Flank size around each SNP to scan for the best reference motif hit (default: 20)')
     parser.add_argument('--jaspar-release', default='JASPAR2024',
@@ -84,10 +148,24 @@ def load_fasta(path):
     return sequences
 
 
-def build_variant_table(chrom, positions, alts):
+def build_variant_table(chrom, positions, alts, rs_ids=None, maternal_alleles=None, paternal_alleles=None):
     if len(positions) != len(alts):
         raise ValueError(
             f'Expected the same number of --positions and --alts values, got {len(positions)} and {len(alts)}'
+        )
+    if rs_ids is not None and len(rs_ids) != len(positions):
+        raise ValueError(
+            f'Expected the same number of --positions and --rs-ids values, got {len(positions)} and {len(rs_ids)}'
+        )
+    if maternal_alleles is not None and len(maternal_alleles) != len(positions):
+        raise ValueError(
+            f'Expected the same number of --positions and --maternal-alleles values, '
+            f'got {len(positions)} and {len(maternal_alleles)}'
+        )
+    if paternal_alleles is not None and len(paternal_alleles) != len(positions):
+        raise ValueError(
+            f'Expected the same number of --positions and --paternal-alleles values, '
+            f'got {len(positions)} and {len(paternal_alleles)}'
         )
 
     records = []
@@ -98,12 +176,21 @@ def build_variant_table(chrom, positions, alts):
             'chrom': str(chrom),
             'pos': int(pos),
             'alt': alt,
+            'rsid': str(rs_ids[idx - 1]) if rs_ids else '',
+            'maternal_allele': str(maternal_alleles[idx - 1]).upper() if maternal_alleles else '',
+            'paternal_allele': str(paternal_alleles[idx - 1]).upper() if paternal_alleles else '',
         })
     return pd.DataFrame(records)
 
 
 def reverse_complement_str(seq):
     return seq.translate(RC_TRANS)[::-1]
+
+
+def reverse_complement_pwm(pwm):
+    bases_by_index = sorted(BASE_TO_INDEX, key=BASE_TO_INDEX.get)
+    complement_columns = [BASE_TO_INDEX[base.translate(RC_TRANS)] for base in bases_by_index]
+    return pwm[::-1, :][:, complement_columns]
 
 
 def fetch_pwm(jaspar_release='JASPAR2024', species='9606', tf_name='CTCF'):
@@ -208,10 +295,12 @@ def draw_pwm_logo(ax, pwm):
     ax.set_ylim(0.0, max(1.25, max_height * 1.25))
     ax.set_xticks(tick_positions)
     ax.set_xticklabels([str(idx) for idx in range(1, pwm.shape[0] + 1)])
-    ax.set_ylabel('Bits')
-    ax.set_xlabel('Motif position')
+    ax.set_ylabel('Bits', fontsize=PUB_AXIS_TEXT_SIZE)
+    ax.set_xlabel('Motif position', fontsize=PUB_AXIS_TEXT_SIZE)
+    # theme_pub look: classic L-shaped axes, thin black lines, small ticks.
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.tick_params(labelsize=PUB_AXIS_TEXT_SIZE, width=PUB_AXIS_LINEWIDTH, length=2.5, pad=2)
     return ax.get_ylim()[1]
 
 
@@ -290,20 +379,26 @@ def find_best_reference_motif(reference_seq, positions0, pwm, scan_flank):
     return best_hit
 
 
-def apply_alt_alleles(reference_seq, variants, zero_based=False):
-    alt_seq = reference_seq
+def apply_alleles(reference_seq, variants, allele_key, zero_based=False):
+    seq = reference_seq
     for variant in variants:
         pos = int(variant['pos'])
         pos0 = pos if zero_based else pos - 1
         ref = variant.get('ref')
-        alt_seq = apply_alt_allele(alt_seq, pos0, variant['alt'], ref=ref)
-    return alt_seq
+        seq = apply_alt_allele(seq, pos0, variant[allele_key], ref=ref)
+    return seq
+
+
+def apply_alt_alleles(reference_seq, variants, zero_based=False):
+    return apply_alleles(reference_seq, variants, 'alt', zero_based=zero_based)
 
 
 def build_variant_annotations(variants, positions0, ref_scored_seq, alt_scored_seq,
-                              motif_start0, motif_end0, strand, pwm):
+                              motif_start0, motif_end0, strand, pwm,
+                              maternal_scored_seq=None, paternal_scored_seq=None):
     annotations = []
     motif_len = pwm.shape[0]
+    has_parental = maternal_scored_seq is not None and paternal_scored_seq is not None
 
     for variant, pos0 in zip(variants, positions0):
         allele_len = len(variant['alt'])
@@ -319,13 +414,25 @@ def build_variant_annotations(variants, positions0, ref_scored_seq, alt_scored_s
             genomic_pos = int(variant['pos']) + (offset if strand == '+' else allele_len - 1 - offset)
             ref_contribution = pwm[rel_pos, BASE_TO_INDEX[ref_base]] / motif_len
             alt_contribution = pwm[rel_pos, BASE_TO_INDEX[alt_base]] / motif_len
-            annotations.append({
+            annotation = {
                 'genomic_pos': genomic_pos,
                 'motif_pos': rel_pos + 1,
                 'ref_base': ref_base,
                 'alt_base': alt_base,
+                'rsid': variant.get('rsid', ''),
                 'delta_score': alt_contribution - ref_contribution,
-            })
+            }
+
+            if has_parental:
+                maternal_base = maternal_scored_seq[rel_pos]
+                paternal_base = paternal_scored_seq[rel_pos]
+                maternal_contribution = pwm[rel_pos, BASE_TO_INDEX[maternal_base]] / motif_len
+                paternal_contribution = pwm[rel_pos, BASE_TO_INDEX[paternal_base]] / motif_len
+                annotation['maternal_base'] = maternal_base
+                annotation['paternal_base'] = paternal_base
+                annotation['parental_delta_score'] = paternal_contribution - maternal_contribution
+
+            annotations.append(annotation)
 
     annotations.sort(key=lambda item: item['motif_pos'])
     return annotations
@@ -352,6 +459,12 @@ def score_variants(reference_by_chrom, variants, pwm, scan_flank, zero_based=Fal
 
     best_hit = find_best_reference_motif(chrom_seq, positions, pwm, scan_flank)
     alt_seq = apply_alt_alleles(chrom_seq, variants, zero_based=zero_based)
+    has_parental_alleles = all(
+        variant.get('maternal_allele') and variant.get('paternal_allele') for variant in variants
+    )
+    if has_parental_alleles:
+        maternal_seq = apply_alleles(chrom_seq, variants, 'maternal_allele', zero_based=zero_based)
+        paternal_seq = apply_alleles(chrom_seq, variants, 'paternal_allele', zero_based=zero_based)
 
     motif_start0 = best_hit['motif_start0']
     motif_end0 = best_hit['motif_end0']
@@ -363,15 +476,36 @@ def score_variants(reference_by_chrom, variants, pwm, scan_flank, zero_based=Fal
         alt_scored_seq = alt_window
     alt_score = pwm_score(alt_scored_seq, pwm)
 
+    if has_parental_alleles:
+        maternal_window = maternal_seq[motif_start0:motif_end0]
+        paternal_window = paternal_seq[motif_start0:motif_end0]
+        if best_hit['strand'] == '-':
+            maternal_scored_seq = reverse_complement_str(maternal_window)
+            paternal_scored_seq = reverse_complement_str(paternal_window)
+        else:
+            maternal_scored_seq = maternal_window
+            paternal_scored_seq = paternal_window
+        maternal_score = pwm_score(maternal_scored_seq, pwm)
+        paternal_score = pwm_score(paternal_scored_seq, pwm)
+    else:
+        maternal_scored_seq = paternal_scored_seq = None
+        maternal_score = paternal_score = None
+
     ref_alleles = []
     alt_alleles = []
     pos_labels = []
+    rsid_labels = []
+    maternal_labels = []
+    paternal_labels = []
     for variant, pos0 in zip(variants, positions):
         alt_len = len(variant['alt'])
         rel_pos = pos0 - motif_start0
         ref_alleles.append(ref_window[rel_pos:rel_pos + alt_len])
         alt_alleles.append(variant['alt'])
         pos_labels.append(str(variant['pos']))
+        rsid_labels.append(variant.get('rsid') or '')
+        maternal_labels.append(variant.get('maternal_allele') or '')
+        paternal_labels.append(variant.get('paternal_allele') or '')
 
     if result_id is None:
         result_id = variants[0]['id'] if len(variants) == 1 else 'all_snps'
@@ -385,6 +519,8 @@ def score_variants(reference_by_chrom, variants, pwm, scan_flank, zero_based=Fal
         motif_end0,
         best_hit['strand'],
         pwm,
+        maternal_scored_seq=maternal_scored_seq,
+        paternal_scored_seq=paternal_scored_seq,
     )
 
     return {
@@ -392,8 +528,11 @@ def score_variants(reference_by_chrom, variants, pwm, scan_flank, zero_based=Fal
         'analysis_type': 'single' if len(variants) == 1 else 'combined',
         'chrom': chrom,
         'pos': ','.join(pos_labels),
+        'rsid': ','.join(rsid_labels),
         'ref': ','.join(ref_alleles),
         'alt': ','.join(alt_alleles),
+        'maternal': ','.join(maternal_labels),
+        'paternal': ','.join(paternal_labels),
         'motif_start': motif_start0 + 1,
         'motif_end': motif_end0,
         'motif_strand': best_hit['strand'],
@@ -404,12 +543,19 @@ def score_variants(reference_by_chrom, variants, pwm, scan_flank, zero_based=Fal
         'ref_score': best_hit['ref_score'],
         'alt_score': alt_score,
         'delta_score': alt_score - best_hit['ref_score'],
+        'maternal_score': maternal_score,
+        'paternal_score': paternal_score,
+        'parental_delta_score': (paternal_score - maternal_score) if has_parental_alleles else None,
         'variant_annotations': variant_annotations,
     }
 
 
-def plot_scores(results_df, out_path, tf_name):
-    labels = [f'{row.id}\n{row.chrom}:{row.pos}' for row in results_df.itertuples(index=False)]
+def plot_scores(results_df, out_path, tf_name, genome_build):
+    labels = [
+        f'{row.id}' + (f' ({row.rsid})' if getattr(row, 'rsid', '') else '')
+        + f'\n{row.chrom}:{row.pos} ({genome_build})'
+        for row in results_df.itertuples(index=False)
+    ]
     x = np.arange(len(results_df))
     width = 0.38
     fig_width = max(10, 0.75 * len(results_df) + 4)
@@ -440,70 +586,232 @@ def plot_scores(results_df, out_path, tf_name):
     plt.close(fig)
 
 
-def plot_variant_motif_logos(results, pwm, out_path, tf_name):
+def _delta_direction_color(delta):
+    # Effect direction for the rsID / Δ annotation text: green gain / red loss.
+    if delta > 0:
+        return DELTA_POS_COLOR
+    if delta < 0:
+        return DELTA_NEG_COLOR
+    return PUB_NEUTRAL_GREY
+
+
+def _delta_band_color(delta):
+    # Light tint of the direction colour for the SNP highlight band.
+    if delta > 0:
+        return HIGHLIGHT_POS_COLOR
+    if delta < 0:
+        return HIGHLIGHT_NEG_COLOR
+    return HIGHLIGHT_ZERO_COLOR
+
+
+def plot_variant_motif_logos(results, pwm, out_path, tf_name, genome_build):
     if not results:
         raise ValueError('At least one result is required for motif logo plotting')
 
-    fig_width = max(10, 0.55 * pwm.shape[0] + 4)
-    fig_height = max(3.5, 3.0 * len(results))
-    fig, axes = plt.subplots(len(results), 1, figsize=(fig_width, fig_height), squeeze=False)
+    motif_len = pwm.shape[0]
+    has_any_parental = any(record.get('parental_delta_score') is not None for record in results)
+
+    # Publication-sized figure (theme_pub / PUB_* conventions from _palettes_HiC.r).
+    # Logo panel deliberately kept short (half the previous height). The inter-panel
+    # gap is sized in fixed inches (not relative to the short axes) so each panel's
+    # allele annotations + x-label clear the next panel's title.
+    n_panels = len(results)
+    fig_width = max(4.2, 0.26 * motif_len + 1.6)
+    panel_height_inches = 0.95
+    inter_gap_inches = 1.3 if has_any_parental else 1.05
+    top_reserved_inches = 0.8
+    bottom_reserved_inches = 0.95 if has_any_parental else 0.8
+    fig_height = (
+        panel_height_inches * n_panels
+        + inter_gap_inches * (n_panels - 1)
+        + top_reserved_inches
+        + bottom_reserved_inches
+    )
+    fig, axes = plt.subplots(n_panels, 1, figsize=(fig_width, fig_height), squeeze=False)
     axes = axes.ravel()
 
+    rc_pwm = reverse_complement_pwm(pwm)
+
     for ax, record in zip(axes, results):
-        draw_pwm_logo(ax, pwm)
+        is_minus_strand = record['motif_strand'] == '-'
+        display_pwm = rc_pwm if is_minus_strand else pwm
+        draw_pwm_logo(ax, display_pwm)
+        rsid_suffix = f" ({record['rsid']})" if record.get('rsid') else ''
+        if record.get('parental_delta_score') is not None:
+            delta_title = f"Δ(pat−mat)={record['parental_delta_score']:+.3f}"
+        else:
+            delta_title = f"Δ={record['delta_score']:+.3f}"
         ax.set_title(
-            f"{record['id']} | {record['chrom']}:{record['pos']} | strand {record['motif_strand']} | total Δ={record['delta_score']:+.3f}",
-            fontsize=10,
+            f"{record['id']}{rsid_suffix}  |  {genome_build} {record['chrom']}:{record['pos']}  |  strand {record['motif_strand']}  |  total {delta_title}",
+            fontsize=PUB_BASE_TEXT_SIZE,
             loc='left',
+            pad=26,
         )
 
         for annotation_idx, annotation in enumerate(record['variant_annotations']):
-            x0 = annotation['motif_pos'] - 1
-            x_center = x0 + 0.5
-            delta = annotation['delta_score']
-            color = 'firebrick' if delta < 0 else 'seagreen' if delta > 0 else 'dimgray'
-            label_offset = annotation_idx % 2
+            has_parental = 'parental_delta_score' in annotation
+            if is_minus_strand:
+                display_pos = motif_len - annotation['motif_pos'] + 1
+                ref_base = annotation['ref_base'].translate(RC_TRANS)
+                alt_base = annotation['alt_base'].translate(RC_TRANS)
+                if has_parental:
+                    maternal_base = annotation['maternal_base'].translate(RC_TRANS)
+                    paternal_base = annotation['paternal_base'].translate(RC_TRANS)
+            else:
+                display_pos = annotation['motif_pos']
+                ref_base = annotation['ref_base']
+                alt_base = annotation['alt_base']
+                if has_parental:
+                    maternal_base = annotation['maternal_base']
+                    paternal_base = annotation['paternal_base']
 
-            ax.axvspan(x0, x0 + 1, color=color, alpha=0.18, linewidth=0)
-            ax.axvline(x_center, color=color, linestyle='--', linewidth=1.1, alpha=0.8)
-            ax.text(
-                x_center,
-                1.02 + 0.08 * label_offset,
-                str(annotation['genomic_pos']),
+            x0 = display_pos - 1
+            x_center = x0 + 0.5
+            delta = annotation['parental_delta_score'] if has_parental else annotation['delta_score']
+            color = _delta_direction_color(delta)
+            label_offset = annotation_idx % 2
+            pos_label = (
+                f"{annotation['rsid']} · {annotation['genomic_pos']}"
+                if annotation.get('rsid') else str(annotation['genomic_pos'])
+            )
+
+            # Mark the SNP column with a light diverging band (green Δ>0 / red Δ<0),
+            # no line; drawn behind the logo letters (zorder=0) so they stay crisp.
+            ax.axvspan(x0, x0 + 1, color=_delta_band_color(delta), alpha=0.7,
+                       linewidth=0, zorder=0)
+            # Offsets are in fixed points (not axes-fraction) so they stay a small,
+            # constant distance from the axis regardless of per-panel axes height.
+            ax.annotate(
+                pos_label,
+                xy=(x_center, 1.0),
+                xycoords=ax.get_xaxis_transform(),
+                xytext=(0, 4 + 8 * label_offset),
+                textcoords='offset points',
                 color=color,
-                fontsize=8,
+                fontsize=PUB_DENSE_TEXT_SIZE,
                 fontweight='bold',
                 ha='center',
                 va='bottom',
-                transform=ax.get_xaxis_transform(),
-                clip_on=False,
-            )
-            ax.text(
-                x_center,
-                -0.20 - 0.12 * label_offset,
-                f"{annotation['ref_base']}>{annotation['alt_base']}\nΔ={delta:+.2f}",
-                color=color,
-                fontsize=8,
-                ha='center',
-                va='top',
-                transform=ax.get_xaxis_transform(),
                 clip_on=False,
             )
 
+            label_y = -24 - 12 * label_offset
+            line_step = 8
+            if has_parental:
+                # Two rows: small grey mat/pat tag + coloured allele letter,
+                # reading maternal (red) over paternal (blue); Δ below.
+                for row, (tag, base_letter, base_color) in enumerate((
+                    ('mat', maternal_base, MATERNAL_COLOR),
+                    ('pat', paternal_base, PATERNAL_COLOR),
+                )):
+                    row_y = label_y - row * line_step
+                    ax.annotate(
+                        tag,
+                        xy=(x_center, 0.0),
+                        xycoords=ax.get_xaxis_transform(),
+                        xytext=(-1, row_y),
+                        textcoords='offset points',
+                        color=PUB_NEUTRAL_GREY,
+                        fontsize=PUB_DENSE_TEXT_SIZE,
+                        ha='right',
+                        va='top',
+                        clip_on=False,
+                    )
+                    ax.annotate(
+                        base_letter,
+                        xy=(x_center, 0.0),
+                        xycoords=ax.get_xaxis_transform(),
+                        xytext=(3, row_y),
+                        textcoords='offset points',
+                        color=base_color,
+                        fontsize=PUB_DENSE_TEXT_SIZE,
+                        fontweight='bold',
+                        ha='left',
+                        va='top',
+                        clip_on=False,
+                    )
+                ax.annotate(
+                    f"Δ {delta:+.2f}",
+                    xy=(x_center, 0.0),
+                    xycoords=ax.get_xaxis_transform(),
+                    xytext=(0, label_y - 2 * line_step),
+                    textcoords='offset points',
+                    color=color,
+                    fontsize=PUB_DENSE_TEXT_SIZE,
+                    ha='center',
+                    va='top',
+                    clip_on=False,
+                )
+            else:
+                ax.annotate(
+                    f"{ref_base}>{alt_base}\n{delta:+.2f}",
+                    xy=(x_center, 0.0),
+                    xycoords=ax.get_xaxis_transform(),
+                    xytext=(0, label_y),
+                    textcoords='offset points',
+                    color=color,
+                    fontsize=PUB_DENSE_TEXT_SIZE,
+                    ha='center',
+                    va='top',
+                    clip_on=False,
+                )
+
     fig.suptitle(
-        f'{tf_name} motif logo with variant placement',
-        fontsize=13,
-        y=0.995,
+        f'{tf_name} motif logo',
+        fontsize=PUB_TITLE_TEXT_SIZE,
+        y=1.0,
+        va='top',
+    )
+
+    # Legend, mirroring the R "legend system" style: small colored keys, no frame.
+    band_handles = [
+        Patch(facecolor=HIGHLIGHT_POS_COLOR, edgecolor='none', label='Δ>0 (green band)'),
+        Patch(facecolor=HIGHLIGHT_NEG_COLOR, edgecolor='none', label='Δ<0 (red band)'),
+    ]
+    if has_any_parental:
+        handles = [
+            Patch(facecolor=MATERNAL_COLOR, edgecolor='none', label='Maternal allele'),
+            Patch(facecolor=PATERNAL_COLOR, edgecolor='none', label='Paternal allele'),
+        ] + band_handles
+        caption = ('Alleles below each panel read maternal → paternal; '
+                   'Δ = paternal − maternal PWM contribution; band colours the SNP by Δ sign. '
+                   '"−"-strand loci are reverse-complemented to the genomic + strand.')
+    else:
+        handles = band_handles
+        caption = ('Alleles below each panel read ref>alt; Δ = alt − ref PWM contribution; '
+                   'band colours the SNP by Δ sign. '
+                   '"−"-strand loci are reverse-complemented to the genomic + strand.')
+
+    # Reserve fixed physical space so nothing collides regardless of panel count.
+    # hspace is expressed relative to the (short) axes height so that the absolute
+    # inter-panel gap stays at inter_gap_inches.
+    top_frac = 1 - top_reserved_inches / fig_height
+    bottom_frac = bottom_reserved_inches / fig_height
+    fig.subplots_adjust(top=top_frac, bottom=bottom_frac,
+                        hspace=inter_gap_inches / panel_height_inches)
+
+    fig.legend(
+        handles=handles,
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.08 / fig_height),
+        ncol=len(handles),
+        frameon=False,
+        fontsize=PUB_AXIS_TEXT_SIZE,
+        handlelength=1.1,
+        handleheight=1.1,
+        columnspacing=1.6,
+        handletextpad=0.5,
     )
     fig.text(
         0.5,
-        0.01,
-        'Shaded motif positions mark altered bases; color reflects the local ALT-REF PWM contribution change.',
+        -0.30 / fig_height,
+        caption,
         ha='center',
-        fontsize=9,
+        va='top',
+        fontsize=PUB_DENSE_TEXT_SIZE,
+        color='black',
     )
-    fig.subplots_adjust(top=0.9, bottom=0.12, hspace=1.0)
-    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    fig.savefig(out_path, dpi=600, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -513,7 +821,10 @@ def main():
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
 
     reference_by_chrom = load_fasta(args.fasta)
-    snps = build_variant_table(args.chrom, args.positions, args.alts)
+    snps = build_variant_table(
+        args.chrom, args.positions, args.alts, rs_ids=args.rs_ids,
+        maternal_alleles=args.maternal_alleles, paternal_alleles=args.paternal_alleles,
+    )
     motif, pwm = fetch_pwm(
         jaspar_release=args.jaspar_release,
         species=args.species,
@@ -529,6 +840,9 @@ def main():
                 'chrom': row.chrom,
                 'pos': row.pos,
                 'alt': row.alt,
+                'rsid': row.rsid,
+                'maternal_allele': row.maternal_allele,
+                'paternal_allele': row.paternal_allele,
             }
             records.append(
                 score_variants(
@@ -570,15 +884,17 @@ def main():
 
     results_df = pd.DataFrame(tabular_records)
     results_path = out_prefix.with_name(f'{out_prefix.name}_scores.tsv')
-    plot_path = out_prefix.with_name(f'{out_prefix.name}_scores.png')
-    motif_plot_path = out_prefix.with_name(f'{out_prefix.name}_motif_logo.png')
     results_df.to_csv(results_path, sep='\t', index=False)
-    plot_scores(results_df, plot_path, motif.name)
-    plot_variant_motif_logos(records, pwm, motif_plot_path, motif.name)
-
     print(f'Saved {len(results_df)} scored variants to {results_path}')
-    print(f'Saved plot to {plot_path}')
-    print(f'Saved motif logo plot to {motif_plot_path}')
+
+    extensions = ['.png', '.pdf'] if args.plot_format == 'both' else [f'.{args.plot_format}']
+    for ext in extensions:
+        plot_path = out_prefix.with_name(f'{out_prefix.name}_scores{ext}')
+        motif_plot_path = out_prefix.with_name(f'{out_prefix.name}_motif_logo{ext}')
+        plot_scores(results_df, plot_path, motif.name, args.genome_build)
+        plot_variant_motif_logos(records, pwm, motif_plot_path, motif.name, args.genome_build)
+        print(f'Saved plot to {plot_path}')
+        print(f'Saved motif logo plot to {motif_plot_path}')
     if failures:
         failure_path = out_prefix.with_name(f'{out_prefix.name}_failures.tsv')
         pd.DataFrame(failures).to_csv(failure_path, sep='\t', index=False)
