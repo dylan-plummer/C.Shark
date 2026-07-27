@@ -64,6 +64,7 @@ class VizCallback(Callback):
         self.h3k4me1 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
         self.h3k27me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
         self.rad21 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/rad21.bw" for celltype in celltypes}
+        self.h3k9me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k9me3.bw" for celltype in celltypes}
 
     def on_train_start(self, trainer, pl_module):
         print("Saving ground truth loci for reference")
@@ -175,73 +176,71 @@ class VizCallback(Callback):
                     except Exception as e:
                         print(e)
 
-                # visualize rad21 prediction from inner_model
-                inputs_without_rad21 = torch.cat([inputs[:, :, :5 + pl_module.hparams.input_features.index('rad21')],
-                                                    inputs[:, :, 5 + pl_module.hparams.input_features.index('rad21') + 1:]], dim=2)
-                hierarchical_outputs = pl_module.input_pred_model(inputs_without_rad21)
-                pred_1d_inputs = hierarchical_outputs.get('1d')
-                track_pred = pred_1d_inputs[:, :, 0].detach().cpu().numpy().squeeze()
-                if pl_module.hparams.bigwig_log_transform:
-                    track_pred = np.exp(track_pred) - 1  # inverse log transformation
-                os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
-                # visualize 1D tracks as shaded plots compared to ground truth
-                fig, axs = plt.subplots(2, 1, figsize=(10, 4))
-                colors = ['blue', 'orange']
-                axs[0].plot(track_pred, color=colors[0])
-                axs[0].fill_between(range(len(track_pred)), track_pred, color=colors[0], alpha=0.5)
-                axs[0].set_title('Predicted Rad21 Input Feature')
-                axs[0].set_xticks([])
-                # get ground truth rad21 from inputs
-                rad21_idx = pl_module.hparams.input_features.index('rad21') 
-                gt_track = inputs[:, :, 5 + rad21_idx].clone().detach().cpu().numpy()
-                bin_size = int(len(track_pred) / pl_module.hparams.target_1d_size)
-                gt_track = gt_track.reshape(-1, bin_size).mean(axis=1)
-                if pl_module.hparams.bigwig_log_transform:
-                    gt_track = np.exp(gt_track) - 1  # inverse log transformation                    
-                axs[1].plot(gt_track, color=colors[1])
-                axs[1].fill_between(range(len(gt_track)), gt_track, color=colors[1], alpha=0.5)
-                axs[1].set_title('Ground Truth Rad21 Input Feature')
-                axs[1].set_xticks([])
-                plt.tight_layout()
-                plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_rad21_input_comparison_{pl_module.current_epoch}.png"))
-                plt.close()
-                try:
-                    if pl_module.hparams.use_wandb:
-                        wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_rad21_input_comparison_{pl_module.current_epoch}.png"))})
-                except Exception as e:
-                    print(e)
+                # visualize rad21 prediction from inner_model (only when the
+                # layer-2 RAD21 predictor exists, i.e. rad21 is an input feature)
+                if getattr(pl_module, 'use_rad21', False) and pl_module.input_pred_model is not None:
+                    inputs_without_rad21 = torch.cat([inputs[:, :, :5 + pl_module.hparams.input_features.index('rad21')],
+                                                        inputs[:, :, 5 + pl_module.hparams.input_features.index('rad21') + 1:]], dim=2)
+                    hierarchical_outputs = pl_module.input_pred_model(inputs_without_rad21)
+                    pred_1d_inputs = hierarchical_outputs.get('1d')
+                    track_pred = pred_1d_inputs[:, :, 0].detach().cpu().numpy().squeeze()
+                    if pl_module.hparams.bigwig_log_transform:
+                        track_pred = np.exp(track_pred) - 1  # inverse log transformation
+                    os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
+                    # visualize 1D tracks as shaded plots compared to ground truth
+                    fig, axs = plt.subplots(2, 1, figsize=(10, 4))
+                    colors = ['blue', 'orange']
+                    axs[0].plot(track_pred, color=colors[0])
+                    axs[0].fill_between(range(len(track_pred)), track_pred, color=colors[0], alpha=0.5)
+                    axs[0].set_title('Predicted Rad21 Input Feature')
+                    axs[0].set_xticks([])
+                    # get ground truth rad21 from inputs
+                    rad21_idx = pl_module.hparams.input_features.index('rad21')
+                    gt_track = inputs[:, :, 5 + rad21_idx].clone().detach().cpu().numpy()
+                    bin_size = int(len(track_pred) / pl_module.hparams.target_1d_size)
+                    gt_track = gt_track.reshape(-1, bin_size).mean(axis=1)
+                    if pl_module.hparams.bigwig_log_transform:
+                        gt_track = np.exp(gt_track) - 1  # inverse log transformation
+                    axs[1].plot(gt_track, color=colors[1])
+                    axs[1].fill_between(range(len(gt_track)), gt_track, color=colors[1], alpha=0.5)
+                    axs[1].set_title('Ground Truth Rad21 Input Feature')
+                    axs[1].set_xticks([])
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_rad21_input_comparison_{pl_module.current_epoch}.png"))
+                    plt.close()
+                    try:
+                        if pl_module.hparams.use_wandb:
+                            wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_rad21_input_comparison_{pl_module.current_epoch}.png"))})
+                    except Exception as e:
+                        print(e)
 
 
-                # pred_1d_tracks = outputs.get('1d')[0].permute(1, 0).detach().cpu().numpy()
-                # print(pred_1d_tracks.shape)
-                # if pred_1d_tracks is not None:
-                #     os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
-                #     # visualize 1D tracks as shaded plots
-                #     fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(10, len(pred_1d_tracks) * 2))
-                #     if len(pred_1d_tracks) == 1:
-                #         axs = [axs]
-                #     colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
-                #     for i, pred_1d in enumerate(pred_1d_tracks):
-                #         track_name = pl_module.hparams.output_features[i]
-                #         if pl_module.hparams.bigwig_log_transform:
-                #             pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
-                #         axs[i].plot(pred_1d, color=colors[i % len(colors)])
-                #         axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
-                #         axs[i].set_title(track_name)
-                #         axs[i].set_xticks([])
-                    
-                #     plt.tight_layout()
-                #     plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))
-                #     plt.close()
-
-                #     try:
-                #         if pl_module.hparams.use_wandb:
-                #             wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
-                #     except Exception as e:
-                #         print(e)
-                            
-                # except Exception as e:
-                #     print(e)
+                # Layer 3 now predicts the --target-features 1D tracks alongside
+                # Hi-C; visualize them when present.
+                if pl_module.hparams.output_features is not None and outputs.get('1d') is not None:
+                    pred_1d_tracks = outputs.get('1d')[0].permute(1, 0).detach().cpu().numpy()
+                    os.makedirs(os.path.join(self.out_dir, locus, celltype, '1d_tracks'), exist_ok=True)
+                    # visualize 1D tracks as shaded plots
+                    fig, axs = plt.subplots(len(pred_1d_tracks), 1, figsize=(10, len(pred_1d_tracks) * 2))
+                    if len(pred_1d_tracks) == 1:
+                        axs = [axs]
+                    colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
+                    for i, pred_1d in enumerate(pred_1d_tracks):
+                        track_name = pl_module.hparams.output_features[i]
+                        if pl_module.hparams.bigwig_log_transform:
+                            pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
+                        axs[i].plot(pred_1d, color=colors[i % len(colors)])
+                        axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
+                        axs[i].set_title(track_name)
+                        axs[i].set_xticks([])
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))
+                    plt.close()
+                    try:
+                        if pl_module.hparams.use_wandb:
+                            wandb.log({locus + '_' + celltype + '_1d_tracks': wandb.Image(os.path.join(self.out_dir, locus, celltype, '1d_tracks', f"{chr_name}_{start}_{pl_module.current_epoch}.png"))})
+                    except Exception as e:
+                        print(e)
 
                 # predict tracks using enformer for comparison
                 enformer_pred_tracks = pl_module.enformer_predict_1d(inputs)
@@ -253,10 +252,7 @@ class VizCallback(Callback):
                     axs = [axs]
                 colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
                 for i, pred_1d in enumerate(enformer_pred_tracks):
-                    if i < rad21_idx:
-                        track_name = pl_module.hparams.input_features[i]   
-                    else:
-                        track_name = pl_module.hparams.input_features[i + 1]  # skip rad21
+                    track_name = pl_module.enformer_tracks[i]
                     axs[i].plot(pred_1d, color=colors[i % len(colors)])
                     axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
                     axs[i].set_title(track_name + ' (Enformer)')
@@ -273,16 +269,12 @@ class VizCallback(Callback):
                 # predict Hi-C using enformer predictions of 1D tracks
                 if pl_module.hparams.predict_hic:
                     inputs_with_enformer_tracks = inputs.clone()
-                    # replace the genomic feature tracks with enformer predictions (all except RAD21)
-                    rad21_idx = pl_module.hparams.input_features.index('rad21')
-                    enformer_track_idx = 0
-                    for feat_idx, feature in enumerate(pl_module.hparams.input_features):
-                        if feature == 'rad21':
-                            continue  # keep original RAD21
+                    # replace each Enformer-predicted track with its prediction (rad21 untouched)
+                    for enf_i, track_name in enumerate(pl_module.enformer_tracks):
+                        feat_idx = pl_module.hparams.input_features.index(track_name)
                         inputs_with_enformer_tracks[:, :, 5 + feat_idx] = torch.log1p(
-                            torch.tensor(enformer_pred_tracks[enformer_track_idx]).to(inputs.device)
+                            torch.tensor(enformer_pred_tracks[enf_i]).to(inputs.device)
                         ).unsqueeze(0)
-                        enformer_track_idx += 1
                     with torch.no_grad():
                         if pl_module.hparams.conditioning_vec is not None:
                             condition_vec_str = pl_module.hparams.conditioning_vec[self.celltypes.index(celltype)]
@@ -414,12 +406,61 @@ def init_parser():
                     help='Minimum size (in bp) of a random mask chunk. Default is one output bin size.')
   parser.add_argument('--masking-max-chunk', dest='training_masking_max_chunk', type=int, default=10240,
                     help='Maximum size (in bp) of a random mask chunk. (e.g., 10kb)')
-  
+
+  # --- Hierarchical end-to-end training -------------------------------------
+  # Which tracks the Enformer layer (layer 1) predicts from sequence.  Must be a
+  # subset of --input-features and must NOT include rad21 (rad21 is layer 2's job).
+  # Defaults to every input feature except rad21.
+  parser.add_argument('--enformer-tracks', dest='enformer_tracks', nargs='+', default=None,
+                      help='Tracks Enformer (layer 1) predicts from sequence. '
+                           'Default: all --input-features except rad21.')
+  parser.add_argument('--enformer-load-pretrained-heads', dest='enformer_load_pretrained_heads',
+                      action='store_true',
+                      help='Initialise Enformer track heads from the pretrained Basenji head. '
+                           'Default OFF: heads are trained from scratch.')
+  parser.add_argument('--enformer-finetune-blocks', dest='enformer_finetune_blocks', type=int, default=1,
+                      help='Number of trailing Enformer transformer blocks to fine-tune.')
+  parser.add_argument('--enformer-mix-mode', dest='enformer_mix_mode', default='full',
+                      choices=['full', 'window'],
+                      help="'full': tile the whole 2Mb window (one window carries gradient, "
+                           "rest run under no_grad) and replace whole tracks. "
+                           "'window': replace only the single gradient window region (cheapest).")
+
+  # Curriculum: pretrain each layer on ground-truth inputs, then ramp up the
+  # probability of feeding an upstream layer's *prediction* into the next layer.
+  parser.add_argument('--pretrain-epochs', dest='pretrain_epochs', type=int, default=20,
+                      help='Epochs with mix probability = 0 (each layer learns on ground-truth inputs).')
+  parser.add_argument('--ramp-epochs', dest='ramp_epochs', type=int, default=20,
+                      help='Epochs over which the mix probability ramps linearly to --max-mix-prob.')
+  parser.add_argument('--max-mix-prob', dest='max_mix_prob', type=float, default=0.5,
+                      help='Maximum probability of feeding a predicted upstream track into the next layer.')
+  parser.add_argument('--enformer-track-mix-prob', dest='enformer_track_mix_prob', type=float, default=0.5,
+                      help='When an Enformer-mix step fires, probability each individual predicted track '
+                           'replaces its ground-truth input.')
+
+  # Per-layer loss weights and learning rates
+  parser.add_argument('--loss-weight-enformer', dest='training_loss_weight_enformer', type=float, default=1.0,
+                      help='Weight for the Enformer (layer 1) track-prediction loss.')
+  parser.add_argument('--loss-weight-rad21', dest='training_loss_weight_rad21', type=float, default=1.0,
+                      help='Weight for the RAD21 (layer 2) prediction loss.')
+  parser.add_argument('--enformer-lr', dest='enformer_lr', type=float, default=1e-4,
+                      help='Learning rate for the Enformer layer.')
+  parser.add_argument('--rad21-lr', dest='rad21_lr', type=float, default=1e-4,
+                      help='Learning rate for the RAD21 (layer 2) predictor.')
 
 
   args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
   if args.input_features is None:
       args.input_features = []
+  # Default: Enformer predicts every input feature except rad21
+  if args.enformer_tracks is None:
+      args.enformer_tracks = [f for f in args.input_features if f != 'rad21']
+  # Validate the enformer track set
+  if 'rad21' in args.enformer_tracks:
+      raise ValueError("--enformer-tracks must not include 'rad21' (rad21 is predicted by layer 2).")
+  missing = [t for t in args.enformer_tracks if t not in args.input_features]
+  if missing:
+      raise ValueError(f"--enformer-tracks {missing} are not in --input-features {args.input_features}.")
   return args
 
 def init_training(args):
@@ -541,25 +582,52 @@ class TrainModule(pl.LightningModule):
         self.args = args
         self.criterion = torch.nn.MSELoss() # Common loss function
         self.window = 2097152 # 2Mb window size
-        self.hierachy_in = [('ctcf', 'atac'), ('ctcf', 'atac', 'rad21', 'h3k27ac', 'h3k4me3', 'h3k9me3', 'h3k36me3', 'h3k27me3')]
-        self.hierarchy_out = [('rad21')]
+
+        # --- Hierarchy bookkeeping ------------------------------------------
+        # Layer 1 (Enformer) predicts these tracks from sequence.
+        self.enformer_tracks = list(self.hparams.enformer_tracks)
+        # Layer 2 (the RAD21 predictor) is OPTIONAL. It is only built and trained
+        # when rad21 is one of the input features. Without rad21 the hierarchy
+        # collapses to Enformer (layer 1) -> Hi-C (layer 3): Enformer fine-tunes on
+        # whatever tracks are present and they feed straight into the Hi-C model.
+        self.use_rad21 = 'rad21' in self.hparams.input_features
+        self.rad21_idx = self.hparams.input_features.index('rad21') if self.use_rad21 else None
+        # Absolute channel indices (5 sequence channels precede the 1D tracks).
+        self.enformer_gt_channels = [5 + self.hparams.input_features.index(t)
+                                     for t in self.enformer_tracks]
+        self.enformer_input_idx = [self.hparams.input_features.index(t)
+                                   for t in self.enformer_tracks]
+
+        # Precompute the Enformer tiling grid over the 2Mb window.  Each tile
+        # covers ENFORMER_TARGET_LEN output bp; the last tile is clipped so it
+        # stays in-bounds (slight overlap with the penultimate tile).
+        num_tiles = math.ceil(self.window / ENFORMER_TARGET_LEN)
+        max_start = self.window - ENFORMER_TARGET_LEN
+        self.enformer_tile_starts = [min(k * ENFORMER_TARGET_LEN, max_start)
+                                     for k in range(num_tiles)]
 
         model_name =  args.model_type
         ModelClass = getattr(corigami_models, model_name)
-        self.input_pred_model = ModelClass(
-            num_genomic_features=len(self.hparams.input_features) - 1, # Input features minus rad21
-            num_target_tracks=1,    # Target 1D tracks
-            conditioning_vec_size=len(self.hparams.conditioning_vec[0].split(',')) if self.hparams.conditioning_vec is not None else None,
-            mid_hidden=self.hparams.model_latent_dim,
-            predict_hic=False,
-            diploid=args.dataset_assembly2 is not None,
-            predict_1d=self.predict_1d,
-            target_mat_size=args.mat_size,
-            target_1d_length=args.target_1d_size,
-            recon_1d=args.recon_1d,
-            seq_filter_size=args.seq_filter_size,
-            activation_1d=None
-        )
+        if self.use_rad21:
+            self.input_pred_model = ModelClass(
+                num_genomic_features=len(self.hparams.input_features) - 1, # Input features minus rad21
+                num_target_tracks=1,    # Target 1D tracks
+                conditioning_vec_size=len(self.hparams.conditioning_vec[0].split(',')) if self.hparams.conditioning_vec is not None else None,
+                mid_hidden=self.hparams.model_latent_dim,
+                predict_hic=False,
+                diploid=args.dataset_assembly2 is not None,
+                predict_1d=True,  # layer 2 always predicts the rad21 track; matches the
+                                  # inference RAD21 loader (load_hierarchical_rad21_predictor)
+                target_mat_size=args.mat_size,
+                target_1d_length=args.target_1d_size,
+                recon_1d=args.recon_1d,
+                seq_filter_size=args.seq_filter_size,
+                activation_1d=None
+            )
+        else:
+            self.input_pred_model = None
+            print('[hierarchical] No rad21 input feature: skipping the layer-2 RAD21 '
+                  'predictor; training Enformer (layer 1) -> Hi-C (layer 3) directly.')
         self.species = 'human' if 'hg' in args.dataset_assembly else 'mouse'
         # ctcf atac rad21 h3k27ac h3k4me3 h3k9me3 h3k36me3 h3k27me3
         if self.species == 'human':
@@ -584,8 +652,13 @@ class TrainModule(pl.LightningModule):
                 'h3k36me3': 'CHIP:H3K36me3:C57BL/6 ES-Bruce4',
                 'h3k27me3': 'CHIP:H3K27me3:C57BL/6 ES-Bruce4'
             }
-        # everything except rad21 as input, and rad21 as output for the hierarchical prediction model
-        self.enformer = self.get_hESC_wrapper(target_tracks=['ctcf', 'atac', 'h3k27ac', 'h3k4me3', 'h3k9me3', 'h3k36me3', 'h3k27me3'])
+        # Layer 1: Enformer predicts the (non-rad21) input tracks from sequence.
+        # Heads are trained from scratch by default (load_pretrained=False).
+        self.enformer = self.get_hESC_wrapper(
+            target_tracks=self.enformer_tracks,
+            load_pretrained=self.hparams.enformer_load_pretrained_heads,
+            finetune_blocks=self.hparams.enformer_finetune_blocks,
+        )
 
     @staticmethod
     def get_target_indices(species: str, target: str) -> np.ndarray:
@@ -617,11 +690,12 @@ class TrainModule(pl.LightningModule):
         for module in transformer_blocks[-n:]:
             self.set_module_requires_grad_(module, True)
 
-    def get_hESC_wrapper(self, target_tracks=['ctcf', 'atac']):
+    def get_hESC_wrapper(self, target_tracks=['ctcf', 'atac'], load_pretrained=False,
+                         finetune_blocks=1):
         # Load the pre-trained model
-        enformer = from_pretrained('EleutherAI/enformer-official-rough', 
+        enformer = from_pretrained('EleutherAI/enformer-official-rough',
                            use_tf_gamma=True)
-        self.freeze_all_but_last_n_layers_(enformer, n=1)  # Fine-tune last 1 transformer block
+        self.freeze_all_but_last_n_layers_(enformer, n=finetune_blocks)  # Fine-tune trailing blocks
         # 1. Get Indices for specific tracks
         hesc_indices = []
         for track in target_tracks:
@@ -692,7 +766,12 @@ class TrainModule(pl.LightningModule):
                 return self.activation(track_preds)
 
         # 3. Instantiate and return
-        return HESCHeadAdapterWrapper(enformer, hesc_indices, species=self.species).to(self.device)
+        if load_pretrained:
+            print('[enformer] Initialising track heads from the pretrained Basenji head.')
+        else:
+            print('[enformer] Initialising track heads FROM SCRATCH (no pretrained head copy).')
+        return HESCHeadAdapterWrapper(enformer, hesc_indices, species=self.species,
+                                      load_pretrained=load_pretrained).to(self.device)
         
 
     def get_model(self, args):
@@ -707,15 +786,17 @@ class TrainModule(pl.LightningModule):
         print(f'Number of input genomic features: {num_input_features}')
         print(f'Number of target 1D tracks: {num_target_tracks}')
 
-        # Instantiate the model
+        # Instantiate the model. Layer 3 (the Hi-C model) respects --target-features:
+        # when output features are requested it also reconstructs/predicts those 1D
+        # tracks alongside Hi-C, exactly like the standard 8-track architecture.
         model = ModelClass(
             num_genomic_features=num_input_features, # Input features
-            num_target_tracks=0,
+            num_target_tracks=num_target_tracks,
             conditioning_vec_size=len(self.hparams.conditioning_vec[0].split(',')) if self.hparams.conditioning_vec is not None else None,
             mid_hidden=self.hparams.model_latent_dim,
             predict_hic=self.hparams.predict_hic,
             diploid=args.dataset_assembly2 is not None,
-            predict_1d=False,
+            predict_1d=self.predict_1d,
             target_mat_size=args.mat_size,
             target_1d_length=args.target_1d_size,
             recon_1d=args.recon_1d,
@@ -770,202 +851,314 @@ class TrainModule(pl.LightningModule):
         condition_vec = condition_vec.float() if condition_vec is not None else None
         return inputs, mat, target_1d_tracks, condition_vec
 
-    def enformer_predict_1d(self, inputs):
+    # ------------------------------------------------------------------
+    # Curriculum schedule
+    # ------------------------------------------------------------------
+    def current_mix_prob(self):
+        """Probability of feeding a *predicted* upstream track into the next layer.
+
+        0 during the pretrain phase (each layer learns on ground-truth inputs),
+        then ramps linearly to ``--max-mix-prob`` over ``--ramp-epochs``.
         """
-        Use enformer to predict 1D input tracks using a sliding window approach.
-        Maps each Enformer bin (896 total) to its corresponding 128bp region.
+        epoch = self.current_epoch
+        pre = self.hparams.pretrain_epochs
+        ramp = max(1, self.hparams.ramp_epochs)
+        if epoch < pre:
+            return 0.0
+        if epoch >= pre + ramp:
+            return self.hparams.max_mix_prob
+        return self.hparams.max_mix_prob * (epoch - pre) / ramp
+
+    # ------------------------------------------------------------------
+    # Enformer tiling (memory-efficient, single-window gradient)
+    # ------------------------------------------------------------------
+    def _enformer_forward_tile(self, inputs, tile_start, use_grad):
+        """Run Enformer on one ENFORMER_CONTEXT_LENGTH window whose *output*
+        region begins at ``tile_start``.  Returns predictions in **linear**
+        space, shape (B, 896, num_enformer_tracks).
+
+        Only the sequence channels (first 4) are used, reordered ATCG->ACGT and
+        padded with 0.25 at the genome edges, matching the inference pipeline.
         """
-        DOWNSAMPLE_FACTOR = 128
-        ENFORMER_OUTPUT_BINS = 896
-        
-        pred_1d_inputs = torch.zeros((inputs.shape[0], inputs.shape[1], len(self.hparams.input_features) - 1), device=inputs.device)
-        pred_1d_counts = torch.zeros((inputs.shape[0], inputs.shape[1], len(self.hparams.input_features) - 1), device=inputs.device)
-        print(self.hparams.input_features, pred_1d_inputs.shape)
-        seq_length = inputs.shape[1]
-        step_size = ENFORMER_CONTEXT_LENGTH // 2  # 50% overlap
-        
-        total_poisson_loss = 0.0
-        num_windows = 0
-        
-        for start in range(-ENFORMER_TRIM, seq_length, step_size):
-            end = start + ENFORMER_CONTEXT_LENGTH
-            
-            if start + ENFORMER_TRIM >= seq_length:
+        ctx_start = tile_start - ENFORMER_TRIM
+        ctx_end = ctx_start + ENFORMER_CONTEXT_LENGTH
+        input_start = max(ctx_start, 0)
+        input_end = min(ctx_end, inputs.shape[1])
+        win = inputs[:, input_start:input_end, :4]
+        if ctx_start < 0:
+            win = F.pad(win, (0, 0, -ctx_start, 0), "constant", 0.25)
+        if win.shape[1] < ENFORMER_CONTEXT_LENGTH:
+            win = F.pad(win, (0, 0, 0, ENFORMER_CONTEXT_LENGTH - win.shape[1]), "constant", 0.25)
+        win = win[:, :, [0, 2, 3, 1]].float()  # ATCG -> ACGT
+        grad_ctx = torch.enable_grad() if use_grad else torch.no_grad()
+        with grad_ctx:
+            out = self.enformer(win)  # (B, 896, K), linear space (Softplus)
+        return out
+
+    def _tile_to_full(self, tile_out_linear, length):
+        """Upsample a single tile's (B, 896, K) linear prediction to
+        (B, ENFORMER_TARGET_LEN, K) in **log1p** space (model-input space)."""
+        out_log = torch.log1p(tile_out_linear)
+        up = F.interpolate(out_log.permute(0, 2, 1), size=ENFORMER_TARGET_LEN,
+                           mode='linear', align_corners=True).permute(0, 2, 1)
+        return up
+
+    def enformer_assemble_full(self, inputs, grad_tile_idx=None):
+        """Build a full-window (B, L, K) Enformer prediction in **log1p** space
+        by tiling the 2Mb window.
+
+        The tile at ``grad_tile_idx`` carries gradients; every other tile runs
+        under ``no_grad`` (so peak memory ~= a single Enformer forward pass).
+        Pass ``grad_tile_idx=None`` for a fully detached prediction (validation
+        / visualisation).
+
+        Returns
+        -------
+        full_log1p : (B, L, K) tensor, log1p space
+        grad_out   : (B, 896, K) linear tile output at ``grad_tile_idx`` (or None)
+        grad_start : output start bp of that tile (or None)
+        """
+        L = inputs.shape[1]
+        # Build the full track as a concatenation of NON-overlapping segments
+        # (avoids in-place writes into a graph tensor).  Each tile k owns the
+        # segment [k*TARGET_LEN, (k+1)*TARGET_LEN); the last tile's window start
+        # is clipped in-bounds, so we slice out its (offset) tail.
+        segments = []
+        grad_out, grad_start = None, None
+        for k, ts in enumerate(self.enformer_tile_starts):
+            seg_start = k * ENFORMER_TARGET_LEN
+            if seg_start >= L:
                 break
-            
-            # Extract input (handle negative start for left-edge coverage)
-            input_start = max(start, 0)
-            input_seq = inputs[:, input_start:end, :4]
-            
-            # Pad left if window extends before sequence start
-            if start < 0:
-                left_pad = -start
-                input_seq = F.pad(input_seq, (0, 0, left_pad, 0), "constant", 0.25)
-            
-            # Pad right if needed
-            if input_seq.shape[1] < ENFORMER_CONTEXT_LENGTH:
-                pad_size = ENFORMER_CONTEXT_LENGTH - input_seq.shape[1]
-                input_seq = F.pad(input_seq, (0, 0, 0, pad_size), "constant", 0.25)
-            
-            # Reorder: ATCG -> ACGT
-            input_seq = input_seq[:, :, [0, 2, 3, 1]]
-            
-            # Get predictions (batch, 896, num_tracks)
-            outputs = self.enformer(input_seq.float())
-            
-            # Calculate global output coordinates
-            global_out_start = start + ENFORMER_TRIM
-            
-            # For each of the 896 bins, map to 128bp region
-            for bin_idx in range(ENFORMER_OUTPUT_BINS):
-                bin_start = global_out_start + bin_idx * DOWNSAMPLE_FACTOR
-                bin_end = bin_start + DOWNSAMPLE_FACTOR
-                
-                # Clip to sequence bounds
-                if bin_start >= seq_length:
-                    break
-                bin_end = min(bin_end, seq_length)
-                
-                # Broadcast this bin's prediction across its 128bp region
-                pred_1d_inputs[:, bin_start:bin_end, :] += outputs[:, bin_idx:bin_idx+1, :].expand(-1, bin_end - bin_start, -1)
-                pred_1d_counts[:, bin_start:bin_end, :] += 1.0
-        
-        # Average overlapping predictions
-        pred_1d_inputs = pred_1d_inputs / pred_1d_counts.clamp(min=1.0)
-        
-        return pred_1d_inputs
-    
-    
+            seg_end = min(seg_start + ENFORMER_TARGET_LEN, L)
+            offset = seg_start - ts  # 0 except for the clipped final tile
+            use_grad = (grad_tile_idx is not None and k == grad_tile_idx)
+            out = self._enformer_forward_tile(inputs, ts, use_grad)
+            if use_grad:
+                up = self._tile_to_full(out, L)
+                segments.append(up[:, offset:offset + (seg_end - seg_start), :])
+                grad_out, grad_start = out, ts
+            else:
+                with torch.no_grad():
+                    up = self._tile_to_full(out, L)
+                    segments.append(up[:, offset:offset + (seg_end - seg_start), :])
+        full = torch.cat(segments, dim=1)  # (B, L, K)
+        return full, grad_out, grad_start
+
+    def enformer_window_loss(self, inputs, tile_out_linear, tile_start):
+        """MSE (in log1p space) between the Enformer prediction for one tile and
+        the ground-truth tracks over that tile's output region."""
+        gt = inputs[:, tile_start:tile_start + ENFORMER_TARGET_LEN, self.enformer_gt_channels]
+        gt_ds = F.interpolate(gt.permute(0, 2, 1).float(), size=tile_out_linear.shape[1],
+                              mode='linear', align_corners=True).permute(0, 2, 1)
+        pred_log = torch.log1p(tile_out_linear)
+        return F.mse_loss(pred_log, gt_ds)
+
+    def enformer_predict_1d(self, inputs):
+        """Full-window Enformer prediction in **linear** space (B, L, K).
+
+        Kept for VizCallback / diagnostics: fully detached, no gradient.
+        """
+        full_log1p, _, _ = self.enformer_assemble_full(inputs, grad_tile_idx=None)
+        return torch.expm1(full_log1p)
+
+
     def training_step(self, batch, batch_idx):
-        total_loss = 0.0
+        """End-to-end hierarchical step.
+
+        Every step trains all three layers with a supervised loss:
+          * layer 1 (Enformer)  -> predicts non-rad21 tracks from sequence
+          * layer 2 (RAD21)     -> predicts rad21 from seq + non-rad21 tracks
+          * layer 3 (Hi-C)      -> predicts Hi-C from seq + all tracks
+
+        A curriculum probability (``current_mix_prob``) controls whether an
+        upstream layer's *prediction* is fed forward as the next layer's input,
+        chaining the gradient all the way through:
+            Hi-C loss -> layer3 -> (predicted rad21) -> layer2 -> (predicted
+            tracks) -> layer1.
+
+        Memory: the Enformer contributes gradients through a single randomly
+        chosen tile per step (``enformer_assemble_full`` runs the rest under
+        no_grad), so peak memory stays ~= one Enformer forward pass.
+        """
         inputs, mat, target_1d_tracks, condition_vec = self.proc_batch(batch)
-        hierarchical_batch = random.random() < 0.5
-        use_enformer = False
-        use_layer2 = False
-        inputs_without_rad21 = None
-        rad21_idx = self.hparams.input_features.index('rad21')
-        if hierarchical_batch:
-            use_enformer = random.random() < 0.25
-            use_layer2 = random.random() < 0.25
-            use_both = use_enformer and use_layer2 and random.random() < 0.5
-            if use_enformer and use_layer2 and not use_both:  # prioritize enformer if not using both
-                use_layer2 = False
-        if use_enformer:
-            # use enformer to predict 1D input tracks using a sliding window approach
-            pred_1d_inputs = self.enformer_predict_1d(inputs)
-            pred_1d_inputs = torch.log1p(pred_1d_inputs)
-            inputs_without_rad21 = torch.cat([inputs[:, :, :5 + rad21_idx],
-                                             inputs[:, :, 5 + rad21_idx + 1:]], dim=2)
-            avg_poisson_loss = torch.nn.functional.mse_loss(pred_1d_inputs, inputs_without_rad21[:, :, 5:].float()).mean()
-            self.log('train_enformer_poisson_loss', avg_poisson_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-            total_loss += avg_poisson_loss
-            # inputs = torch.cat([inputs[:, :, :5], 
-            #                     pred_1d_inputs[:, :, :rad21_idx],
-            #                     inputs[:, :, 5 + rad21_idx:5 + rad21_idx + 1],  # rad21
-            #                     pred_1d_inputs[:, :, rad21_idx:]],
-            #                     dim=2)
-            # randomly replace the original input tracks with enformer predictions for the next layer
-            for i in range(pred_1d_inputs.shape[2]):
-                track_idx = i if i < rad21_idx else i + 1
-                if random.random() < 0.5:
-                    inputs[:, :, 5 + track_idx] = pred_1d_inputs[:, :, i]
-        if use_layer2:
-            # use everything except rad21 as inputs to predict rad21 first
-            if inputs_without_rad21 is None:
-                inputs_without_rad21 = torch.cat([inputs[:, :, :5 + rad21_idx],
-                                             inputs[:, :, 5 + rad21_idx + 1:]], dim=2)
-            #print('input range', inputs_without_rad21.min().item(), inputs_without_rad21.max().item())  # Check value ranges
-            hierarchical_outputs = self.input_pred_model(inputs_without_rad21, conditioning_vec=condition_vec)
-            pred_1d_inputs = hierarchical_outputs.get('1d')
-            #print('out shape', pred_1d_inputs.shape)
-            #print('output range', pred_1d_inputs.min().item(), pred_1d_inputs.max().item())  # Check value ranges of predictions
-            # replace the rad21 input features with the predicted one
-            # and compute first layer 1dloss
-            # first resize to match input length
-            track_pred = pred_1d_inputs[:, :, 0]
-            gt_track = inputs[:, :, 5 + rad21_idx].clone()
-            # Overwrite inputs for the NEXT model pass
-            inputs[:, :, 5 + rad21_idx] = F.interpolate(track_pred.unsqueeze(1), size=inputs.shape[1], mode='linear', align_corners=True).squeeze(1).float()
-            gt_track_target = F.interpolate(gt_track.unsqueeze(1), size=track_pred.shape[1], mode='linear', align_corners=True).squeeze(1).float()
-            # Calculate loss against the CLONED ground truth, not the overwritten input
-            loss_1d_first_layer = torch.nn.functional.mse_loss(track_pred, gt_track_target)
-            total_loss += loss_1d_first_layer
-            self.log('train_loss_1d_first_layer', loss_1d_first_layer, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        L = inputs.shape[1]
+        abs_rad21 = 5 + self.rad21_idx if self.use_rad21 else None
+        mix_prob = self.current_mix_prob()
+        self.log('mix_prob', mix_prob, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
-        if condition_vec is not None:
-            outputs = self(inputs, conditioning_vec=condition_vec)
+        # ---- Layer 1: Enformer -------------------------------------------
+        # One random tile carries the gradient; used both for the supervised
+        # loss and (when mixing) as the differentiable region fed downstream.
+        grad_tile_idx = random.randrange(len(self.enformer_tile_starts))
+        use_enformer_mix = random.random() < mix_prob
+        # Full-window tiling is only needed when mixing whole tracks forward.
+        need_full = use_enformer_mix and self.hparams.enformer_mix_mode == 'full'
+
+        if need_full:
+            enf_full_log1p, grad_out, grad_start = self.enformer_assemble_full(
+                inputs, grad_tile_idx=grad_tile_idx)
         else:
-            outputs = self(inputs)
+            grad_start = self.enformer_tile_starts[grad_tile_idx]
+            grad_out = self._enformer_forward_tile(inputs, grad_start, use_grad=True)
+            enf_full_log1p = None
 
+        loss_enformer = self.enformer_window_loss(inputs, grad_out, grad_start)
+        self.log('train_loss_enformer', loss_enformer, on_step=True, on_epoch=True,
+                 prog_bar=True, logger=True, sync_dist=True)
+
+        # Feed predicted tracks forward into layers 2 & 3 (random subset).
+        if use_enformer_mix:
+            inputs = inputs.clone()
+            replaced = []
+            for i, in_idx in enumerate(self.enformer_input_idx):
+                if random.random() < self.hparams.enformer_track_mix_prob:
+                    replaced.append(i)
+            if not replaced:  # guarantee at least one so the tiling isn't wasted
+                replaced = [random.randrange(len(self.enformer_input_idx))]
+            if self.hparams.enformer_mix_mode == 'window':
+                # Replace only the differentiable tile region (cheapest path).
+                end = min(grad_start + ENFORMER_TARGET_LEN, L)
+                grad_up = self._tile_to_full(grad_out, L)[:, :end - grad_start, :]
+                for i in replaced:
+                    inputs[:, grad_start:end, 5 + self.enformer_input_idx[i]] = grad_up[:, :, i]
+            else:
+                for i in replaced:
+                    inputs[:, :, 5 + self.enformer_input_idx[i]] = enf_full_log1p[:, :, i]
+
+        # ---- Layer 2: RAD21 predictor (skipped when rad21 is not an input) --
+        # Consumes seq + (possibly Enformer-predicted) non-rad21 tracks.
+        loss_rad21 = 0.0
+        if self.use_rad21:
+            inputs_without_rad21 = torch.cat([inputs[:, :, :abs_rad21],
+                                              inputs[:, :, abs_rad21 + 1:]], dim=2)
+            rad21_out = self.input_pred_model(inputs_without_rad21,
+                                              conditioning_vec=condition_vec).get('1d')
+            rad21_pred = rad21_out[:, :, 0]  # (B, target_1d_size)
+            gt_rad21 = inputs[:, :, abs_rad21].detach()  # ground-truth rad21 (never mixed)
+            gt_rad21_ds = F.interpolate(gt_rad21.unsqueeze(1), size=rad21_pred.shape[1],
+                                        mode='linear', align_corners=True).squeeze(1).float()
+            loss_rad21 = F.mse_loss(rad21_pred, gt_rad21_ds)
+            self.log('train_loss_rad21', loss_rad21, on_step=True, on_epoch=True,
+                     prog_bar=True, logger=True, sync_dist=True)
+
+            # Feed predicted rad21 forward into layer 3.
+            use_pred_rad21 = random.random() < mix_prob
+            if use_pred_rad21:
+                if not use_enformer_mix:
+                    inputs = inputs.clone()
+                rad21_up = F.interpolate(rad21_pred.unsqueeze(1), size=L,
+                                         mode='linear', align_corners=True).squeeze(1).float()
+                inputs[:, :, abs_rad21] = rad21_up
+
+        # ---- Layer 3: Hi-C (and optional 1D track) predictor -------------
+        outputs = self(inputs, conditioning_vec=condition_vec)
         loss_hic = 0.0
         if self.hparams.predict_hic:
-            pred_hic = outputs.get('hic')
-            loss_hic = self.criterion(pred_hic, mat)
-            total_loss += loss_hic * self.hparams.training_loss_weight_hic
-            
+            loss_hic = self.criterion(outputs.get('hic'), mat)
+
+        # Layer 3 also reconstructs/predicts the --target-features 1D tracks,
+        # matching the standard 8-track architecture.
+        loss_1d = 0.0
+        if target_1d_tracks is not None:
+            pred_1d = outputs.get('1d')
+            loss_1d_per = F.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
+            for i, feature in enumerate(self.hparams.output_features):
+                track_loss = loss_1d_per[:, i].mean()
+                self.log(f'train_loss_1d_{feature}', track_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            # Mask out the 0 values in the target_1d_tracks
+            mask = target_1d_tracks != 0
+            loss_1d = (loss_1d_per * mask).sum() / mask.sum()
+            self.log('train_loss_1d', loss_1d, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        total_loss = (self.hparams.training_loss_weight_enformer * loss_enformer
+                      + self.hparams.training_loss_weight_rad21 * loss_rad21
+                      + self.hparams.training_loss_weight_hic * loss_hic
+                      + self.hparams.training_loss_weight_1d * loss_1d)
+
         self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         self.log('train_loss_hic', loss_hic, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        total_loss = 0.0
         inputs, mat, target_1d_tracks, condition_vec = self.proc_batch(batch)
-        if condition_vec is not None:
-            outputs = self(inputs, conditioning_vec=condition_vec)
-        else:
-            outputs = self(inputs)
-        inputs_without_rad21 = torch.cat([inputs[:, :, :5 + self.hparams.input_features.index('rad21')],
-                                         inputs[:, :, 5 + self.hparams.input_features.index('rad21') + 1:]], dim=2)
-        pred_1d_inputs = self.enformer_predict_1d(inputs)
-        pred_1d_inputs = torch.log1p(pred_1d_inputs)
-        avg_poisson_loss = torch.nn.functional.mse_loss(pred_1d_inputs, inputs_without_rad21[:, :, 5:].float()).mean()
-        pred_1d_inputs = F.interpolate(pred_1d_inputs.permute(0, 2, 1), size=(self.hparams.target_1d_size), mode='linear', align_corners=True).permute(0, 2, 1)
-        self.log('val_enformer_poisson_loss', avg_poisson_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        total_loss += avg_poisson_loss
-        if target_1d_tracks is not None:
-            for i, feature in enumerate(self.hparams.output_features):
-                if feature == 'rad21':
-                    continue  # skip rad21 since it's the hierarchical prediction target
-                feature_idx = i if i < self.hparams.input_features.index('rad21') else i - 1
-                target_track = torch.clamp(torch.exp(target_1d_tracks[..., i]) - 1, min=0)
-                # measure correlation between enformer predicted 1D inputs and target
-                enformer_pred_track = torch.clamp(torch.exp(pred_1d_inputs[..., feature_idx]) - 1, min=0)
-                enformer_corr = torch.corrcoef(torch.stack([enformer_pred_track.flatten(), target_track.flatten()]))[0, 1]
-                self.log(f'val_enformer_corr_1d_{feature}', enformer_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        L = inputs.shape[1]
+        abs_rad21 = 5 + self.rad21_idx if self.use_rad21 else None
 
+        # ---- Layer 1: Enformer (fully detached full-window prediction) ----
+        enf_full_log1p = self.enformer_predict_1d(inputs)          # linear (B, L, K)
+        enf_full_log1p = torch.log1p(torch.clamp(enf_full_log1p, min=0))
+        gt_tracks = inputs[:, :, self.enformer_gt_channels].float()
+        loss_enformer = F.mse_loss(enf_full_log1p, gt_tracks)
+        self.log('val_loss_enformer', loss_enformer, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        for i, feature in enumerate(self.enformer_tracks):
+            pred = torch.clamp(torch.expm1(enf_full_log1p[..., i]), min=0)
+            targ = torch.clamp(torch.expm1(gt_tracks[..., i]), min=0)
+            corr = torch.corrcoef(torch.stack([pred.flatten(), targ.flatten()]))[0, 1]
+            self.log(f'val_enformer_corr_1d_{feature}', corr, on_step=False, on_epoch=True, logger=True, sync_dist=True)
+
+        # ---- Layer 2: RAD21 predictor (skipped when rad21 is not an input) --
+        loss_rad21 = 0.0
+        if self.use_rad21:
+            inputs_no_rad21 = torch.cat([inputs[:, :, :abs_rad21], inputs[:, :, abs_rad21 + 1:]], dim=2)
+            rad21_pred = self.input_pred_model(inputs_no_rad21, conditioning_vec=condition_vec).get('1d')[:, :, 0]
+            rad21_up = F.interpolate(rad21_pred.unsqueeze(1), size=L, mode='linear', align_corners=True).squeeze(1).float()
+            gt_rad21 = inputs[:, :, abs_rad21]
+            loss_rad21 = F.mse_loss(rad21_up, gt_rad21)
+            self.log('val_loss_rad21', loss_rad21, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            rad21_corr = torch.corrcoef(torch.stack([
+                torch.clamp(torch.expm1(rad21_up), min=0).flatten(),
+                torch.clamp(torch.expm1(gt_rad21), min=0).flatten()]))[0, 1]
+            self.log('val_corr_1d_first_layer_rad21', rad21_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        # ---- Layer 3: Hi-C (and optional 1D tracks) on ground-truth inputs -
+        layer3_outputs = self(inputs, conditioning_vec=condition_vec)
         loss_hic = 0.0
         if self.hparams.predict_hic:
-            pred_hic = outputs.get('hic')
+            pred_hic = layer3_outputs.get('hic')
             loss_hic = self.criterion(pred_hic, mat)
-            total_loss += loss_hic * self.hparams.training_loss_weight_hic
             hic_corr = torch.corrcoef(torch.stack([pred_hic.flatten(), mat.flatten()]))[0, 1]
             self.log('val_hic_corr', hic_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
-        
-        hierarchical_outputs = self.input_pred_model(inputs_without_rad21, conditioning_vec=condition_vec)
-        pred_1d_inputs = hierarchical_outputs.get('1d')
-        # replace the rad21 input features with the predicted one
-        # and compute first layer 1dloss
-        # first resize to match input length
-        track_pred = pred_1d_inputs[:, :, 0]
-        track_pred = F.interpolate(track_pred.unsqueeze(1), size=inputs.shape[1], mode='linear', align_corners=True).squeeze(1).float()
-        gt_track = inputs[:, :, 5 + self.hparams.input_features.index('rad21')].clone()
-        loss_1d_first_layer = torch.nn.functional.mse_loss(track_pred, gt_track)
-        total_loss += loss_1d_first_layer
-        self.log('val_loss_1d_first_layer', loss_1d_first_layer, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        # calculate correlation
-        pred_track = torch.clamp(torch.exp(track_pred) - 1, min=0)  # inverse log transformation
-        target_track = torch.clamp(torch.exp(gt_track) - 1, min=0)
-        corr = torch.corrcoef(torch.stack([pred_track.flatten(), target_track.flatten()]))[0, 1]
-        self.log(f'val_corr_1d_first_layer_rad21', corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        
-     
-            
+        # Layer 3's --target-features 1D reconstruction, matching the standard
+        # 8-track architecture.
+        loss_1d = 0.0
+        if target_1d_tracks is not None:
+            pred_1d = layer3_outputs.get('1d')
+            loss_1d_per = F.mse_loss(pred_1d, target_1d_tracks, reduction='none').mean(dim=0)
+            for i, feature in enumerate(self.hparams.output_features):
+                track_loss = loss_1d_per[:, i].mean()
+                self.log(f'val_loss_1d_{feature}', track_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+                # Correlation for each 1D track (inverse log transform to linear space)
+                pred_track = torch.clamp(torch.exp(pred_1d[..., i]) - 1, min=0)
+                target_track = torch.clamp(torch.exp(target_1d_tracks[..., i]) - 1, min=0)
+                corr = torch.corrcoef(torch.stack([pred_track.flatten(), target_track.flatten()]))[0, 1]
+                self.log(f'val_corr_1d_{feature}', corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            # Mask out the 0 values in the target_1d_tracks
+            mask = target_1d_tracks != 0
+            loss_1d = (loss_1d_per * mask).sum() / mask.sum()
+            self.log('val_loss_1d', loss_1d, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
+            # ---- Fully-chained Hi-C: enformer -> (rad21) -> Hi-C ----------
+            # Measures the end-to-end path the perturbation pipeline uses. When
+            # rad21 is absent the chain is simply enformer -> Hi-C.
+            chained = inputs.clone()
+            for i, in_idx in enumerate(self.enformer_input_idx):
+                chained[:, :, 5 + in_idx] = enf_full_log1p[:, :, i]
+            if self.use_rad21:
+                chained_no_rad21 = torch.cat([chained[:, :, :abs_rad21], chained[:, :, abs_rad21 + 1:]], dim=2)
+                chained_rad21 = self.input_pred_model(chained_no_rad21, conditioning_vec=condition_vec).get('1d')[:, :, 0]
+                chained[:, :, abs_rad21] = F.interpolate(chained_rad21.unsqueeze(1), size=L,
+                                                         mode='linear', align_corners=True).squeeze(1).float()
+            chained_hic = self(chained, conditioning_vec=condition_vec).get('hic')
+            chained_corr = torch.corrcoef(torch.stack([chained_hic.flatten(), mat.flatten()]))[0, 1]
+            self.log('val_hic_corr_chained', chained_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        total_loss = (self.hparams.training_loss_weight_enformer * loss_enformer
+                      + self.hparams.training_loss_weight_rad21 * loss_rad21
+                      + self.hparams.training_loss_weight_hic * loss_hic
+                      + self.hparams.training_loss_weight_1d * loss_1d)
         self.log('val_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         self.log('val_loss_hic', loss_hic, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        
         return total_loss
 
     def test_step(self, batch, batch_idx):
@@ -1004,14 +1197,19 @@ class TrainModule(pl.LightningModule):
     def configure_optimizers(self):
         enformer_params = list(self.enformer.parameters())
         model_params = list(self.model.parameters())
-        inner_params = list(self.input_pred_model.parameters())
 
-        optimizer = torch.optim.AdamW([
-                                        {'params': model_params, 'lr': 2e-4},
-                                        {'params': inner_params, 'lr': 1e-4},  # smaller LR for the hierarchical predictor
-                                        {'params': enformer_params, 'lr': 1e-4}  # smaller for Enformer
-                                    ],
-                                     weight_decay = 1e-6)
+        # Only optimise Enformer parameters that are actually trainable
+        # (trunk is frozen except the trailing fine-tuned block(s) + heads).
+        enformer_params = [p for p in enformer_params if p.requires_grad]
+        param_groups = [
+            {'params': model_params, 'lr': self.hparams.optimizer_lr},          # layer 3 (Hi-C)
+            {'params': enformer_params, 'lr': self.hparams.enformer_lr},        # layer 1 (Enformer)
+        ]
+        # layer 2 (RAD21) is only present when rad21 is an input feature.
+        if self.input_pred_model is not None:
+            param_groups.append({'params': list(self.input_pred_model.parameters()),
+                                 'lr': self.hparams.rad21_lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay = 1e-6)
 
         import pl_bolts
         scheduler = pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)

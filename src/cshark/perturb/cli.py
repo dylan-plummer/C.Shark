@@ -93,6 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Peak height threshold for knockout.')
     parser.add_argument('--alt', dest='alt_bp', type=str, nargs='+', required=False,
                         help='Alt base(s) for seq / enformer_seq / alphagenome_seq ko-modes.')
+    parser.add_argument('--alt-fasta', dest='alt_fasta', type=str, default=None,
+                        help='Directory of per-chromosome alternate .fa.gz files (same layout as '
+                             '--seq). When set, the entire prediction window is replaced with the '
+                             'alternate genome and run through whichever sequence ko-mode --ko-mode '
+                             'selects (seq, enformer_seq, or alphagenome_seq); the WT --seq genome '
+                             'is used as the baseline for the delta. Supersedes --alt/--ko-start for '
+                             'the sequence. Single-locus (--start) only.')
     parser.add_argument('--padding', dest='end_padding_type', default='zero',
                         help='Padding type, either zero or follow (default: %(default)s)')
     parser.add_argument('--hide-line', dest='hide_deletion_line', action='store_true',
