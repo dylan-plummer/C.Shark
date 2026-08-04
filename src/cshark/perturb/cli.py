@@ -176,7 +176,10 @@ def build_parser() -> argparse.ArgumentParser:
                              'predictions: split each WT bulk track into maternal/paternal alleles '
                              'using --maternal-pred/--paternal-pred ratios (2*E*frac, CAP), run '
                              'hierarchical RAD21 per allele, and predict per allele using each '
-                             'haplotype sequence (--maternal-seq/--paternal-seq). Single-locus (--start) only.')
+                             'haplotype sequence (--maternal-seq/--paternal-seq). With --start runs a '
+                             'single locus; without it slides across the whole chromosome and writes '
+                             'maternal/paternal pixel columns, one cooler per allele plus a difference '
+                             'cooler, and per-track experimental/maternal/paternal bigwigs.')
     parser.add_argument('--maternal-pred', dest='maternal_pred', nargs='*', action=ParseKwargs,
                         help='Maternal Enformer prediction bigwigs (key=value: track=bigwig). Tracks '
                              'lacking both maternal+paternal preds keep their WT bulk track in both alleles.')
@@ -219,8 +222,12 @@ def main():
 
     # Deferred imports: these pull in torch via cshark.inference.utils.
     if cfg.allele_haplotype:
-        from cshark.perturb.scopes.allele_split import run_allele_haplotype
-        return run_allele_haplotype(cfg)
+        # --start -> single locus; without it, slide across the whole chromosome.
+        if cfg.start is not None:
+            from cshark.perturb.scopes.allele_split import run_allele_haplotype
+            return run_allele_haplotype(cfg)
+        from cshark.perturb.scopes.full_chrom_haplotype import run_full_chrom_haplotype
+        return run_full_chrom_haplotype(cfg)
     if cfg.start is not None:
         from cshark.perturb.scopes.single_locus import run_single_locus
         return run_single_locus(cfg)
