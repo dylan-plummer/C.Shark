@@ -422,19 +422,36 @@ def run_allele_peak_split(cfg, *, model, seq_region, seq_region_wt,
                           other_regions_wt, input_track_names, input_track_paths,
                           pred_before, pred_before_1d, plot_track_names, plot_track_paths,
                           hierarchical_rad21_model, deletion_starts, deletion_widths,
-                          res, image_scale, window):
-    """Function #1: allele-specific peak redistribution from an IN-ENGINE Enformer run
-    (ref = WT seq, alt = SNP-mutated seq). Triggered by --allele-peak-split + enformer_seq."""
+                          res, image_scale, window, alphagenome_seq_active=False):
+    """Function #1: allele-specific peak redistribution from an IN-ENGINE sequence-model
+    run (ref = WT seq, alt = SNP-mutated seq). Triggered by --allele-peak-split with an
+    enformer_seq OR alphagenome_seq perturbation. The backbone that predicts the ref/alt
+    ratio is chosen here (AlphaGenome vs Enformer); everything downstream (RAD21
+    hierarchical split, per-allele prediction, outputs) is backbone-agnostic and shared."""
     cap = cfg.enformer_delta_cap  # output-value CAP (reference script uses 10)
 
-    ref_set, alt_set, enformer_perturbed_track_names, _ = apply_enformer_peak_split(
-        assembly=cfg.assembly, atac_region=atac_region, bigwig_log_transform=cfg.bigwig_log_transform,
-        celltype=cfg.celltype, chr_name=cfg.chr_name, ctcf_region=ctcf_region,
-        enformer_delta_cap=cfg.enformer_delta_cap, enformer_delta_mode=cfg.enformer_delta_mode,
-        enformer_model_path=cfg.enformer_model_path, enformer_seq_active=True,
-        enformer_tracks=cfg.enformer_tracks, input_track_names=input_track_names,
-        other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt,
-        start=cfg.start, window=window)
+    # Backbone dispatch: alphagenome_seq -> AlphaGenome, else Enformer. Both return the
+    # same (ref_set, alt_set) via redistribute_enformer_alleles on their wt_pred/alt_pred.
+    if alphagenome_seq_active:
+        from cshark.perturb.models.alphagenome import apply_alphagenome_peak_split
+        ref_set, alt_set, enformer_perturbed_track_names, _ = apply_alphagenome_peak_split(
+            assembly=cfg.assembly, atac_region=atac_region, bigwig_log_transform=cfg.bigwig_log_transform,
+            celltype=cfg.celltype, chr_name=cfg.chr_name, ctcf_region=ctcf_region,
+            enformer_delta_cap=cfg.enformer_delta_cap, enformer_delta_mode=cfg.enformer_delta_mode,
+            alphagenome_model_path=cfg.alphagenome_model_path,
+            alphagenome_metadata_path=cfg.alphagenome_metadata_path,
+            enformer_tracks=cfg.enformer_tracks, input_track_names=input_track_names,
+            other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt,
+            start=cfg.start, window=window)
+    else:
+        ref_set, alt_set, enformer_perturbed_track_names, _ = apply_enformer_peak_split(
+            assembly=cfg.assembly, atac_region=atac_region, bigwig_log_transform=cfg.bigwig_log_transform,
+            celltype=cfg.celltype, chr_name=cfg.chr_name, ctcf_region=ctcf_region,
+            enformer_delta_cap=cfg.enformer_delta_cap, enformer_delta_mode=cfg.enformer_delta_mode,
+            enformer_model_path=cfg.enformer_model_path, enformer_seq_active=True,
+            enformer_tracks=cfg.enformer_tracks, input_track_names=input_track_names,
+            other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt,
+            start=cfg.start, window=window)
 
     # Per-allele RAD21 (function #1 uses the same sequence for both alleles).
     ref_set, alt_set = _redistribute_rad21_alleles(
