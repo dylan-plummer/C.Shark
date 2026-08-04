@@ -59,9 +59,10 @@ def load_hierarchical_rad21_predictor(checkpoint_path, device=None, n_input_trac
     rad21_idx = all_track_names.index('rad21')
 
     if n_input_tracks is None:
-        n_input_tracks = len(all_track_names) - 1
+        print(input_tracks)
+        n_input_tracks = len(input_tracks) - 1
         print(f"[hierarchical] Auto-detected n_input_tracks={n_input_tracks} "
-              f"from checkpoint tracks: {all_track_names}")
+              f"from checkpoint tracks: {input_tracks}")
 
     model_name = hparams.get('model_type', 'MultiTaskConvTransModel')
     ModelClass = getattr(corigami_models, model_name)

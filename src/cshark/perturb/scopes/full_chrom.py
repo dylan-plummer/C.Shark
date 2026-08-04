@@ -32,6 +32,7 @@ from cshark.inference.utils.hierarchical_utils import (
 from cshark.perturb.config import WINDOW
 from cshark.perturb.operators import deletion_with_padding
 from cshark.perturb.models.base import CSharkModel
+from cshark.perturb.seq_source import load_alt_fasta_region, align_alt_to_wt
 
 
 def run_full_chrom(cfg):
@@ -136,11 +137,96 @@ def run_full_chrom(cfg):
         else:
             rad21_other_idx_hier = other_track_names_hier.index('rad21')
 
+    # --- --alt-fasta whole-window ALT sequence (seq / enformer_seq / alphagenome_seq) ---
+    # Full-chrom counterpart of the single-locus path: replace every window's
+    # sequence with the alternate genome and run through the backbone selected by
+    # --ko-mode. The heavy Enformer/AlphaGenome model is loaded ONCE here (not
+    # per window) and called per window via the low-level *_seq_knockout helpers.
+    alt_fasta = getattr(cfg, 'alt_fasta', None)
+    alt_seq_active = alt_fasta is not None
+    _modes = set(ko_mode or [])
+    enformer_seq_mode = alt_seq_active and 'enformer_seq' in _modes
+    alphagenome_seq_mode = alt_seq_active and 'alphagenome_seq' in _modes
+    enf_target_tracks = cfg.enformer_tracks if cfg.enformer_tracks is not None else ['ctcf', 'atac', 'rad21']
+    _species = 'mouse' if 'mm10' in (cfg.assembly or '') else 'human'
+    enformer_seq_knockout = alphagenome_seq_knockout = None
+    enformer_model = enformer_track_names = enf_device = None
+    ag_model = ag_track_names = ag_device = ag_org_idx = ag_resolvers = None
+    if alt_seq_active and not (enformer_seq_mode or alphagenome_seq_mode) and 'seq' not in _modes:
+        print('[alt-fasta] WARNING: --ko-mode has none of seq/enformer_seq/alphagenome_seq; '
+              'applying the alt sequence as a plain main-model (seq) substitution.')
+    if enformer_seq_mode:
+        from cshark.inference.utils.enformer_utils import (
+            load_enformer_from_checkpoint, load_enformer_pretrained, enformer_seq_knockout,
+        )
+        print('[alt-fasta] Loading Enformer once for full-chromosome sequence perturbation...')
+        if cfg.enformer_model_path is not None:
+            enformer_model, enformer_track_names, enf_device = load_enformer_from_checkpoint(
+                cfg.enformer_model_path, enformer_tracks=enf_target_tracks)
+        else:
+            enformer_model, enformer_track_names, enf_device = load_enformer_pretrained(
+                target_tracks=enf_target_tracks, species=_species, celltype=cfg.celltype)
+    if alphagenome_seq_mode:
+        from cshark.inference.utils.alphagenome_utils import (
+            load_alphagenome, alphagenome_seq_knockout,
+        )
+        print('[alt-fasta] Loading AlphaGenome once for full-chromosome sequence perturbation...')
+        ag_model, ag_track_names, ag_device, ag_org_idx, ag_resolvers = load_alphagenome(
+            cfg.alphagenome_model_path, target_tracks=enf_target_tracks, species=_species,
+            celltype=cfg.celltype, metadata_path=cfg.alphagenome_metadata_path)
+
     results_hierarchical = {'chrom': [], 'start': [], 'end': []}
     if use_hierarchical:
         for col in ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc',
                     'rad21_perturbed', 'rad21_experimental']:
             results_hierarchical[col] = []
+
+    # Enformer/AlphaGenome predicted + perturbed track accumulation (alt-fasta).
+    # Mirrors the RAD21 block: for every track the backbone predicts we store its
+    # prediction on the WT and ALT sequence (+delta); for tracks that are also
+    # model inputs we additionally store the experimental (original) and perturbed
+    # (delta-applied, feeds Hi-C) values. All binned to resolution_1d and averaged
+    # over overlapping windows before being written as bigwigs.
+    enf_seq_backbone_active = enformer_seq_mode or alphagenome_seq_mode
+    enf_tool = 'alphagenome' if alphagenome_seq_mode else 'enformer'
+    enf_res_1d_bp = max(1, cfg.resolution_1d)
+    n_bins_enf = max(1, window // enf_res_1d_bp)
+    # Enformer output track names (same order the backbone was loaded with).
+    enf_backbone_track_names = list(ag_track_names if alphagenome_seq_mode else (enformer_track_names or enf_target_tracks))
+    # Tracks that are also model inputs -> they get perturbed and have an experimental copy.
+    enf_input_tracks = [t for t in enf_backbone_track_names if t in input_track_names]
+    results_enformer = {'chrom': [], 'start': [], 'end': []}
+    enf_out_cols = []          # ordered list of value columns, set on first window
+    if enf_seq_backbone_active:
+        for t in enf_backbone_track_names:
+            enf_out_cols += [f'{t}_pred_WT', f'{t}_pred_ALT', f'{t}_pred_delta']
+            if t in enf_input_tracks:
+                enf_out_cols += [f'{t}_experimental', f'{t}_perturbed']
+        for col in enf_out_cols:
+            results_enformer[col] = []
+
+    def _enf_bin(arr):
+        """Mean-pool a bp-resolution 1D array to n_bins_enf bins (edge-padded)."""
+        arr = np.asarray(arr, dtype=float).ravel()
+        if len(arr) == n_bins_enf:
+            return arr
+        bin_size = max(1, len(arr) // n_bins_enf)
+        usable = bin_size * n_bins_enf
+        if usable > len(arr):
+            arr = np.pad(arr, (0, usable - len(arr)), mode='edge')
+        return arr[:usable].reshape(n_bins_enf, bin_size).mean(axis=1)
+
+    def _enf_track_by_name(name, ctcf, atac, others):
+        """Return the in-memory input-track array for a backbone track name."""
+        if name == 'ctcf':
+            return ctcf
+        if name == 'atac':
+            return atac
+        other_offset = sum(1 for t in ['ctcf', 'atac'] if t in input_track_names)
+        other_names = input_track_names[other_offset:]
+        if others is not None and name in other_names:
+            return others[other_names.index(name)]
+        return None
 
     track_names = []
     results_1d = {'chrom': [], 'start': [], 'end': []}
@@ -182,19 +268,80 @@ def run_full_chrom(cfg):
                                                   other_regions, input_track_names[2:])
         pred_before = pred_before_output['hic']
 
-        # Save WT copies for hierarchical delta
-        if use_hierarchical:
+        # Save WT copies for hierarchical delta and/or the alt-fasta backbone delta.
+        # seq_region_wt is needed by both; the per-track WT copies only by hierarchical.
+        if use_hierarchical or alt_seq_active:
             seq_region_wt = seq_region.copy()
+        if use_hierarchical:
             ctcf_region_wt = ctcf_region.copy() if ctcf_region is not None else None
             atac_region_wt = atac_region.copy() if atac_region is not None else None
             other_regions_wt = [r.copy() for r in other_regions] if other_regions is not None else None
             experimental_rad21 = other_regions[rad21_other_idx_hier].copy()
 
-        seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(
-            chr_name, start, start, window, seq_region, ctcf_region,
-            atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels,
-            channel_offset=channel_offset, ko_mode=ko_mode,
-            peak_height=args.peak_height)
+        if alt_seq_active:
+            # Replace this window's sequence with the alternate genome, then (for
+            # enformer_seq/alphagenome_seq) adjust the input tracks by the backbone
+            # WT-vs-ALT 1D delta. Plain 'seq' just feeds the alt sequence to the model.
+            n_alleles = max(1, seq_region.shape[1] // 5)
+            alt_region = load_alt_fasta_region(alt_fasta, chr_name, start, window, n_alleles)
+            seq_region = align_alt_to_wt(alt_region, seq_region)
+            # Snapshot the experimental (pre-perturbation) input tracks so we can
+            # emit them alongside the perturbed versions.
+            enf_exp_window = {}
+            if enf_seq_backbone_active:
+                for t in enf_input_tracks:
+                    v = _enf_track_by_name(t, ctcf_region, atac_region, other_regions)
+                    enf_exp_window[t] = v.copy() if v is not None else None
+            enf_res = None
+            if enformer_seq_mode:
+                ctcf_region, atac_region, other_regions, enf_res = enformer_seq_knockout(
+                    seq_region_wt, ctcf_region, atac_region, other_regions,
+                    input_track_names, enformer_model, enformer_track_names,
+                    perturb_track_names=enf_target_tracks, alt_seq_region=seq_region,
+                    window=window, delta_mode=cfg.enformer_delta_mode, cap=cfg.enformer_delta_cap,
+                    track_is_log1p=cfg.bigwig_log_transform, device=enf_device)
+            elif alphagenome_seq_mode:
+                ctcf_region, atac_region, other_regions, enf_res = alphagenome_seq_knockout(
+                    seq_region_wt, ctcf_region, atac_region, other_regions,
+                    input_track_names, ag_model, ag_track_names, ag_resolvers, ag_org_idx,
+                    perturb_track_names=enf_target_tracks, alt_seq_region=seq_region,
+                    window=window, delta_mode=cfg.enformer_delta_mode, cap=cfg.enformer_delta_cap,
+                    track_is_log1p=cfg.bigwig_log_transform, device=ag_device)
+
+            # Accumulate backbone predicted + perturbed tracks for this window.
+            if enf_res is not None:
+                bnames = enf_res.get('enformer_track_names', enf_backbone_track_names)
+                wt_pred = np.asarray(enf_res['wt_pred'])   # (bp, n_tracks) linear
+                alt_pred = np.asarray(enf_res['alt_pred'])
+                res_e = int(window / n_bins_enf)
+                bin_range_e = np.int32(np.linspace(start, start + window - res_e, n_bins_enf))
+                results_enformer['chrom'].extend([chr_name] * n_bins_enf)
+                results_enformer['start'].extend(bin_range_e.tolist())
+                results_enformer['end'].extend((bin_range_e + res_e).tolist())
+                for t in enf_backbone_track_names:
+                    ti = bnames.index(t) if t in bnames else None
+                    wt_b = _enf_bin(wt_pred[:, ti]) if ti is not None else np.zeros(n_bins_enf)
+                    alt_b = _enf_bin(alt_pred[:, ti]) if ti is not None else np.zeros(n_bins_enf)
+                    results_enformer[f'{t}_pred_WT'].extend(wt_b.tolist())
+                    results_enformer[f'{t}_pred_ALT'].extend(alt_b.tolist())
+                    results_enformer[f'{t}_pred_delta'].extend((alt_b - wt_b).tolist())
+                    if t in enf_input_tracks:
+                        exp_v = enf_exp_window.get(t)
+                        pert_v = _enf_track_by_name(t, ctcf_region, atac_region, other_regions)
+                        # experimental/perturbed tracks are in log1p space -> linear
+                        exp_b = _enf_bin(exp_v) if exp_v is not None else np.zeros(n_bins_enf)
+                        pert_b = _enf_bin(pert_v) if pert_v is not None else np.zeros(n_bins_enf)
+                        if cfg.bigwig_log_transform:
+                            exp_b = np.expm1(np.clip(exp_b, 0, None))
+                            pert_b = np.expm1(np.clip(pert_b, 0, None))
+                        results_enformer[f'{t}_experimental'].extend(exp_b.tolist())
+                        results_enformer[f'{t}_perturbed'].extend(pert_b.tolist())
+        else:
+            seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(
+                chr_name, start, start, window, seq_region, ctcf_region,
+                atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels,
+                channel_offset=channel_offset, ko_mode=ko_mode,
+                peak_height=args.peak_height)
 
         if use_hierarchical and other_regions is not None:
             # Use the tensor position of rad21 (not the checkpoint's internal idx)
@@ -215,6 +362,34 @@ def run_full_chrom(cfg):
         pred_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
                                            other_regions, input_track_names[2:])
         pred = pred_output['hic']
+
+        # Collect the model's 1D reconstruction-head predictions for every track
+        # (ctcf/atac/rad21/h3k27ac/... -- whatever the checkpoint reconstructs).
+        # pred_*_1d is (n_bins, n_tracks) in linear space; track order matches
+        # model.track_names_1d. WT = before KO, KO = after the perturbation.
+        pred_before_1d = pred_before_output['1d']
+        pred_ko_1d = pred_output['1d']
+        if pred_before_1d is not None and pred_ko_1d is not None:
+            n_tracks_1d = min(pred_before_1d.shape[1], pred_ko_1d.shape[1])
+            if not track_names:
+                track_names = list((model.track_names_1d or [])[:n_tracks_1d])
+                while len(track_names) < n_tracks_1d:
+                    track_names.append(f'track{len(track_names)}')
+                for t in track_names:
+                    for suffix in ('WT_pred', 'KO_pred', 'delta'):
+                        results_1d.setdefault(f'{t}_{suffix}', [])
+            n_bins_1d = pred_before_1d.shape[0]
+            res_1d_bp = int(window / n_bins_1d)
+            bin_range_1d = np.int32(np.linspace(start, start + window - res_1d_bp, n_bins_1d))
+            results_1d['chrom'].extend([chr_name] * n_bins_1d)
+            results_1d['start'].extend(bin_range_1d.tolist())
+            results_1d['end'].extend((bin_range_1d + res_1d_bp).tolist())
+            for i, t in enumerate(track_names):
+                wt_vals = np.asarray(pred_before_1d[:, i], dtype=float)
+                ko_vals = np.asarray(pred_ko_1d[:, i], dtype=float)
+                results_1d[f'{t}_WT_pred'].extend(wt_vals.tolist())
+                results_1d[f'{t}_KO_pred'].extend(ko_vals.tolist())
+                results_1d[f'{t}_delta'].extend((ko_vals - wt_vals).tolist())
 
         write_tmp_cooler(pred, chr_name, start, res=res)
         write_tmp_cooler(pred_before, chr_name, start, out_file='tmp/tmp_before.cool', res=res)
@@ -410,6 +585,75 @@ def run_full_chrom(cfg):
         plt.tight_layout()
         plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_hierarchical_rad21.png'), dpi=300)
         plt.close(fig)
+
+    # Save the 1D reconstruction-head predictions for every track as bigwigs.
+    # This writes WT (unperturbed), KO (perturbed) and delta bigwigs per track,
+    # so the full-chromosome run emits all predicted 1D tracks, not just RAD21.
+    if track_names and len(results_1d['chrom']) > 0:
+        res_1d_df = pd.DataFrame(results_1d).groupby(['chrom', 'start', 'end']).mean().reset_index()
+        if region is not None:
+            res_1d_df = res_1d_df[(res_1d_df['start'] >= region_start) & (res_1d_df['end'] <= region_end)]
+        res_1d_df = res_1d_df.sort_values('start').reset_index(drop=True)
+        bed_1d_path = args.out_file.replace('.tsv', '_pred_1d_tracks.bed')
+        res_1d_df.round(4).to_csv(bed_1d_path, sep='\t', header=True, index=False)
+        print(f'[1d] Saved predicted 1D tracks table ({len(track_names)} tracks) to {bed_1d_path}')
+
+        import pyBigWig
+        # Chrom-size header: reuse a real input bigwig if available, else a
+        # single-chrom header derived from the chromosome length.
+        ref_bw_path = next((p for p in (ctcf_path, atac_path) if p), None)
+        if ref_bw_path is not None:
+            _bw_ref = pyBigWig.open(ref_bw_path)
+            header_1d = list(_bw_ref.chroms().items())
+            _bw_ref.close()
+        else:
+            header_1d = [(chr_name, int(chr_length))]
+        chroms_1d = res_1d_df['chrom'].tolist()
+        starts_1d = res_1d_df['start'].astype(int).tolist()
+        ends_1d = res_1d_df['end'].astype(int).tolist()
+        for t in track_names:
+            for suffix, col in (('WT', f'{t}_WT_pred'), ('KO', f'{t}_KO_pred'), ('delta', f'{t}_delta')):
+                bw_out_path = args.out_file.replace('.tsv', f'_pred_1d_{t}_{suffix}.bw')
+                out_bw = pyBigWig.open(bw_out_path, 'w')
+                out_bw.addHeader(header_1d)
+                out_bw.addEntries(chroms_1d, starts_1d, ends=ends_1d,
+                                  values=res_1d_df[col].astype(float).tolist())
+                out_bw.close()
+        print(f'[1d] Wrote {len(track_names)} tracks x 3 (WT/KO/delta) predicted-track bigwigs.')
+
+    # Save Enformer/AlphaGenome predicted + perturbed tracks as bigwigs (alt-fasta).
+    # Per backbone track: prediction on the WT and ALT sequence (+delta); for tracks
+    # that are also model inputs, the experimental (original) and perturbed (feeds
+    # Hi-C) values too -- the direct analogue of the RAD21 bigwig set.
+    if enf_seq_backbone_active and enf_out_cols and len(results_enformer['chrom']) > 0:
+        res_enf_df = pd.DataFrame(results_enformer).groupby(['chrom', 'start', 'end']).mean().reset_index()
+        if region is not None:
+            res_enf_df = res_enf_df[(res_enf_df['start'] >= region_start) & (res_enf_df['end'] <= region_end)]
+        res_enf_df = res_enf_df.sort_values('start').reset_index(drop=True)
+        bed_enf_path = args.out_file.replace('.tsv', f'_{enf_tool}_pred_tracks.bed')
+        res_enf_df.round(4).to_csv(bed_enf_path, sep='\t', header=True, index=False)
+        print(f'[{enf_tool}] Saved predicted/perturbed tracks table to {bed_enf_path}')
+
+        import pyBigWig
+        ref_bw_path = next((p for p in (ctcf_path, atac_path) if p), None)
+        if ref_bw_path is not None:
+            _bw_ref = pyBigWig.open(ref_bw_path)
+            header_enf = list(_bw_ref.chroms().items())
+            _bw_ref.close()
+        else:
+            header_enf = [(chr_name, int(chr_length))]
+        chroms_e = res_enf_df['chrom'].tolist()
+        starts_e = res_enf_df['start'].astype(int).tolist()
+        ends_e = res_enf_df['end'].astype(int).tolist()
+        for col in enf_out_cols:
+            bw_out_path = args.out_file.replace('.tsv', f'_{enf_tool}_{col}.bw')
+            out_bw = pyBigWig.open(bw_out_path, 'w')
+            out_bw.addHeader(header_enf)
+            out_bw.addEntries(chroms_e, starts_e, ends=ends_e,
+                              values=res_enf_df[col].astype(float).tolist())
+            out_bw.close()
+        print(f'[{enf_tool}] Wrote {len(enf_out_cols)} predicted/perturbed track bigwigs '
+              f'({len(enf_backbone_track_names)} backbone tracks).')
 
     fig, ax = plt.subplots(figsize=(10, 10))
     sns.scatterplot(data=res_df, x='WT', y='KO', ax=ax)

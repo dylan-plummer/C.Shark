@@ -56,7 +56,29 @@ def get_all_track_names(model_path):
     except KeyError:
         return []
 
-def load_default(model_path, record_attn=False, 
+def _extract_main_model_state_dict(state_dict):
+    """Return the main Hi-C model's weights from a (possibly unified) checkpoint.
+
+    A hierarchical end-to-end checkpoint stores three sub-modules:
+    ``model.*`` (Hi-C), ``input_pred_model.*`` (RAD21) and ``enformer.*``.
+    This loader builds only the Hi-C model, so we keep the ``model.*`` keys
+    (stripping just the leading prefix) and drop the rest.  Using
+    ``str.replace('model.', '')`` would be wrong: it also rewrites
+    ``input_pred_model.`` -> ``input_pred_`` and pulls in foreign weights.
+
+    Checkpoints whose keys are not nested under ``model.`` (older standalone
+    exports) are returned unchanged.
+    """
+    prefix = 'model.'
+    main_keys = [k for k in state_dict if k.startswith(prefix)]
+    if not main_keys:
+        return dict(state_dict)
+    drop_prefixes = ('input_pred_model.', 'enformer.')
+    return {k[len(prefix):]: v for k, v in state_dict.items()
+            if k.startswith(prefix) and not k.startswith(drop_prefixes)}
+
+
+def load_default(model_path, record_attn=False,
                  num_genomic_features=2, mat_size=256,
                  seq_filter_size=3,
                  recon_1d=False,
@@ -71,10 +93,18 @@ def load_default(model_path, record_attn=False,
     _ckpt = torch.load(model_path, map_location=_device, weights_only=False)
     _sd = _ckpt['state_dict']
     _hp = _ckpt.get('hyper_parameters', {})
-    # Strip 'model.' prefix for easier key inspection
-    _sd_clean = {k.replace('model.', ''): v for k, v in _sd.items()}
+    # Isolate the main Hi-C model's weights.  In a unified hierarchical
+    # checkpoint the state dict also holds `input_pred_model.*` and `enformer.*`;
+    # those must be dropped here (this loader only builds the main model).
+    _sd_clean = _extract_main_model_state_dict(_sd)
     # Check if this is truly a CSharkUniversalModel by looking at state_dict keys
     _is_universal = any('modality_embeddings' in k or 'track_embedders' in k for k in _sd_clean)
+    # Infer the latent width (mid_hidden) straight from the weights so callers
+    # don't have to pass a matching --latent_size.  EncoderSplit.conv_end is
+    # nn.Conv1d(256, mid_hidden, 1) -> shape[0] == mid_hidden.
+    _cend_key = next((k for k in _sd_clean if k.endswith('encoder.conv_end.weight')), None)
+    if _cend_key is not None:
+        mid_hidden = _sd_clean[_cend_key].shape[0]
     # Match training: softplus only when bigwig_log_transform is False
     _bigwig_log = _hp.get('bigwig_log_transform', True)
     _activation_1d = 'softplus' if not _bigwig_log else None
@@ -307,11 +337,9 @@ def load_checkpoint(model, model_path):
     model.to(device)
 
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    model_weights = checkpoint['state_dict']
-
-    # Edit keys
-    for key in list(model_weights):
-        model_weights[key.replace('model.', '')] = model_weights.pop(key)
+    # Keep only the main Hi-C model weights; drop input_pred_model.* / enformer.*
+    # that a unified hierarchical checkpoint also carries.
+    model_weights = _extract_main_model_state_dict(checkpoint['state_dict'])
     result = model.load_state_dict(model_weights, strict=False)
     if result.missing_keys or result.unexpected_keys:
         n_missing = len(result.missing_keys)

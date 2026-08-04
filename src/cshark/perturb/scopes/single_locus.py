@@ -50,6 +50,7 @@ from cshark.perturb.models.hierarchical import prepare_rad21_input, apply_rad21_
 from cshark.perturb.models.enformer import apply_enformer_seq_ko, rewrite_enformer_ko_tracks
 from cshark.perturb.models.alphagenome import apply_alphagenome_seq_ko
 from cshark.perturb.operators.planning import plan_perturbations
+from cshark.perturb.seq_source import load_alt_fasta_region, align_alt_to_wt
 
 # module-level plotting constants (verbatim from the original perturb.py)
 font_size = 15
@@ -67,6 +68,7 @@ def run_single_locus(cfg):
     deletion_starts = cfg.deletion_start
     deletion_widths = cfg.deletion_width
     alt_bp = cfg.alt_bp
+    alt_fasta = cfg.alt_fasta
     model_path = cfg.model_path
     seq_path = cfg.seq_path
     ctcf_path = cfg.ctcf_path
@@ -213,6 +215,30 @@ def run_single_locus(cfg):
 
     seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, alphagenome_seq_active, hierarchical_active = plan_perturbations(
         alt_bp=alt_bp, atac_path=atac_path, bigwig_log_transform=bigwig_log_transform, channel_offset=channel_offset, chr_name=chr_name, ctcf_path=ctcf_path, deletion_starts=deletion_starts, deletion_widths=deletion_widths, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, ko_data_types=ko_data_types, ko_mode=ko_mode, other_feats=other_feats, peak_height=peak_height, seq2_path=seq2_path, seq_path=seq_path, seq_region=seq_region, start=start, window=window)
+
+    # --- whole-window ALT sequence from --alt-fasta -------------------------
+    # Treat every base in the alternate fasta directory as the ALT sequence for
+    # the seq / enformer_seq / alphagenome_seq ko-modes: replace the entire
+    # window's sequence with the alternate genome (the WT copy saved above is the
+    # delta baseline) and activate the backbone selected by --ko-mode. This
+    # supersedes any --alt/--ko-start sequence edits for this run.
+    if alt_fasta is not None:
+        n_alleles = max(1, seq_region.shape[1] // 5)
+        alt_region = load_alt_fasta_region(alt_fasta, chr_name, start, window, n_alleles)
+        seq_region = align_alt_to_wt(alt_region, seq_region)
+        _modes = set(ko_mode or [])
+        if 'enformer_seq' in _modes:
+            enformer_seq_active = True
+        if 'alphagenome_seq' in _modes:
+            alphagenome_seq_active = True
+        if not (_modes & {'seq', 'enformer_seq', 'alphagenome_seq'}):
+            print('[alt-fasta] WARNING: --ko-mode has none of seq/enformer_seq/'
+                  'alphagenome_seq; applying the alt sequence as a plain main-model '
+                  '(seq) substitution.')
+        print(f'[alt-fasta] Loaded whole-window ALT sequence from {alt_fasta} for '
+              f'{chr_name}:{start}-{start + window} (alleles={n_alleles}); '
+              f'enformer_seq_active={enformer_seq_active}, '
+              f'alphagenome_seq_active={alphagenome_seq_active}.')
 
     # --- opt-in allele-specific peak redistribution (--allele-peak-split) ---
     # Meaningful with a sequence-model perturbation (enformer_seq OR alphagenome_seq):

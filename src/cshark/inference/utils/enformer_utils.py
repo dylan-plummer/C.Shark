@@ -294,8 +294,74 @@ def load_enformer_from_checkpoint(checkpoint_path, device=None, enformer_tracks=
 
     requested_track_names = list(enformer_tracks) if enformer_tracks is not None else None
 
-    if any(key.startswith('input_pred_model.') for key in state_dict):
-        # Lazy import to avoid circular deps at module level
+    is_hierarchical = any(key.startswith('input_pred_model.') for key in state_dict)
+    has_enformer_weights = any(key.startswith('enformer.') for key in state_dict)
+
+    # ------------------------------------------------------------------
+    # Preferred robust path: any checkpoint that carries a fine-tuned Enformer
+    # adapter under ``enformer.*`` (both the end-to-end hierarchical trainer AND
+    # the standard Enformer fine-tuner store one). Rebuild the standalone wrapper
+    # directly from those weights instead of reconstructing the whole TrainModule.
+    # This decouples inference from the training module's internals and, crucially,
+    # works even when there is NO layer-2 RAD21 predictor (rad21-free datasets ->
+    # ``input_pred_model`` is absent, so ``is_hierarchical`` is False), and lets a
+    # SINGLE unified checkpoint serve as --model, --hierarchical-model AND
+    # --enformer-model simultaneously.
+    # ------------------------------------------------------------------
+    if has_enformer_weights:
+        enformer_state = {k[len('enformer.'):]: v for k, v in state_dict.items()
+                          if k.startswith('enformer.')}
+        num_heads = sum(1 for k in enformer_state
+                        if k.startswith('to_tracks.') and k.endswith('.weight'))
+
+        # Hierarchical checkpoints name the Enformer heads via ``enformer_tracks``;
+        # standard Enformer fine-tuning checkpoints via ``output_features``.
+        track_names = getattr(hparams, 'enformer_tracks', None) or getattr(hparams, 'output_features', None)
+        track_names = list(track_names) if track_names else None
+        if not track_names:
+            fallback = ['ctcf', 'atac', 'h3k27ac', 'h3k4me3', 'h3k9me3', 'h3k36me3', 'h3k27me3']
+            track_names = fallback[:num_heads]
+            print(f"[enformer_utils] Warning: neither 'enformer_tracks' nor 'output_features' "
+                  f"in hparams; defaulting to first {num_heads} tracks {track_names}.")
+        elif len(track_names) != num_heads:
+            # e.g. output_features carried extra non-Enformer targets; keep the
+            # first num_heads (adapter head order matches track order at train time).
+            print(f"[enformer_utils] Warning: {len(track_names)} hparam track names but "
+                  f"{num_heads} adapter heads; using the first {num_heads}: {track_names[:num_heads]}.")
+            track_names = track_names[:num_heads]
+
+        if requested_track_names is not None:
+            missing_tracks = [t for t in requested_track_names if t not in track_names]
+            if missing_tracks:
+                raise ValueError(
+                    f"Requested --enformer-tracks {missing_tracks} are not present in "
+                    f"checkpoint outputs {track_names}."
+                )
+
+        assembly = str(getattr(hparams, 'dataset_assembly', 'hg38'))
+        species = 'human' if assembly.startswith('hg') else 'mouse'
+
+        from enformer_pytorch import from_pretrained
+        enformer = from_pretrained('EleutherAI/enformer-official-rough', use_tf_gamma=True)
+        for param in enformer.parameters():
+            param.requires_grad = False
+        # Indices are only used for the (skipped) pretrained-head copy; their
+        # count is what defines the number of heads to rebuild.
+        wrapper = EnformerHeadAdapterWrapper(
+            enformer, list(range(num_heads)), species=species, load_pretrained=False,
+        )
+        wrapper.load_state_dict(enformer_state, strict=True)
+        wrapper.eval()
+        wrapper.to(device)
+        print(f"[enformer_utils] Loaded fine-tuned Enformer adapter directly from "
+              f"`enformer.*` weights ({num_heads} heads). Tracks: {track_names}")
+        if requested_track_names is not None:
+            print(f"[enformer_utils] Restricting perturbation to requested tracks: {requested_track_names}")
+        return wrapper, track_names, device
+
+    if is_hierarchical:
+        # Fallback: hierarchical checkpoint without `enformer.*` weights — rebuild
+        # the full TrainModule and pull out its (untrained) Enformer.
         from cshark.inference.hierarchical_predict_with_enformer import TrainModule
 
         if not hasattr(hparams, 'enformer_tracks') or hparams.enformer_tracks is None:
