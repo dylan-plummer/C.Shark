@@ -59,8 +59,11 @@ def load_hierarchical_rad21_predictor(checkpoint_path, device=None, n_input_trac
     rad21_idx = all_track_names.index('rad21')
 
     if n_input_tracks is None:
-        print(input_tracks)
-        n_input_tracks = len(input_tracks) - 1
+        # The inner model consumes every input track EXCEPT rad21 (which it predicts).
+        # Two checkpoint conventions exist and both must work:
+        #   - rad21 listed only in output_features -> input_tracks already excludes it
+        #   - rad21 listed in input_features too   -> subtract it here
+        n_input_tracks = len(input_tracks) - (1 if 'rad21' in input_tracks else 0)
         print(f"[hierarchical] Auto-detected n_input_tracks={n_input_tracks} "
               f"from checkpoint tracks: {input_tracks}")
 
