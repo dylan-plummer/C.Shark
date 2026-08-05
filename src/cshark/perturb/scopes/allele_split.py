@@ -453,9 +453,14 @@ def run_allele_peak_split(cfg, *, model, seq_region, seq_region_wt,
             other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt,
             start=cfg.start, window=window)
 
-    # Per-allele RAD21 (function #1 uses the same sequence for both alleles).
+    # Each allele is predicted from ITS OWN sequence: ref = the unmodified --seq
+    # genome, alt = the same window after the variant substitution (or, with
+    # --alt-fasta, the whole alternate genome). Earlier versions fed seq_region to
+    # both, which was near-harmless for a 1 bp SNP (0.013% max change in the
+    # predicted Hi-C, r = 1.00000000) but wrong for --alt-fasta, where the two
+    # sequences differ by ~1,941 bases per 2 Mb window.
     ref_set, alt_set = _redistribute_rad21_alleles(
-        ref_set, alt_set, seq_a=seq_region, seq_b=seq_region, other_regions_wt=other_regions_wt,
+        ref_set, alt_set, seq_a=seq_region_wt, seq_b=seq_region, other_regions_wt=other_regions_wt,
         input_track_names=input_track_names, hierarchical_rad21_model=hierarchical_rad21_model,
         cap=cap, bigwig_log_transform=cfg.bigwig_log_transform)
 
@@ -464,7 +469,7 @@ def run_allele_peak_split(cfg, *, model, seq_region, seq_region_wt,
 
     _run_two_allele_outputs(
         cfg, model=model,
-        alleles=[('ref', seq_region, ref_set), ('alt', seq_region, alt_set)],
+        alleles=[('ref', seq_region_wt, ref_set), ('alt', seq_region, alt_set)],
         labels=('ref', 'alt'), fig_kind='snp', perturb_label='SNP perturb',
         input_track_names=input_track_names, input_track_paths=input_track_paths,
         pred_before=pred_before, pred_before_1d=pred_before_1d,

@@ -189,19 +189,55 @@ def run_full_chrom(cfg):
     # over overlapping windows before being written as bigwigs.
     enf_seq_backbone_active = enformer_seq_mode or alphagenome_seq_mode
     enf_tool = 'alphagenome' if alphagenome_seq_mode else 'enformer'
+
+    # --- opt-in allele peak redistribution (--allele-peak-split) ------------
+    # Default (off) keeps the direct-apply behaviour: the backbone fold-change is
+    # multiplied onto the bulk track and one perturbed Hi-C is produced. With the
+    # flag on, each bulk track is instead SPLIT into two allele tracks
+    # (2*E*frac, capped) and each allele is predicted separately, so the bulk is
+    # treated as the sum of the two alleles rather than as something to scale.
+    redistribute_alleles = alt_seq_active and cfg.allele_peak_split and enf_seq_backbone_active
+    if cfg.allele_peak_split and not redistribute_alleles:
+        print('[allele-peak-split] WARNING: needs --alt-fasta together with --ko-mode '
+              'enformer_seq or alphagenome_seq; falling back to direct apply-fc.')
+    redistribute_enformer_alleles = _redistribute_rad21_alleles = None
+    if redistribute_alleles:
+        # Same helpers the single-locus allele paths use, so both scales run the
+        # same redistribution math.
+        from cshark.perturb.models.enformer import redistribute_enformer_alleles
+        from cshark.perturb.scopes.allele_split import _redistribute_rad21_alleles
+        print(f'[allele-peak-split] Peak redistribution via {enf_tool}: every window is split '
+              f'into WT/ALT allele track sets (2*E*frac, CAP={cfg.enformer_delta_cap}) and '
+              f'predicted separately -> two Hi-C sets, no direct fold-change apply.')
+    lbl_wt = 'wt_after_redistribution' if redistribute_alleles else 'WT'
+    lbl_alt = 'alt_after_redistribution' if redistribute_alleles else 'KO'
+    if redistribute_alleles and args.oe_norm:
+        raise SystemExit(
+            '[allele-peak-split] --oe-norm is not supported with peak redistribution: it '
+            'normalises against an experimental WT Hi-C, but both outputs here are alleles '
+            'of that same sample rather than a WT/KO pair. Drop one of the two flags.')
     enf_res_1d_bp = max(1, cfg.resolution_1d)
     n_bins_enf = max(1, window // enf_res_1d_bp)
     # Enformer output track names (same order the backbone was loaded with).
     enf_backbone_track_names = list(ag_track_names if alphagenome_seq_mode else (enformer_track_names or enf_target_tracks))
     # Tracks that are also model inputs -> they get perturbed and have an experimental copy.
     enf_input_tracks = [t for t in enf_backbone_track_names if t in input_track_names]
+    # In redistribution mode every model input gets allele-specific values, including
+    # rad21 -- which the backbone does not predict (it comes from the hierarchical
+    # model), so it would otherwise never be recorded.
+    enf_value_tracks = list(input_track_names) if redistribute_alleles else enf_input_tracks
     results_enformer = {'chrom': [], 'start': [], 'end': []}
     enf_out_cols = []          # ordered list of value columns, set on first window
     if enf_seq_backbone_active:
         for t in enf_backbone_track_names:
             enf_out_cols += [f'{t}_pred_WT', f'{t}_pred_ALT', f'{t}_pred_delta']
-            if t in enf_input_tracks:
-                enf_out_cols += [f'{t}_experimental', f'{t}_perturbed']
+        for t in enf_value_tracks:
+            enf_out_cols += [f'{t}_experimental']
+            if redistribute_alleles:
+                enf_out_cols += [f'{t}_wt_after_redistribution',
+                                 f'{t}_alt_after_redistribution']
+            else:
+                enf_out_cols += [f'{t}_perturbed']
         for col in enf_out_cols:
             results_enformer[col] = []
 
@@ -264,9 +300,14 @@ def run_full_chrom(cfg):
 
         if model is None:
             model = CSharkModel(cfg, num_genomic_features=num_genomic_features, diploid=diploid)
-        pred_before_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
-                                                  other_regions, input_track_names[2:])
-        pred_before = pred_before_output['hic']
+        if redistribute_alleles:
+            # Both predictions are per-allele and happen after the split below, so
+            # there is no bulk baseline pass here -- still two forwards per window.
+            pred_before_output = pred_before = None
+        else:
+            pred_before_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
+                                                      other_regions, input_track_names[2:])
+            pred_before = pred_before_output['hic']
 
         # Save WT copies for hierarchical delta and/or the alt-fasta backbone delta.
         # seq_region_wt is needed by both; the per-track WT copies only by hierarchical.
@@ -278,6 +319,8 @@ def run_full_chrom(cfg):
             other_regions_wt = [r.copy() for r in other_regions] if other_regions is not None else None
             experimental_rad21 = other_regions[rad21_other_idx_hier].copy()
 
+        enf_res = None
+        wt_set = alt_set = None
         if alt_seq_active:
             # Replace this window's sequence with the alternate genome, then (for
             # enformer_seq/alphagenome_seq) adjust the input tracks by the backbone
@@ -289,24 +332,38 @@ def run_full_chrom(cfg):
             # emit them alongside the perturbed versions.
             enf_exp_window = {}
             if enf_seq_backbone_active:
-                for t in enf_input_tracks:
+                for t in enf_value_tracks:
                     v = _enf_track_by_name(t, ctcf_region, atac_region, other_regions)
                     enf_exp_window[t] = v.copy() if v is not None else None
-            enf_res = None
+            # In redistribution mode the *_seq_knockout call is only used for its
+            # wt_pred/alt_pred; its in-place delta-applied tracks are discarded, so
+            # it gets COPIES -- otherwise the redistribution would use delta-applied
+            # values as the bulk E (the bug fixed in 3a4700e on the single-locus path).
+            _ct = ctcf_region.copy() if (redistribute_alleles and ctcf_region is not None) else ctcf_region
+            _at = atac_region.copy() if (redistribute_alleles and atac_region is not None) else atac_region
+            _ot = ([r.copy() for r in other_regions]
+                   if (redistribute_alleles and other_regions is not None) else other_regions)
             if enformer_seq_mode:
-                ctcf_region, atac_region, other_regions, enf_res = enformer_seq_knockout(
-                    seq_region_wt, ctcf_region, atac_region, other_regions,
+                _ct, _at, _ot, enf_res = enformer_seq_knockout(
+                    seq_region_wt, _ct, _at, _ot,
                     input_track_names, enformer_model, enformer_track_names,
                     perturb_track_names=enf_target_tracks, alt_seq_region=seq_region,
                     window=window, delta_mode=cfg.enformer_delta_mode, cap=cfg.enformer_delta_cap,
                     track_is_log1p=cfg.bigwig_log_transform, device=enf_device)
             elif alphagenome_seq_mode:
-                ctcf_region, atac_region, other_regions, enf_res = alphagenome_seq_knockout(
-                    seq_region_wt, ctcf_region, atac_region, other_regions,
+                _ct, _at, _ot, enf_res = alphagenome_seq_knockout(
+                    seq_region_wt, _ct, _at, _ot,
                     input_track_names, ag_model, ag_track_names, ag_resolvers, ag_org_idx,
                     perturb_track_names=enf_target_tracks, alt_seq_region=seq_region,
                     window=window, delta_mode=cfg.enformer_delta_mode, cap=cfg.enformer_delta_cap,
                     track_is_log1p=cfg.bigwig_log_transform, device=ag_device)
+            if redistribute_alleles:
+                # Split the pristine bulk tracks by the backbone's WT-vs-ALT ratio.
+                wt_set, alt_set = redistribute_enformer_alleles(
+                    ctcf_region, atac_region, other_regions, input_track_names, enf_res,
+                    cap=cfg.enformer_delta_cap, track_is_log1p=cfg.bigwig_log_transform)
+            else:
+                ctcf_region, atac_region, other_regions = _ct, _at, _ot
 
             # Accumulate backbone predicted + perturbed tracks for this window.
             if enf_res is not None:
@@ -325,17 +382,9 @@ def run_full_chrom(cfg):
                     results_enformer[f'{t}_pred_WT'].extend(wt_b.tolist())
                     results_enformer[f'{t}_pred_ALT'].extend(alt_b.tolist())
                     results_enformer[f'{t}_pred_delta'].extend((alt_b - wt_b).tolist())
-                    if t in enf_input_tracks:
-                        exp_v = enf_exp_window.get(t)
-                        pert_v = _enf_track_by_name(t, ctcf_region, atac_region, other_regions)
-                        # experimental/perturbed tracks are in log1p space -> linear
-                        exp_b = _enf_bin(exp_v) if exp_v is not None else np.zeros(n_bins_enf)
-                        pert_b = _enf_bin(pert_v) if pert_v is not None else np.zeros(n_bins_enf)
-                        if cfg.bigwig_log_transform:
-                            exp_b = np.expm1(np.clip(exp_b, 0, None))
-                            pert_b = np.expm1(np.clip(pert_b, 0, None))
-                        results_enformer[f'{t}_experimental'].extend(exp_b.tolist())
-                        results_enformer[f'{t}_perturbed'].extend(pert_b.tolist())
+                # The per-track experimental / perturbed (or per-allele) values are
+                # recorded further down, AFTER the RAD21 step, so they reflect the
+                # final arrays that actually feed the model.
         else:
             seq_region, ctcf_region, atac_region, other_regions = deletion_with_padding(
                 chr_name, start, start, window, seq_region, ctcf_region,
@@ -343,7 +392,20 @@ def run_full_chrom(cfg):
                 channel_offset=channel_offset, ko_mode=ko_mode,
                 peak_height=args.peak_height)
 
-        if use_hierarchical and other_regions is not None:
+        if redistribute_alleles:
+            # RAD21 is split per allele from the hierarchical model's own per-allele
+            # predictions (same helper the single-locus allele paths use), so the
+            # WT-vs-KO hierarchical_rad21_update does not apply here. The resulting
+            # per-allele RAD21 lands in the {track}_*_after_redistribution columns.
+            if hierarchical_rad21_model is not None and 'rad21' in input_track_names:
+                wt_set, alt_set = _redistribute_rad21_alleles(
+                    wt_set, alt_set, seq_a=seq_region_wt, seq_b=seq_region,
+                    other_regions_wt=other_regions, input_track_names=input_track_names,
+                    hierarchical_rad21_model=hierarchical_rad21_model,
+                    cap=cfg.enformer_delta_cap,
+                    bigwig_log_transform=cfg.bigwig_log_transform)
+            hierarchical_results_window = None
+        elif use_hierarchical and other_regions is not None:
             # Use the tensor position of rad21 (not the checkpoint's internal idx)
             rad21_tensor_idx = input_track_names.index('rad21')
             other_regions, hierarchical_results_window = hierarchical_rad21_update(
@@ -359,8 +421,46 @@ def run_full_chrom(cfg):
         else:
             hierarchical_results_window = None
 
-        pred_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
-                                           other_regions, input_track_names[2:])
+        # Per-track values that actually feed the model, recorded after the RAD21
+        # step so rad21 itself is included. Emitted in LINEAR space.
+        if enf_seq_backbone_active and enf_res is not None:
+            def _lin_bin(v):
+                """Track array (log1p) -> linear, then mean-pooled to n_bins_enf.
+
+                expm1 BEFORE pooling: these are signal means, and
+                expm1(mean(log1p(x))) != mean(x). Pooling first biases peaky tracks
+                low and would break the redistribution identity
+                wt + alt == 2 * experimental.
+                """
+                if v is None:
+                    return np.zeros(n_bins_enf)
+                lin = np.expm1(np.clip(v, 0, None)) if cfg.bigwig_log_transform else v
+                return _enf_bin(lin)
+
+            for t in enf_value_tracks:
+                results_enformer[f'{t}_experimental'].extend(
+                    _lin_bin(enf_exp_window.get(t)).tolist())
+                if redistribute_alleles:
+                    results_enformer[f'{t}_wt_after_redistribution'].extend(
+                        _lin_bin(_enf_track_by_name(t, *wt_set)).tolist())
+                    results_enformer[f'{t}_alt_after_redistribution'].extend(
+                        _lin_bin(_enf_track_by_name(t, *alt_set)).tolist())
+                else:
+                    results_enformer[f'{t}_perturbed'].extend(
+                        _lin_bin(_enf_track_by_name(t, ctcf_region, atac_region,
+                                                    other_regions)).tolist())
+
+        if redistribute_alleles:
+            # Two per-allele predictions replace the (bulk baseline, perturbed) pair:
+            # each allele uses its own sequence and its own redistributed tracks.
+            pred_before_output = model.predict_arrays(seq_region_wt, *wt_set,
+                                                     input_track_names[2:])
+            pred_output = model.predict_arrays(seq_region, *alt_set,
+                                               input_track_names[2:])
+            pred_before = pred_before_output['hic']
+        else:
+            pred_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
+                                               other_regions, input_track_names[2:])
         pred = pred_output['hic']
 
         # Collect the model's 1D reconstruction-head predictions for every track
@@ -478,6 +578,8 @@ def run_full_chrom(cfg):
     res_df['end2'] = res_df['a2'].map(end_map)
     res_df = res_df[['chrom1', 'start1', 'end1', 'a1', 'chrom2', 'start2', 'end2', 'a2', 'WT', 'KO'] +
                     (['exp_WT'] if args.oe_norm else [])]
+    if redistribute_alleles:
+        res_df = res_df.rename(columns={'WT': lbl_wt, 'KO': lbl_alt})
     if region is not None:
         res_df = res_df[(res_df['start1'] >= region_start) & (res_df['end1'] <= region_end) &
                         (res_df['start2'] >= region_start) & (res_df['end2'] <= region_end)]
@@ -488,20 +590,32 @@ def run_full_chrom(cfg):
     # Cooler outputs
     bins_cooler_df = bins_df[['chrom', 'start', 'end']].copy()
     bins_cooler_df.reset_index(inplace=True)
-    wt_cooler_df = res_df[['a1', 'a2', 'WT']].rename(columns={'WT': 'count'})
-    ko_cooler_df = res_df[['a1', 'a2', 'KO']].rename(columns={'KO': 'count'})
+    # 'A_<i>' labels index the UNFILTERED bin table. With --region, bins_df has been
+    # subset, so those labels no longer match the 0..N-1 row positions cooler expects
+    # -- remap through the surviving bins (and drop pixels whose bins were filtered
+    # out). Without --region this map is the identity, so the cooler is unchanged.
+    bin_pos = {b: i for i, b in enumerate(bins_df['bin_id'])}
+    wt_cooler_df = res_df[['a1', 'a2', lbl_wt]].rename(columns={lbl_wt: 'count'})
+    ko_cooler_df = res_df[['a1', 'a2', lbl_alt]].rename(columns={lbl_alt: 'count'})
+    _cooler_dfs = []
     for df in [wt_cooler_df, ko_cooler_df]:
-        df['bin1_id'] = df['a1'].map(lambda x: int(x.replace('A_', '')))
-        df['bin2_id'] = df['a2'].map(lambda x: int(x.replace('A_', '')))
-    wt_cooler_df = wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
-    ko_cooler_df = ko_cooler_df[['bin1_id', 'bin2_id', 'count']]
-    cooler.create_cooler(args.out_file.replace('.tsv', '_WT.cool'), bins_cooler_df, wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
-    cooler.create_cooler(args.out_file.replace('.tsv', '_KO.cool'), bins_cooler_df, ko_cooler_df, ordered=True, dtypes={'count': 'float32'})
+        df['bin1_id'] = df['a1'].map(bin_pos)
+        df['bin2_id'] = df['a2'].map(bin_pos)
+        df = df.dropna(subset=['bin1_id', 'bin2_id'])
+        df['bin1_id'] = df['bin1_id'].astype(int)
+        df['bin2_id'] = df['bin2_id'].astype(int)
+        _cooler_dfs.append(df[['bin1_id', 'bin2_id', 'count']])
+    wt_cooler_df, ko_cooler_df = _cooler_dfs
+    cooler.create_cooler(args.out_file.replace('.tsv', f'_{lbl_wt}.cool'), bins_cooler_df, wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
+    cooler.create_cooler(args.out_file.replace('.tsv', f'_{lbl_alt}.cool'), bins_cooler_df, ko_cooler_df, ordered=True, dtypes={'count': 'float32'})
 
     if args.oe_norm:
         exp_wt_cooler_df = res_df[['a1', 'a2', 'exp_WT']].rename(columns={'exp_WT': 'count'})
-        exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['a1'].map(lambda x: int(x.replace('A_', '')))
-        exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['a2'].map(lambda x: int(x.replace('A_', '')))
+        exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['a1'].map(bin_pos)
+        exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['a2'].map(bin_pos)
+        exp_wt_cooler_df = exp_wt_cooler_df.dropna(subset=['bin1_id', 'bin2_id'])
+        exp_wt_cooler_df['bin1_id'] = exp_wt_cooler_df['bin1_id'].astype(int)
+        exp_wt_cooler_df['bin2_id'] = exp_wt_cooler_df['bin2_id'].astype(int)
         exp_wt_cooler_df = exp_wt_cooler_df[['bin1_id', 'bin2_id', 'count']]
         cooler.create_cooler(args.out_file.replace('.tsv', '_exp_WT.cool'), bins_cooler_df, exp_wt_cooler_df, ordered=True, dtypes={'count': 'float32'})
 
@@ -612,14 +726,17 @@ def run_full_chrom(cfg):
         starts_1d = res_1d_df['start'].astype(int).tolist()
         ends_1d = res_1d_df['end'].astype(int).tolist()
         for t in track_names:
-            for suffix, col in (('WT', f'{t}_WT_pred'), ('KO', f'{t}_KO_pred'), ('delta', f'{t}_delta')):
+            # In redistribution mode the two passes are the two alleles, not WT vs KO.
+            for suffix, col in ((lbl_wt, f'{t}_WT_pred'), (lbl_alt, f'{t}_KO_pred'),
+                                ('delta', f'{t}_delta')):
                 bw_out_path = args.out_file.replace('.tsv', f'_pred_1d_{t}_{suffix}.bw')
                 out_bw = pyBigWig.open(bw_out_path, 'w')
                 out_bw.addHeader(header_1d)
                 out_bw.addEntries(chroms_1d, starts_1d, ends=ends_1d,
                                   values=res_1d_df[col].astype(float).tolist())
                 out_bw.close()
-        print(f'[1d] Wrote {len(track_names)} tracks x 3 (WT/KO/delta) predicted-track bigwigs.')
+        print(f'[1d] Wrote {len(track_names)} tracks x 3 ({lbl_wt}/{lbl_alt}/delta) '
+              f'predicted-track bigwigs.')
 
     # Save Enformer/AlphaGenome predicted + perturbed tracks as bigwigs (alt-fasta).
     # Per backbone track: prediction on the WT and ALT sequence (+delta); for tracks
@@ -656,7 +773,7 @@ def run_full_chrom(cfg):
               f'({len(enf_backbone_track_names)} backbone tracks).')
 
     fig, ax = plt.subplots(figsize=(10, 10))
-    sns.scatterplot(data=res_df, x='WT', y='KO', ax=ax)
-    ax.set_title('WT vs KO')
+    sns.scatterplot(data=res_df, x=lbl_wt, y=lbl_alt, ax=ax)
+    ax.set_title(f'{lbl_wt} vs {lbl_alt}')
     plt.savefig(os.path.join(args.output_path, f'{args.outname}{args.celltype}_{args.chr_name}_scatter.png'), dpi=300)
     plt.close(fig)
