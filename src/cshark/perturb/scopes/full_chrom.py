@@ -703,7 +703,7 @@ def run_full_chrom(cfg):
     # Save the 1D reconstruction-head predictions for every track as bigwigs.
     # This writes WT (unperturbed), KO (perturbed) and delta bigwigs per track,
     # so the full-chromosome run emits all predicted 1D tracks, not just RAD21.
-    if track_names and len(results_1d['chrom']) > 0:
+    if track_names and len(results_1d['chrom']) > 0 and args.pred_1d_bigwigs:
         res_1d_df = pd.DataFrame(results_1d).groupby(['chrom', 'start', 'end']).mean().reset_index()
         if region is not None:
             res_1d_df = res_1d_df[(res_1d_df['start'] >= region_start) & (res_1d_df['end'] <= region_end)]

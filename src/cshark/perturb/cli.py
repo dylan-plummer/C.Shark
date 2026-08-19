@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Whether to apply log transformation to Hi-C matrices')
     parser.add_argument('--no-bigwig-log-transform', dest='bigwig_log_transform', action='store_false',
                         help='Whether to apply log transformation to bigwig tracks')
+    parser.add_argument('--no-pred-1d-bigwigs', dest='pred_1d_bigwigs', action='store_false',
+                        help='Skip writing per-track 1D predicted reconstruction bigwigs in full-chrom mode')
     parser.add_argument('--oe-norm', dest='oe_norm', action='store_true',
                         help='Whether to apply observed/expected normalization to Hi-C matrices')
 

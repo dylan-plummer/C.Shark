@@ -40,6 +40,7 @@ class PerturbConfig:
     hic_log_transform: bool = True       # --no-hic-log-transform -> False
     bigwig_log_transform: bool = True    # --no-bigwig-log-transform -> False
     oe_norm: bool = False                # --oe-norm
+    pred_1d_bigwigs: bool = True         # --no-pred-1d-bigwigs -> False
     n_overlap_preds: int = 2
 
     # --- inputs ---
