@@ -283,7 +283,11 @@ def write_tmp_chipseq_ko(bigwig_path, track_name, chr_name, start, deletion_star
             ko_peaks[idx] = np.random.uniform(1, 5)
 
     
-    if ko_mode == 'zero': 
+    if ko_mode == 'mean':
+        mean_val = np.mean(np.concatenate([log_values[:deletion_index_start], log_values[deletion_index_end:]]))
+        ko_peaks[deletion_index_start:deletion_index_end] = mean_val
+
+    if ko_mode == 'zero':
         ko_peaks[deletion_index_start:deletion_index_end] = 0
 
     if ko_mode == 'shuffle':
