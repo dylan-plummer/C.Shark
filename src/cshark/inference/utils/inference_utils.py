@@ -144,27 +144,25 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor
         peak_width = peak_end - peak_start
         
         # Calculate padding for background, but don't exceed array bounds
-        padding = min(int(peak_width * padding_factor), 5)
-        
-        # Calculate regions before and after peak for background
-        pre_start = max(0, peak_start - padding)
-        pre_end = peak_start - peak_width
-        
-        post_start = peak_end + peak_width
-        post_end = min(array_length, peak_end + padding)
-        
+        padding = max(int(peak_width * padding_factor), 5)
+
+        # Background windows sit a peak-width gap away from the peak, then extend
+        # `padding` bases outward. Clamped to [0, array_length] so slices never
+        # wrap around or invert (which previously left them empty -> background 0).
+        pre_end = max(0, peak_start - peak_width)
+        pre_start = max(0, pre_end - padding)
+
+        post_start = min(array_length, peak_end + peak_width)
+        post_end = min(array_length, post_start + padding)
+
         # Calculate mean of surrounding regions as background
         pre_values = signal_array[pre_start:pre_end]
         post_values = signal_array[post_start:post_end]
-        
-        # Handle empty regions
-        # pre_mean = np.quantile(pre_values, q=background_q) if len(pre_values) > 0 else 0.0
-        # post_mean = np.quantile(post_values, q=background_q) if len(post_values) > 0 else 0.0
-        pre_mean = np.mean(pre_values) if len(pre_values) > 0 else 0.0
-        post_mean = np.mean(post_values) if len(post_values) > 0 else 0.0
-        
-        # Calculate background value as average of pre and post regions
-        background_val = (pre_mean + post_mean) / 2.0
+
+        # Average only the flanks that exist (a flank can be empty at the array edge)
+        # flank_means = [np.quantile(v, q=background_q) for v in (pre_values, post_values) if len(v) > 0]
+        flank_means = [np.mean(v) for v in (pre_values, post_values) if len(v) > 0]
+        background_val = np.mean(flank_means) if flank_means else 0.0
 
         background_val = min(background_val, 1.0)  # Cap background value to 1.0
         
