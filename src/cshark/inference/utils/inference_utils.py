@@ -147,13 +147,11 @@ def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor
         padding = min(int(peak_width * padding_factor), 5)
         
         # Calculate regions before and after peak for background
-        # Clamp so the slices never go negative: a negative pre_end would wrap
-        # around (Python indexing from the end) and pick up the peak's own signal.
         pre_start = max(0, peak_start - padding)
-        pre_end = max(pre_start, peak_start - peak_width)
-
+        pre_end = peak_start - peak_width
+        
         post_start = peak_end + peak_width
-        post_end = max(post_start, min(array_length, peak_end + padding))
+        post_end = min(array_length, peak_end + padding)
         
         # Calculate mean of surrounding regions as background
         pre_values = signal_array[pre_start:pre_end]
