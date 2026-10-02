@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-def coarsen_to_uniform_bins_vectorized(input_cool_path, output_cool_path, uniform_binsize):
+def coarsen_to_uniform_bins_vectorized(input_cool_path, output_cool_path, uniform_binsize, id_offset=1):
     """
     Coarsens a cooler file with non-uniform bins to a new cooler file with uniform bins,
     using vectorized operations and chunked processing for maximum efficiency.
@@ -15,6 +15,9 @@ def coarsen_to_uniform_bins_vectorized(input_cool_path, output_cool_path, unifor
         output_cool_path (str): Path to save the output cooler file with uniform bins.
         uniform_binsize (int): The desired uniform bin size in base pairs for the output cooler.
         n_workers (int): Number of worker processes to use for parallel processing.
+        id_offset (int): Pixel bin ID minus bins-table row of the same anchor.
+            1 for DeepLoop coolers from convert_to_cooler.py (pixel IDs start at 1; default),
+            0 for ICE coolers from 1.anchor_to_cool.py (pixel IDs are the bins-table rows).
     """
 
     c = cooler.Cooler(input_cool_path)
@@ -49,8 +52,8 @@ def coarsen_to_uniform_bins_vectorized(input_cool_path, output_cool_path, unifor
             print(new_chr_bins)
 
             # Vectorized bin mapping: Find indices of new bins for bin1_ids and bin2_ids
-            new_bin1_ids_chunk = np.searchsorted(new_chr_bins['mid'].values, chr_bins.loc[pixels['bin1_id'] - 1]['mid'].values, side='right')
-            new_bin2_ids_chunk = np.searchsorted(new_chr_bins['mid'].values, chr_bins.loc[pixels['bin2_id'] - 1]['mid'].values, side='right')
+            new_bin1_ids_chunk = np.searchsorted(new_chr_bins['mid'].values, chr_bins.loc[pixels['bin1_id'] - id_offset]['mid'].values, side='right')
+            new_bin2_ids_chunk = np.searchsorted(new_chr_bins['mid'].values, chr_bins.loc[pixels['bin2_id'] - id_offset]['mid'].values, side='right')
 
             # Create DataFrame for the new pixels chunk (within this chromosome)
             chunk_result = pd.DataFrame({
@@ -100,5 +103,6 @@ if __name__ == "__main__":
     input_cooler_file = sys.argv[1] # Replace with your input cooler file path
     output_cooler_file = sys.argv[2] # Replace with your desired output cooler file path
     uniform_binsize_bp = int(sys.argv[3])  # 10kb
+    id_offset = int(sys.argv[4]) if len(sys.argv) > 4 else 1  # 1: DeepLoop cooler (default), 0: ICE cooler
 
-    coarsen_to_uniform_bins_vectorized(input_cooler_file, output_cooler_file, uniform_binsize_bp)
+    coarsen_to_uniform_bins_vectorized(input_cooler_file, output_cooler_file, uniform_binsize_bp, id_offset)
