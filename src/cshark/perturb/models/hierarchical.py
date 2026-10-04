@@ -7,7 +7,9 @@ Two verbatim-extracted blocks from the original ``single_deletion``:
   channel, and write the diagnostic bigwigs (perturb.py ~977-1019).
 
 Both return the (possibly reassigned) ``other_regions``; ``input_track_names`` /
-``input_track_paths`` are mutated in place. Logic is byte-identical to the original.
+``input_track_paths`` are mutated in place. Logic is byte-identical to the original,
+except that ``apply_rad21_update`` keeps the user-edited rad21 inside
+``rad21_override_mask`` (the user's own ``--ko rad21`` windows).
 """
 import os
 import numpy as np
@@ -67,12 +69,14 @@ def prepare_rad21_input(atac_region, ctcf_region, hierarchical_rad21_model, inpu
     return other_regions
 
 
-def apply_rad21_update(atac_region, atac_region_wt, chr_name, ctcf_region, ctcf_region_wt, hierarchical_delta_cap, hierarchical_delta_mode, hierarchical_rad21_model, input_track_names, input_track_paths, other_regions, other_regions_wt, seq_region, seq_region_wt, start, window):
+def apply_rad21_update(atac_region, atac_region_wt, chr_name, ctcf_region, ctcf_region_wt, hierarchical_delta_cap, hierarchical_delta_mode, hierarchical_rad21_model, input_track_names, input_track_paths, other_regions, other_regions_wt, seq_region, seq_region_wt, start, window, rad21_override_mask=None):
     if hierarchical_rad21_model is not None and 'rad21' in input_track_names:
         other_offset = sum(1 for t in ['ctcf', 'atac'] if t in input_track_names)
         other_track_names = input_track_names[other_offset:]
         rad21_other_idx = other_track_names.index('rad21')
         experimental_rad21_log1p = other_regions_wt[rad21_other_idx].copy()
+        # rad21 as left by the user's --ko edits (the update below overwrites it)
+        rad21_user_log1p = other_regions[rad21_other_idx].copy()
 
         # rad21_idx is rad21's position among ALL non-seq input channels
         # (ctcf=0, atac=1, then others in order) — this is what predict_rad21 uses
@@ -97,6 +101,16 @@ def apply_rad21_update(atac_region, atac_region_wt, chr_name, ctcf_region, ctcf_
             cap=hierarchical_delta_cap,
             window=window,
         )
+
+        # Inside the user's own rad21 KO window(s) the user's rad21 wins over the
+        # hierarchical update, whatever the other markers did to it. Done before the
+        # bigwigs are written so 'RAD21 Perturbed (model input)' shows the real input.
+        if rad21_override_mask is not None:
+            rad21_final = other_regions[rad21_other_idx]
+            rad21_final[rad21_override_mask] = rad21_user_log1p[rad21_override_mask]
+            hierarchical_results['perturbed_rad21'] = rad21_final
+            print(f'[hierarchical] --ko rad21 detected: kept the KO rad21 track on '
+                  f'{int(rad21_override_mask.sum())} bp; hierarchical update used elsewhere.')
 
         write_tmp_hierarchical_rad21_bigwig(
             rad21_bw_path,

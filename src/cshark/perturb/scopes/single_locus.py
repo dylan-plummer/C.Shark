@@ -286,10 +286,19 @@ def run_single_locus(cfg):
                 ko_mode=[knockout_mode], peak_height=ko_height,
                 left_del_pad=left_del_pad, right_del_pad=right_del_pad)
 
+    # Windows where rad21 itself was perturbed (--ko rad21 ...): there the user's
+    # rad21 is kept instead of the hierarchical update below.
+    rad21_override_mask = None
+    for d_start, d_width, d_type, *_ in pending_track_perturbations:
+        if d_type == 'rad21':
+            if rad21_override_mask is None:
+                rad21_override_mask = np.zeros(window, dtype=bool)
+            rad21_override_mask[max(0, d_start - start):max(0, d_start - start + d_width)] = True
+
     # Hierarchical RAD21 update: predict delta and apply to experimental track.
     # rad21 is always in input_track_names here (inserted during track loading if absent).
     other_regions = apply_rad21_update(
-        atac_region=atac_region, atac_region_wt=atac_region_wt, chr_name=chr_name, ctcf_region=ctcf_region, ctcf_region_wt=ctcf_region_wt, hierarchical_delta_cap=hierarchical_delta_cap, hierarchical_delta_mode=hierarchical_delta_mode, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, other_regions_wt=other_regions_wt, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window)
+        atac_region=atac_region, atac_region_wt=atac_region_wt, chr_name=chr_name, ctcf_region=ctcf_region, ctcf_region_wt=ctcf_region_wt, hierarchical_delta_cap=hierarchical_delta_cap, hierarchical_delta_mode=hierarchical_delta_mode, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, other_regions_wt=other_regions_wt, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window, rad21_override_mask=rad21_override_mask)
 
     rewrite_enformer_ko_tracks(
         atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, chr_name=chr_name, ctcf_region=ctcf_region, enformer_perturbed_track_names=enformer_perturbed_track_names, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, start=start, window=window, tool=ko_tool)

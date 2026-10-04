@@ -136,6 +136,9 @@ def run_full_chrom(cfg):
                 hierarchical_rad21_model = None
         else:
             rad21_other_idx_hier = other_track_names_hier.index('rad21')
+        if use_hierarchical and 'rad21' in ko_data:
+            print('[hierarchical] --ko rad21 detected: the KO rad21 track replaces the '
+                  'hierarchical update in every window.')
 
     # --- --alt-fasta whole-window ALT sequence (seq / enformer_seq / alphagenome_seq) ---
     # Full-chrom counterpart of the single-locus path: replace every window's
@@ -319,6 +322,7 @@ def run_full_chrom(cfg):
             other_regions_wt = [r.copy() for r in other_regions] if other_regions is not None else None
             experimental_rad21 = other_regions[rad21_other_idx_hier].copy()
 
+        rad21_user_ko = None   # rad21 after the user's --ko edits, when rad21 is KO'd
         enf_res = None
         wt_set = alt_set = None
         if alt_seq_active:
@@ -391,6 +395,8 @@ def run_full_chrom(cfg):
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels,
                 channel_offset=channel_offset, ko_mode=ko_mode,
                 peak_height=args.peak_height)
+            if use_hierarchical and 'rad21' in ko_data and other_regions is not None:
+                rad21_user_ko = other_regions[rad21_other_idx_hier].copy()
 
         if redistribute_alleles:
             # RAD21 is split per allele from the hierarchical model's own per-allele
@@ -418,6 +424,11 @@ def run_full_chrom(cfg):
                 cap=args.hierarchical_delta_cap,
                 window=window,
             )
+            # The full-chrom KO spans the whole window, so a directly KO'd rad21
+            # replaces the hierarchical one everywhere (other markers' effect ignored).
+            if rad21_user_ko is not None:
+                other_regions[rad21_other_idx_hier] = rad21_user_ko
+                hierarchical_results_window['perturbed_rad21'] = rad21_user_ko
         else:
             hierarchical_results_window = None
 
