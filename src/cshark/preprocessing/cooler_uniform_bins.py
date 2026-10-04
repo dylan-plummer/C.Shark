@@ -99,10 +99,23 @@ def coarsen_to_uniform_bins_vectorized(input_cool_path, output_cool_path, unifor
                    chunksize=1000000)
 
 
+SOURCE_ID_OFFSET = {"deeploop": 1, "ice": 0}  # id_offset of coolers from convert_to_cooler.py / 1.anchor_to_cool.py
+
+
+def parse_source(arg):
+    """4th CLI argument -> id_offset: 'deeploop' or 'ice' (case-insensitive); 1 or 0 also accepted."""
+    key = arg.lower()
+    if key in SOURCE_ID_OFFSET:
+        return SOURCE_ID_OFFSET[key]
+    if key in ("0", "1"):
+        return int(key)
+    raise SystemExit(f"cooler source must be one of {list(SOURCE_ID_OFFSET)} (or 1/0), got {arg!r}")
+
+
 if __name__ == "__main__":
     input_cooler_file = sys.argv[1] # Replace with your input cooler file path
     output_cooler_file = sys.argv[2] # Replace with your desired output cooler file path
     uniform_binsize_bp = int(sys.argv[3])  # 10kb
-    id_offset = int(sys.argv[4]) if len(sys.argv) > 4 else 1  # 1: DeepLoop cooler (default), 0: ICE cooler
+    id_offset = parse_source(sys.argv[4]) if len(sys.argv) > 4 else 1  # deeploop (default) or ice
 
     coarsen_to_uniform_bins_vectorized(input_cooler_file, output_cooler_file, uniform_binsize_bp, id_offset)
