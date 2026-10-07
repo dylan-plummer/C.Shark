@@ -7,6 +7,11 @@ Faithful transcription of the original ``single_deletion`` (perturb.py lines
     from ``cfg``;
   * ``deletion_with_padding`` / ``seq_perturb`` / ``reverse_complement`` resolve
     to the new package's (identically-named, verbatim) implementations.
+  * deletions (``del`` / ``deletion`` / ``delete``) are no longer excised one by one
+    inside the track-KO loop: ``plan_perturbations`` only collects them, and
+    ``operators.deletion.apply_deletions`` removes all of them at once right before
+    the KO prediction, which is then mapped back to WT coordinates. Runs without a
+    deletion follow exactly the original code path.
 
 This is intentionally a minimal first refactor step (file split + operators/
 config from the new package) so that its output matches the old script
@@ -50,6 +55,10 @@ from cshark.perturb.models.hierarchical import prepare_rad21_input, apply_rad21_
 from cshark.perturb.models.enformer import apply_enformer_seq_ko, rewrite_enformer_ko_tracks
 from cshark.perturb.models.alphagenome import apply_alphagenome_seq_ko
 from cshark.perturb.operators.planning import plan_perturbations
+from cshark.perturb.operators.base import DELETION_MODES
+from cshark.perturb.operators.deletion import (
+    apply_deletions, align_matrix_to_wt, align_1d_to_wt, write_deletion_ko_bigwigs,
+)
 from cshark.perturb.seq_source import load_alt_fasta_region, align_alt_to_wt
 
 # module-level plotting constants (verbatim from the original perturb.py)
@@ -114,6 +123,16 @@ def run_single_locus(cfg):
     image_scale = cfg.mat_size
     resolution_1d = cfg.resolution_1d
     whitespace = cfg.whitespace
+    # Deletions are applied once, after every other perturbation (operators.deletion).
+    # When every perturbation is a deletion, the hierarchical RAD21 model has nothing
+    # to propagate, so it is not loaded at all.
+    if hierarchical_model_path is not None and ko_mode and all(m in DELETION_MODES for m in ko_mode):
+        print('[deletion] All perturbations are deletions; skipping the hierarchical RAD21 model '
+              '(--hierarchical-model is ignored).')
+        hierarchical_model_path = None
+    if whitespace:
+        print('Note: --whitespace is deprecated and has no effect; deletion results are always '
+              'aligned back to WT coordinates.')
     # --- verbatim body of the original single_deletion follows ---
     os.makedirs(output_path, exist_ok=True)
     if not outname.endswith('_') and outname != '':
@@ -213,7 +232,7 @@ def run_single_locus(cfg):
         elif ko != 'seq':
             print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
 
-    seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, alphagenome_seq_active, hierarchical_active = plan_perturbations(
+    seq_region, deletion_widths, pending_track_perturbations, pending_deletions, enformer_seq_active, alphagenome_seq_active, hierarchical_active = plan_perturbations(
         alt_bp=alt_bp, atac_path=atac_path, bigwig_log_transform=bigwig_log_transform, channel_offset=channel_offset, chr_name=chr_name, ctcf_path=ctcf_path, deletion_starts=deletion_starts, deletion_widths=deletion_widths, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, ko_data_types=ko_data_types, ko_mode=ko_mode, other_feats=other_feats, peak_height=peak_height, seq2_path=seq2_path, seq_path=seq_path, seq_region=seq_region, start=start, window=window)
 
     # --- whole-window ALT sequence from --alt-fasta -------------------------
@@ -303,33 +322,36 @@ def run_single_locus(cfg):
     rewrite_enformer_ko_tracks(
         atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, chr_name=chr_name, ctcf_region=ctcf_region, enformer_perturbed_track_names=enformer_perturbed_track_names, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, start=start, window=window, tool=ko_tool)
 
+    # Structural deletions last: every edit above was made in WT coordinates.
+    deletion = None
+    if pending_deletions:
+        seq_region, ctcf_region, atac_region, other_regions, deletion = apply_deletions(
+            chr_name, start, window, pending_deletions, seq_region, ctcf_region, atac_region,
+            other_regions, seq_path, ctcf_path, atac_path, other_feats=other_feats,
+            seq2_path=seq2_path, bigwig_log=bigwig_log_transform)
+
     # KO prediction
     pred_output = model.predict_arrays(seq_region, ctcf_region, atac_region,
                                        other_regions, input_track_names[2:])
     pred = pred_output['hic']
+    pred_1d = pred_output['1d']
+
+    deleted_bins = None
+    if deletion is not None:
+        # The edited window is shifted relative to WT: keep the raw prediction, then map
+        # it back onto WT bins (fully deleted bins are NaN, i.e. blank).
+        np.savez('tmp/deletion_ko_frame.npz', pred=pred,
+                 pred_1d=pred_1d if pred_1d is not None else np.empty(0),
+                 coord_map=deletion.coord_map, intervals=np.array(deletion.intervals))
+        pred = align_matrix_to_wt(pred, deletion.coord_map, start, window)
+        if pred_1d is not None:
+            pred_1d = align_1d_to_wt(pred_1d, deletion.coord_map, start, window)
+        deleted_bins = np.isnan(pred)
 
     if not no_plots:
         plot_prediction_matrix(pred, os.path.join(output_path, f'{outname}{celltype}_{chr_name}_{start}_pred.png'), 'Prediction after perturbation')
-    pred_1d = pred_output['1d']
-
-    if 'del' in ko_mode or 'deletion' in ko_mode or 'delete' in ko_mode and whitespace:
-        deletion_start = deletion_starts[0]
-        left_pad_px = deletion_widths[0] // 2 // res
-        right_pad_px = (deletion_widths[0] - deletion_widths[0] // 2) // res
-        del_start_px = (deletion_start - start) // res
-        pred = np.concatenate((
-            pred[:, :del_start_px],
-            np.zeros((pred.shape[0], deletion_widths[0] // res)),
-            pred[:, del_start_px:]
-        ), axis=1)
-        pred = pred[:, left_pad_px:pred.shape[1]-right_pad_px]
-        if pred_1d is not None:
-            pred_1d = np.concatenate((
-                pred_1d[:del_start_px],
-                np.zeros((deletion_widths[0] // res, pred_1d.shape[1])),
-                pred_1d[del_start_px:]
-            ), axis=0)
-            pred_1d = pred_1d[left_pad_px:pred_1d.shape[0]-right_pad_px]
+    if deleted_bins is not None:
+        pred = np.where(deleted_bins, 0.0, pred)   # stored as blank (0) in coolers / arcs
 
     # Write 1D track prediction bigwigs (pred_1d is already in linear space from prediction())
     plot_pred_1d_tracks(
@@ -359,6 +381,8 @@ def run_single_locus(cfg):
         write_tmp_cooler(mat, chr_name, start, window=(int(window * 2)), out_file='tmp/tmp_true.cool', res=res)
 
     diff = pred - pred_before
+    if deleted_bins is not None:
+        diff[deleted_bins] = 0.0
     write_tmp_cooler(diff, chr_name, start, out_file='tmp/tmp_diff.cool', res=res)
     if deletion_starts is not None and deletion_widths is not None:
         one_perturb_already_done = {}
@@ -373,6 +397,14 @@ def run_single_locus(cfg):
                 one_perturb_already_done[ko_data_type] = True
             elif ko_data_type != 'seq':
                 print(f'Warning: {ko_data_type} not found in input track names. Skipping KO for {ko_data_type}.')
+
+    plot_ko_data = ko_data
+    if deletion is not None:
+        # KO panel for every input track, showing the actual (deleted) model input.
+        write_deletion_ko_bigwigs(
+            deletion, input_track_names, input_track_paths, ctcf_region, atac_region, other_regions,
+            chr_name, start, window, bigwig_log=bigwig_log_transform, hierarchical_active=hierarchical_active)
+        plot_ko_data = ko_data + [t for t in input_track_names if t not in ko_data]
 
     write_regions(deletion_starts, deletion_widths, chr_name, 'tmp/regions.bed')
 
@@ -390,7 +422,7 @@ def run_single_locus(cfg):
     build_track_inis(
         assembly=assembly, celltype=celltype, chr_name=chr_name, ctcf_motif_p=ctcf_motif_p,
         ctcf_path=ctcf_path, enformer_perturbed_track_names=enformer_perturbed_track_names, enformer_seq_active=seq_model_active, hierarchical_active=hierarchical_active,
-        input_track_names=input_track_names, input_track_paths=input_track_paths, ko_data=ko_data, max_val_diff=max_val_diff,
+        input_track_names=input_track_names, input_track_paths=input_track_paths, ko_data=plot_ko_data, max_val_diff=max_val_diff,
         max_val_pred=max_val_pred, max_val_true=max_val_true, min_val_diff=min_val_diff, min_val_pred=min_val_pred,
         min_val_true=min_val_true, plot_bigwig_q=plot_bigwig_q, plot_diff=plot_diff, plot_ground_truth=plot_ground_truth,
         plot_pred_bigwigs=plot_pred_bigwigs, plot_pred_log2fc=plot_pred_log2fc, plot_track_names=plot_track_names, plot_track_paths=plot_track_paths,

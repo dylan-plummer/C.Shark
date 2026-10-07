@@ -4,12 +4,13 @@
 ``single_deletion`` (perturb.py ~818-923): it applies seq / enformer_seq /
 alphagenome_seq base substitutions to the sequence, flags the active
 sequence-model mode, and collects the pending
-track perturbations (with del-padding loaded). Returns the (possibly reassigned)
-seq_region and deletion_widths plus the collected plan.
+track perturbations. Deletions (``del`` / ``deletion`` / ``delete``) are only
+collected into ``pending_deletions``; they are applied once, after every other
+perturbation, by ``operators.deletion.apply_deletions``. Returns the (possibly
+reassigned) seq_region and deletion_widths plus the collected plan.
 """
 import numpy as np
 
-import cshark.inference.utils.inference_utils as infer
 from cshark.perturb.dna import reverse_complement
 from cshark.perturb.operators.seq_ops import seq_perturb
 
@@ -81,6 +82,7 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
     alphagenome_seq_active = False
     hierarchical_active = hierarchical_rad21_model is not None
     pending_track_perturbations = []
+    pending_deletions = []
 
     if deletion_starts is not None and deletion_widths is not None:
         for ko_idx, (deletion_start, deletion_width, ko_data_type, knockout_mode, ko_height) in enumerate(
@@ -134,25 +136,19 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
                             seq_region = seq_perturb(abs_pos, base, seq_region)
                 continue
 
+            if knockout_mode in ('del', 'deletion', 'delete'):
+                # WT coordinates; excised together after all other perturbations.
+                pending_deletions.append((deletion_start, deletion_width))
+                continue
+
             if ko_data_type in input_track_names:
                 ko_channel = input_track_names.index(ko_data_type)
             else:
                 ko_channel = -1
             left_del_pad = None
             right_del_pad = None
-            if knockout_mode in ('del', 'deletion', 'delete'):
-                left_pad_bp = deletion_width // 2
-                right_pad_bp = deletion_width - left_pad_bp
-                left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other = infer.load_region(chr_name,
-                    start - left_pad_bp, seq_path, ctcf_path, atac_path, other_feats,
-                    seq2_path=seq2_path, window=left_pad_bp, bigwig_log=bigwig_log_transform)
-                left_del_pad = (left_pad_seq, left_pad_ctcf, left_pad_atac, left_pad_other)
-                right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other = infer.load_region(chr_name,
-                    start + window + right_pad_bp, seq_path, ctcf_path, atac_path, other_feats,
-                    seq2_path=seq2_path, window=right_pad_bp, bigwig_log=bigwig_log_transform)
-                right_del_pad = (right_pad_seq, right_pad_ctcf, right_pad_atac, right_pad_other)
             pending_track_perturbations.append((
                 deletion_start, deletion_width, ko_data_type, ko_channel,
                 channel_offset, knockout_mode, ko_height, left_del_pad, right_del_pad,
             ))
-    return seq_region, deletion_widths, pending_track_perturbations, enformer_seq_active, alphagenome_seq_active, hierarchical_active
+    return seq_region, deletion_widths, pending_track_perturbations, pending_deletions, enformer_seq_active, alphagenome_seq_active, hierarchical_active

@@ -86,11 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help='name of data modalities to knockout')
     parser.add_argument('--ko-mode', dest='ko_mode', type=str, nargs='+', default=['zero'], required=False,
                         help='how we simulate the knockout (zero, mean, knockout, shuffle, knockout_shuffle, '
-                             'reverse, reverse_motif, seq, enformer_seq, alphagenome_seq, del)')
+                             'reverse, reverse_motif, seq, enformer_seq, alphagenome_seq, del/deletion/delete). '
+                             'Deletions must use --ko seq: they remove the DNA together with all tracks, '
+                             'several deletions (and other perturbations) can be combined, and results are '
+                             'mapped back to WT coordinates (single-locus mode only).')
     parser.add_argument('--ko-start', dest='deletion_start', nargs='+', type=int, required=False,
-                        help='Starting points for deletion.')
+                        help='Start of each perturbation, in WT (reference) coordinates.')
     parser.add_argument('--ko-width', dest='deletion_width', nargs='+', type=int, required=False,
-                        help='Width for deletion.')
+                        help='Width (bp) of each perturbation.')
     parser.add_argument('--peak-height', dest='peak_height', nargs='+', type=float, default=2.0,
                         help='Peak height threshold for knockout.')
     parser.add_argument('--alt', dest='alt_bp', type=str, nargs='+', required=False,
@@ -107,7 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--hide-line', dest='hide_deletion_line', action='store_true',
                         help='Remove the line showing deletion site')
     parser.add_argument('--whitespace', dest='whitespace', action='store_true',
-                        help='Add whitespace around the deletion site for better visualization')
+                        help='Deprecated, no effect: deletion results are always aligned back to WT '
+                             'coordinates, with fully deleted bins left blank.')
     parser.add_argument('--region', '--locus', dest='region', required=False,
                         help='specific region to visualize, otherwise full 2Mb window')
 
@@ -221,6 +225,10 @@ def main():
     resolve_device(args.device)          # MUST precede the heavy (torch) imports below
     os.makedirs('tmp', exist_ok=True)
     cfg = PerturbConfig.from_args(args)
+
+    # Reject unsupported deletion requests before any model is loaded.
+    from cshark.perturb.operators.deletion import validate_deletion_request
+    validate_deletion_request(cfg)
 
     # Deferred imports: these pull in torch via cshark.inference.utils.
     if cfg.allele_haplotype:
