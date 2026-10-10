@@ -25,9 +25,16 @@ class GenomeDataset(Dataset):
                        hic_log_transform=True,
                        use_aug = True,
                        ctcf_ko=False,
-                       conditioning_vec=None):
+                       conditioning_vec=None,
+                       celltype_index=None):
         print('CTCF KO:', ctcf_ko)
         self.data_root = celltype_root
+        # Index of this celltype within the trainer's --celltypes list.  When set,
+        # every sample carries it as the LAST element of the returned tuple so a
+        # model can route the sample to celltype-specific parameters after the
+        # per-celltype datasets have been ConcatDataset'ed together.  Left as None
+        # (the default) the tuple is unchanged, so existing trainers are unaffected.
+        self.celltype_index = celltype_index
         self.include_sequence = include_sequence
         self.include_genomic_features = include_genomic_features
         self.predict_hic = predict_hic
@@ -123,7 +130,8 @@ class GenomeDataset(Dataset):
             ]
         if self.conditioning_vec is not None:
             outputs.append(self.conditioning_vec)
-        
+        if self.celltype_index is not None:
+            outputs.append(self.celltype_index)
 
         return tuple(outputs)
 
@@ -140,7 +148,7 @@ class GenomeDataset(Dataset):
         for chr_name in chr_names:
             omit_regions = self.centrotelo_dict[chr_name]
             chr_data_dict[chr_name] = ChromosomeDataset(self.data_root, chr_name, omit_regions, 
-                                                        genomic_features, target_features, predict_hic=True, 
+                                                        genomic_features, target_features, predict_hic=self.predict_hic, 
                                                         predict_1d=self.predict_1d, 
                                                         celltype_root2=self.data_root.replace(self.genome_assembly, self.genome_assembly2) if self.genome_assembly2 else None,
                                                         alt_assembly=self.alt_assembly,

@@ -55,6 +55,7 @@ class VizCallback(Callback):
         self.h3k4me1 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k4me1.bw" for celltype in celltypes}
         self.h3k27me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k27me3.bw" for celltype in celltypes}
         self.rad21 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/rad21.bw" for celltype in celltypes}
+        self.h3k9me3 = {celltype: f"{self.data_root}/{self.assembly}/{celltype}/genomic_features/h3k9me3.bw" for celltype in celltypes}
 
     def on_train_start(self, trainer, pl_module):
         print("Saving ground truth loci for reference")
@@ -134,6 +135,8 @@ class VizCallback(Callback):
                             other_paths.append(self.h3k27me3[celltype])
                         elif feature == 'rad21':
                             other_paths.append(self.rad21[celltype])
+                        elif feature == 'h3k9me3':
+                            other_paths.append(self.h3k9me3[celltype])
                     #other_paths = [self.h3k27me3[celltype]]
                     seq_region, ctcf_region, atac_region, other_regions = infer.load_region(chr_name, 
                         start, self.seq, self.ctcf[celltype], self.atac[celltype], other_paths, seq2_path=self.seq2,
@@ -175,7 +178,8 @@ class VizCallback(Callback):
                         colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
                         for i, pred_1d in enumerate(pred_1d_tracks):
                             track_name = pl_module.hparams.output_features[i]
-                            pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
+                            if pl_module.hparams.bigwig_log_transform:
+                                pred_1d = np.exp(pred_1d) - 1  # inverse log transformation
                             axs[i].plot(pred_1d, color=colors[i % len(colors)])
                             axs[i].fill_between(range(len(pred_1d)), pred_1d, color=colors[i % len(colors)], alpha=0.5)
                             axs[i].set_title(track_name)
@@ -356,7 +360,7 @@ def init_training(args):
     valloader = pl_module.get_dataloader(args, 'val')
     testloader = pl_module.get_dataloader(args, 'test')
 
-    for test_batch_i in range(1):
+    for test_batch_i in range(5):
         # load a batch and visualize it for debugging
         batch = next(iter(trainloader))
         inputs, mat, target_1d_tracks, _ = pl_module.proc_batch(batch)
@@ -375,7 +379,10 @@ def init_training(args):
                 axs = [axs]
             
             for i in range(genomic_features.shape[1]):
-                track = np.exp(genomic_features[:, i]) - 1  # inverse log transformation
+                if args.bigwig_log_transform:
+                    track = np.exp(genomic_features[:, i]) - 1  # inverse log transformation
+                else:
+                    track = genomic_features[:, i]
                 bin_size = int(len(track) / pl_module.hparams.target_1d_size)
                 track = track.reshape(-1, bin_size).mean(axis=1)
                 axs[i].plot(track, color=colors[i % len(colors)])
@@ -407,6 +414,7 @@ def init_training(args):
                     track = target_1d_tracks[:, i]
                 axs[i].plot(track, color=colors[i % len(colors)])
                 axs[i].fill_between(range(len(target_1d_tracks)), track, color=colors[i % len(colors)], alpha=0.5)
+                #axs[i].set_ylim(0, 11)
             plt.title('Target 1D Tracks')
             plt.savefig(f'target_1d_tracks.png_{test_batch_i}.png')
             plt.close()
@@ -452,7 +460,8 @@ class TrainModule(pl.LightningModule):
             target_1d_length=args.target_1d_size,
             recon_1d=args.recon_1d,
             seq_filter_size=args.seq_filter_size,
-            activation_1d='softplus' if not self.hparams.bigwig_log_transform else None
+            #activation_1d='softplus' if not self.hparams.bigwig_log_transform else None
+            activation_1d=None
             # Add other necessary model args from hparams if they exist
         )
         if args.model_path is not None:
@@ -612,8 +621,8 @@ class TrainModule(pl.LightningModule):
                                      lr = 2e-4,
                                      weight_decay = 1e-6)
 
-        import pl_bolts
-        scheduler = pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
+        from cshark.training.lr_scheduler import LinearWarmupCosineAnnealingLR
+        scheduler = LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
         scheduler.step()
         scheduler_config = {
             'scheduler': scheduler,
@@ -637,12 +646,12 @@ class TrainModule(pl.LightningModule):
         genomic_features = {}
         for feature in args.input_features:
             genomic_features[feature] = {'file_name' : f'{feature}.bw',
-                                         'norm' : 'log' }
+                                         'norm' : 'log' if args.bigwig_log_transform else None }
         target_features = {}
         if args.output_features is not None:
             for feature in args.output_features:
                 target_features[feature] = {'file_name' : f'{feature}.bw',
-                                            'norm' : 'log' }
+                                            'norm' : 'log' if args.bigwig_log_transform else None }
         if args.alt_assemblies is not None:
             alt_assemblies = args.alt_assemblies
             if len(alt_assemblies) != len(args.dataset_celltypes):

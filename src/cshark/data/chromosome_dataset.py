@@ -71,7 +71,14 @@ class ChromosomeDataset(Dataset):
             self.seq2 = None
         self.genomic_features = feature_list
         self.feature_strand_pairs = self.build_strand_pair_map(self.genomic_features)
-        self.mat = data_feature.HiCFeature(path = f'{celltype_root}/hic_matrix/{chr_name}.npz')
+        # Hi-C is only opened when it is actually used.  With predict_hic=False
+        # (the trainers' --no-hic) the celltype directory does not need to contain
+        # a hic_matrix/ at all -- loading it unconditionally made --no-hic crash on
+        # 1D-only celltypes.
+        if self.predict_hic:
+            self.mat = data_feature.HiCFeature(path = f'{celltype_root}/hic_matrix/{chr_name}.npz')
+        else:
+            self.mat = None
 
         if self.predict_1d:
             self.target_tracks = target_track_list # Target 1D features
@@ -190,7 +197,7 @@ class ChromosomeDataset(Dataset):
             seq_r = np.flip(seq, 0).copy() # n x 5 shape
             features_r = [np.flip(item, 0).copy() for item in features] # n
             target_1d_tracks_r = [np.flip(item, 0).copy() for item in target_1d_tracks] # n
-            mat_r = np.flip(mat, [0, 1]).copy() # n x n
+            mat_r = np.flip(mat, [0, 1]).copy() if mat is not None else None # n x n
 
             features_r = self.swap_strand_specific_tracks(features_r, self.feature_strand_pairs)
             target_1d_tracks_r = self.swap_strand_specific_tracks(target_1d_tracks_r, self.target_track_strand_pairs)
@@ -228,11 +235,13 @@ class ChromosomeDataset(Dataset):
         
         # Features processing
         features = [item.get(self.chr_name, start, end) for item in self.genomic_features]
-        # Hi-C matrix processing
-        mat = self.mat.get(start, res=self.res)
-        mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
-        if self.hic_log_transform:
-            mat = np.log(mat + 1)
+        # Hi-C matrix processing (skipped entirely when predict_hic is False)
+        mat = None
+        if self.predict_hic:
+            mat = self.mat.get(start, res=self.res)
+            mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
+            if self.hic_log_transform:
+                mat = np.log(mat + 1)
         # Target 1D track processing
         loaded_paths = [item.path for item in self.genomic_features]
         target_1d_tracks_out = []
