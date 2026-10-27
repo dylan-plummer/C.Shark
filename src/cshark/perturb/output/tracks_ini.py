@@ -15,6 +15,7 @@ from importlib.resources import files
 
 from cshark.inference.utils.inference_utils import get_axis_range_from_bigwig as _raw_axis_range
 from cshark.inference.tracks_files import get_tracks
+from cshark.perturb.output.gene_track import apply_gene_priority
 
 
 def _round_half(x):
@@ -431,6 +432,12 @@ def run_pygenometracks(region, celltype, chr_name, deletion_starts, deletion_wid
     if not no_plots:
         try:
             region = region if region is not None else f"{chr_name}:{start}-{start + window}"
+
+            # Protein-coding genes first; other genes only fill the leftover gene rows.
+            for ini in ('tmp/tmp_tracks.ini', 'tmp/tmp_tracks_true.ini',
+                        'tmp/tmp_tracks_pred.ini', 'tmp/tmp_tracks_diff.ini'):
+                if os.path.exists(ini):
+                    apply_gene_priority(ini, region, plot_width, track_label_fraction)
 
             if fig_kind == 'snp':
                 tag_main, tag_pred, tag_true, tag_diff = (
