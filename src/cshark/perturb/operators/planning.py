@@ -11,14 +11,21 @@ reassigned) seq_region and deletion_widths plus the collected plan.
 """
 import numpy as np
 
-from cshark.perturb.dna import reverse_complement
+from cshark.perturb.dna import en_dict, reverse_complement
 from cshark.perturb.operators.seq_ops import seq_perturb
 
+# Substitutions up to this length go base-by-base through seq_perturb (which prints
+# each base's context); longer ones are written as one block with a one-line summary.
+PER_BASE_MAX_BP = 50
 
-def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, chr_name, ctcf_path, deletion_starts, deletion_widths, hierarchical_rad21_model, input_track_names, ko_data_types, ko_mode, other_feats, peak_height, seq2_path, seq_path, seq_region, start, window):
+
+def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, chr_name, ctcf_path, deletion_starts, deletion_widths, hierarchical_rad21_model, input_track_names, ko_data_types, ko_mode, other_feats, peak_height, seq2_path, seq_path, seq_region, start, window, seed=None):
     # Resolve --alt list
     alt_bp_list = alt_bp if alt_bp is not None else []
-    _alt_keywords = {'reverse', 'shuffle', 'random'}
+    _alt_keywords = {'reverse', 'shuffle', 'random', 'mask'}
+    # --seed: a dedicated RNG for the shuffle/random keywords only; without it the
+    # global numpy RNG is used as before.
+    rng = np.random.default_rng(seed) if seed is not None else np.random
     if deletion_starts is not None and deletion_widths is None:
         deletion_widths = []
         for i, ds in enumerate(deletion_starts):
@@ -55,27 +62,66 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
             )
 
     def _resolve_alt_string(raw_alt, rel_start, rel_end, current_seq_region, label):
+        """Return ``(alt_string, rel_start)``; keyword spans are clipped to the window."""
         idx_to_base = {0: 'a', 1: 't', 2: 'c', 3: 'g', 4: 'n'}
         raw_alt_lower = raw_alt.lower()
+        if raw_alt_lower not in _alt_keywords:
+            return raw_alt, rel_start
+        # A negative rel_start (e.g. --ko-start == --start, shifted by the 1-based -1)
+        # would make current_seq_region[rel_start:rel_end] an empty slice.
+        rel_start = max(rel_start, 0)
+        rel_end = min(rel_end, current_seq_region.shape[0])
+        if raw_alt_lower == 'mask':
+            print(f'[{label}] Masking {chr_name}:{start + rel_start}-{start + rel_end} with N')
+            return 'n' * max(0, rel_end - rel_start), rel_start
         if raw_alt_lower == 'reverse':
             rc = reverse_complement(current_seq_region[rel_start:rel_end, :])
             alt_string = ''.join(idx_to_base[row.argmax()] for row in rc)
             print(f'[{label}] Using reverse-complement of {chr_name}:{start + rel_start}-{start + rel_end}')
-            return alt_string
+            return alt_string, rel_start
         if raw_alt_lower == 'shuffle':
             sub = current_seq_region[rel_start:rel_end, :].copy()
             idxs = np.arange(sub.shape[0])
-            np.random.shuffle(idxs)
+            rng.shuffle(idxs)
             sub = sub[idxs, :]
             alt_string = ''.join(idx_to_base[row.argmax()] for row in sub)
             print(f'[{label}] Using shuffled bases of {chr_name}:{start + rel_start}-{start + rel_end}')
-            return alt_string
+            return alt_string, rel_start
         if raw_alt_lower == 'random':
             bases = 'acgt'
-            alt_string = ''.join(np.random.choice(list(bases)) for _ in range(rel_end - rel_start))
+            alt_string = ''.join(rng.choice(list(bases)) for _ in range(rel_end - rel_start))
             print(f'[{label}] Using random bases for {chr_name}:{start + rel_start}-{start + rel_end}')
-            return alt_string
-        return raw_alt
+            return alt_string, rel_start
+
+    def _substitute(seq_region, rel_start, alt_string, label):
+        """Write ``alt_string`` into every allele of ``seq_region`` from ``rel_start``."""
+        if len(alt_string) <= PER_BASE_MAX_BP:
+            print(f'[{label}] Substituting {len(alt_string)} base(s) at '
+                  f'{chr_name}:{start + rel_start} (rel {rel_start}): {alt_string.upper()}')
+            for bp_offset, base in enumerate(alt_string):
+                abs_pos = rel_start + bp_offset
+                if 0 <= abs_pos < seq_region.shape[0]:
+                    if seq2_path is not None:
+                        seq1 = seq_region[:, :seq_region.shape[1] // 2]
+                        seq2 = seq_region[:, seq_region.shape[1] // 2:]
+                        seq1 = seq_perturb(abs_pos, base, seq1)
+                        seq2 = seq_perturb(abs_pos, base, seq2)
+                        seq_region = np.concatenate((seq1, seq2), axis=1)
+                    else:
+                        seq_region = seq_perturb(abs_pos, base, seq_region)
+            return seq_region
+        lo = max(rel_start, 0)
+        hi = min(rel_start + len(alt_string), seq_region.shape[0])
+        print(f'[{label}] Substituting {len(alt_string)} bases as one block at '
+              f'{chr_name}:{start + lo}-{start + hi} (rel {lo}-{hi}): '
+              f'{alt_string[:PER_BASE_MAX_BP].upper()}...')
+        if lo >= hi:
+            return seq_region
+        idx = np.array([en_dict[b] for b in alt_string[lo - rel_start:hi - rel_start].lower()])
+        block = np.zeros((hi - lo, 5), dtype=seq_region.dtype)
+        block[np.arange(hi - lo), idx] = 1
+        seq_region[lo:hi, :] = np.tile(block, (1, seq_region.shape[1] // 5))
+        return seq_region
 
     # Apply perturbations
     enformer_seq_active = False
@@ -100,40 +146,16 @@ def plan_perturbations(alt_bp, atac_path, bigwig_log_transform, channel_offset, 
                     alphagenome_seq_active = True
                 rel_start = deletion_start - start
                 rel_end = rel_start + deletion_width
-                alt_string = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, label)
-                print(f'[{label}] Queued {len(alt_string)} base(s) at '
-                      f'{chr_name}:{deletion_start} (rel {rel_start}): {alt_string.upper()}')
-                for bp_offset, base in enumerate(alt_string):
-                    abs_pos = rel_start + bp_offset
-                    if 0 <= abs_pos < seq_region.shape[0]:
-                        if seq2_path is not None:
-                            seq1 = seq_region[:, :seq_region.shape[1] // 2]
-                            seq2 = seq_region[:, seq_region.shape[1] // 2:]
-                            seq1 = seq_perturb(abs_pos, base, seq1)
-                            seq2 = seq_perturb(abs_pos, base, seq2)
-                            seq_region = np.concatenate((seq1, seq2), axis=1)
-                        else:
-                            seq_region = seq_perturb(abs_pos, base, seq_region)
+                alt_string, rel_start = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, label)
+                seq_region = _substitute(seq_region, rel_start, alt_string, label)
                 continue
 
             if knockout_mode == 'seq':
                 deletion_start -= 1
                 rel_start = deletion_start - start
                 rel_end = rel_start + deletion_width
-                alt_string = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, 'seq')
-                print(f'[seq] Substituting {len(alt_string)} base(s) at '
-                      f'{chr_name}:{deletion_start} (rel {rel_start}): {alt_string.upper()}')
-                for bp_offset, base in enumerate(alt_string):
-                    abs_pos = rel_start + bp_offset
-                    if 0 <= abs_pos < seq_region.shape[0]:
-                        if seq2_path is not None:
-                            seq1 = seq_region[:, :seq_region.shape[1] // 2]
-                            seq2 = seq_region[:, seq_region.shape[1] // 2:]
-                            seq1 = seq_perturb(abs_pos, base, seq1)
-                            seq2 = seq_perturb(abs_pos, base, seq2)
-                            seq_region = np.concatenate((seq1, seq2), axis=1)
-                        else:
-                            seq_region = seq_perturb(abs_pos, base, seq_region)
+                alt_string, rel_start = _resolve_alt_string(raw_alt, rel_start, rel_end, seq_region, 'seq')
+                seq_region = _substitute(seq_region, rel_start, alt_string, 'seq')
                 continue
 
             if knockout_mode in ('del', 'deletion', 'delete'):

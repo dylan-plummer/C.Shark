@@ -233,7 +233,7 @@ def run_single_locus(cfg):
             print(f'Warning: {ko} not found in input track names. Skipping KO for {ko}.')
 
     seq_region, deletion_widths, pending_track_perturbations, pending_deletions, enformer_seq_active, alphagenome_seq_active, hierarchical_active = plan_perturbations(
-        alt_bp=alt_bp, atac_path=atac_path, bigwig_log_transform=bigwig_log_transform, channel_offset=channel_offset, chr_name=chr_name, ctcf_path=ctcf_path, deletion_starts=deletion_starts, deletion_widths=deletion_widths, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, ko_data_types=ko_data_types, ko_mode=ko_mode, other_feats=other_feats, peak_height=peak_height, seq2_path=seq2_path, seq_path=seq_path, seq_region=seq_region, start=start, window=window)
+        alt_bp=alt_bp, atac_path=atac_path, bigwig_log_transform=bigwig_log_transform, channel_offset=channel_offset, chr_name=chr_name, ctcf_path=ctcf_path, deletion_starts=deletion_starts, deletion_widths=deletion_widths, hierarchical_rad21_model=hierarchical_rad21_model, input_track_names=input_track_names, ko_data_types=ko_data_types, ko_mode=ko_mode, other_feats=other_feats, peak_height=peak_height, seq2_path=seq2_path, seq_path=seq_path, seq_region=seq_region, start=start, window=window, seed=cfg.seed)
 
     # --- whole-window ALT sequence from --alt-fasta -------------------------
     # Treat every base in the alternate fasta directory as the ALT sequence for
@@ -282,7 +282,7 @@ def run_single_locus(cfg):
               'using the standard path.')
 
     ctcf_region, atac_region, other_regions, enformer_perturbed_track_names = apply_enformer_seq_ko(
-        assembly=assembly, atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, celltype=celltype, chr_name=chr_name, ctcf_region=ctcf_region, enformer_delta_cap=enformer_delta_cap, enformer_delta_mode=enformer_delta_mode, enformer_model_path=enformer_model_path, enformer_seq_active=enformer_seq_active, enformer_tracks=enformer_tracks, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window)
+        assembly=assembly, atac_region=atac_region, bigwig_log_transform=bigwig_log_transform, celltype=celltype, chr_name=chr_name, ctcf_region=ctcf_region, enformer_delta_cap=enformer_delta_cap, enformer_delta_mode=enformer_delta_mode, enformer_model_path=enformer_model_path, enformer_seq_active=enformer_seq_active, enformer_tracks=enformer_tracks, input_track_names=input_track_names, input_track_paths=input_track_paths, other_regions=other_regions, seq_region=seq_region, seq_region_wt=seq_region_wt, start=start, window=window, seq_path=seq_path)
 
     # AlphaGenome sequence-perturbation KO (drop-in counterpart of enformer_seq).
     # Writes the same tmp/{track}_enformer_ko.bw / _enformer_delta.bw plotting

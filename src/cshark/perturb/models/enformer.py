@@ -9,18 +9,34 @@
 
 Verbatim logic from the original single_deletion.
 """
+import os
+
 import numpy as np
 import pyBigWig
+
+from cshark.data.data_feature import SequenceFeature
 
 from cshark.inference.utils.inference_utils import write_tmp_pred_bigwig
 from cshark.inference.utils.enformer_utils import (
     load_enformer_pretrained, load_enformer_from_checkpoint, enformer_seq_knockout,
     write_tmp_enformer_ko_bigwig, write_tmp_enformer_delta_bigwig,
-    downsample_to_track_resolution,
+    downsample_to_track_resolution, ENFORMER_TRIM,
 )
 
 
-def apply_enformer_seq_ko(assembly, atac_region, bigwig_log_transform, celltype, chr_name, ctcf_region, enformer_delta_cap, enformer_delta_mode, enformer_model_path, enformer_seq_active, enformer_tracks, input_track_names, input_track_paths, other_regions, seq_region, seq_region_wt, start, window):
+def load_enformer_flanks(seq_path, chr_name, start, window, n_cols, flank=ENFORMER_TRIM):
+    """Real genome sequence just outside the window, so Enformer's edge bins see real
+    context instead of 0.25 padding. Clipped at chromosome ends (the rest stays padded).
+    Returns ``(left, right)`` one-hot arrays with ``n_cols`` columns."""
+    seq = SequenceFeature(path=os.path.join(seq_path, f'{chr_name}.fa.gz'))
+    chrom_len = len(seq)
+    left = seq.get(max(0, start - flank), start)
+    right = seq.get(start + window, min(chrom_len, start + window + flank))
+    n_alleles = max(1, n_cols // 5)
+    return np.tile(left, (1, n_alleles)), np.tile(right, (1, n_alleles))
+
+
+def apply_enformer_seq_ko(assembly, atac_region, bigwig_log_transform, celltype, chr_name, ctcf_region, enformer_delta_cap, enformer_delta_mode, enformer_model_path, enformer_seq_active, enformer_tracks, input_track_names, input_track_paths, other_regions, seq_region, seq_region_wt, start, window, seq_path=None):
     if enformer_seq_active:
         print('[enformer_seq] Loading Enformer model for cumulative sequence perturbation...')
         enf_target_tracks = enformer_tracks if enformer_tracks is not None else ['ctcf', 'atac', 'rad21']
@@ -32,12 +48,19 @@ def apply_enformer_seq_ko(assembly, atac_region, bigwig_log_transform, celltype,
             enformer_model, enformer_track_names, enf_device = load_enformer_pretrained(
                 target_tracks=enf_target_tracks, species=enf_species, celltype=celltype)
 
+        left_flank = right_flank = None
+        if seq_path is not None:
+            left_flank, right_flank = load_enformer_flanks(
+                seq_path, chr_name, start, window, seq_region_wt.shape[1])
+            print(f'[enformer_seq] Added real flanks for Enformer: {len(left_flank)} bp left, '
+                  f'{len(right_flank)} bp right (cropped back to the window after prediction).')
         ctcf_region, atac_region, other_regions, enformer_results = enformer_seq_knockout(
             seq_region_wt, ctcf_region, atac_region, other_regions,
             input_track_names, enformer_model, enformer_track_names,
             perturb_track_names=enf_target_tracks, alt_seq_region=seq_region,
             window=window, delta_mode=enformer_delta_mode, cap=enformer_delta_cap,
             track_is_log1p=bigwig_log_transform, device=enf_device,
+            left_flank=left_flank, right_flank=right_flank,
         )
         print(f'[enformer_seq] Delta applied: mode={enformer_delta_mode}, cap={enformer_delta_cap}.')
 

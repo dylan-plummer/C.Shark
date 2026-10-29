@@ -61,6 +61,7 @@ class PerturbConfig:
     maternal_seq_path: Optional[str] = None       # --maternal-seq (per-chrom .fa.gz dir for the maternal haplotype)
     paternal_seq_path: Optional[str] = None       # --paternal-seq
     alt_bp: Optional[List[str]] = None           # --alt
+    seed: Optional[int] = None                   # --seed (only for --alt shuffle / random)
     alt_fasta: Optional[str] = None              # --alt-fasta (per-chrom alternate .fa.gz dir)
     end_padding_type: str = 'zero'               # --padding
 

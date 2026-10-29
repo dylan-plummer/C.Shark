@@ -97,7 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--peak-height', dest='peak_height', nargs='+', type=float, default=2.0,
                         help='Peak height threshold for knockout.')
     parser.add_argument('--alt', dest='alt_bp', type=str, nargs='+', required=False,
-                        help='Alt base(s) for seq / enformer_seq / alphagenome_seq ko-modes.')
+                        help='Alt base(s) for seq / enformer_seq / alphagenome_seq ko-modes, or a keyword '
+                             'applied to the whole --ko-width span: shuffle, random, reverse, mask (all N).')
+    parser.add_argument('--seed', dest='seed', type=int, default=None,
+                        help='Random seed for --alt shuffle / random, so a scramble is reproducible.')
     parser.add_argument('--alt-fasta', dest='alt_fasta', type=str, default=None,
                         help='Directory of per-chromosome alternate .fa.gz files (same layout as '
                              '--seq). When set, the entire prediction window is replaced with the '

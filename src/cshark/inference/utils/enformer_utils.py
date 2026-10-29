@@ -699,7 +699,8 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
                           window=2097152,
                           delta_mode='multiplicative', cap=10.0,
                           track_is_log1p=True,
-                          device=None):
+                          device=None,
+                          left_flank=None, right_flank=None):
     """Perform the **enformer_seq** knockout.
 
     1. Build an ALT sequence from variant(s) or a replacement stretch.
@@ -740,6 +741,10 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
     track_is_log1p : bool
         Whether experimental tracks are in log1p space.
     device : torch.device or None
+    left_flank, right_flank : np.ndarray or None
+        Unperturbed genome sequence just outside the window. When given, it is
+        added to both the WT and ALT sequences for prediction and the results
+        are cropped back to the window, so edge bins see real context.
 
     Returns
     -------
@@ -777,10 +782,23 @@ def enformer_seq_knockout(seq_region, ctcf_region, atac_region, other_regions,
                   f"(length {len(alt_sequence)})")
 
     # --- 2. Compute Enformer delta ---
+    wt_seq = seq_region
+    n_left = 0
+    if left_flank is not None or right_flank is not None:
+        n_cols = seq_region.shape[1]
+        left = left_flank if left_flank is not None else np.zeros((0, n_cols))
+        right = right_flank if right_flank is not None else np.zeros((0, n_cols))
+        n_left = len(left)
+        wt_seq = np.concatenate([left, seq_region, right], axis=0)
+        alt_seq = np.concatenate([left, alt_seq, right], axis=0)
     fold_change, delta, fold_change_log1p, log1p_delta, wt_pred, alt_pred = compute_enformer_delta(
-        enformer_model, seq_region, alt_seq, num_tracks,
+        enformer_model, wt_seq, alt_seq, num_tracks,
         device=device, epsilon=1e-6,
     )
+    if wt_seq is not seq_region:
+        crop = slice(n_left, n_left + len(seq_region))
+        fold_change, delta, fold_change_log1p, log1p_delta, wt_pred, alt_pred = (
+            a[crop] for a in (fold_change, delta, fold_change_log1p, log1p_delta, wt_pred, alt_pred))
 
     # --- 3. Apply delta to each matching experimental track ---
     def _apply_to_track(track, enformer_track_idx):
