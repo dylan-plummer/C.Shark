@@ -102,6 +102,10 @@ def _spearman(a, b, max_points=200_000):
 class Layer4TrainModule(HierarchicalTrainModule):
     """Layers 1-3 exactly as before, plus layer 4 and its objectives."""
 
+    # _hierarchy_step does not mask absent tracks or Hi-C, so get_dataset must
+    # reject incomplete celltypes rather than feed it placeholders.
+    supports_missing_data = False
+
     def __init__(self, args):
         super().__init__(args)
         hp = self.hparams
