@@ -121,48 +121,123 @@ class EnformerHeadAdapterWrapper(torch.nn.Module):
     """
 
     def __init__(self, enformer, track_indices, species='human',
-                 load_pretrained=True):
+                 load_pretrained=True, num_head_groups=1, head_group_names=None):
         super().__init__()
         self.enformer = enformer
         self.track_indices = track_indices
         self.species = species
+        self.num_head_groups = max(1, int(num_head_groups))
+        self.split_heads = self.num_head_groups > 1
+        self.head_group_names = list(head_group_names) if head_group_names else None
+        #: Which head set ``forward`` uses when no ``head_group`` is passed.  Inference
+        #: is per-celltype, so callers set this once instead of threading it through.
+        self.default_head_group = 0
 
         # Enformer trunk output dim is dim * 2 (e.g. 1536 * 2 = 3072)
         embedding_dim = enformer.dim * 2
 
-        # Per-track linear projections
-        self.to_tracks = torch.nn.ModuleList([
-            torch.nn.Linear(in_features=embedding_dim, out_features=1)
-            for _ in track_indices
-        ])
+        if self.split_heads:
+            # Per-celltype-group head sets: to_tracks[group][track].  Mirrors the
+            # training-time layout so checkpoints load with strict=True.
+            self.to_tracks = torch.nn.ModuleList([
+                torch.nn.ModuleList([
+                    torch.nn.Linear(in_features=embedding_dim, out_features=1)
+                    for _ in track_indices
+                ])
+                for _ in range(self.num_head_groups)
+            ])
+            self.scale = torch.nn.Parameter(torch.ones(self.num_head_groups, len(track_indices)))
+            self.bias = torch.nn.Parameter(torch.zeros(self.num_head_groups, len(track_indices)))
+        else:
+            # Per-track linear projections
+            self.to_tracks = torch.nn.ModuleList([
+                torch.nn.Linear(in_features=embedding_dim, out_features=1)
+                for _ in track_indices
+            ])
 
-        # Learnable per-track scale and bias
-        self.scale = torch.nn.Parameter(torch.ones(len(track_indices)))
-        self.bias = torch.nn.Parameter(torch.zeros(len(track_indices)))
+            # Learnable per-track scale and bias
+            self.scale = torch.nn.Parameter(torch.ones(len(track_indices)))
+            self.bias = torch.nn.Parameter(torch.zeros(len(track_indices)))
 
         if load_pretrained:
             # _heads['human'] is Sequential(Linear, Softplus)
             original_linear = enformer._heads[self.species][0]
             with torch.no_grad():
                 for i, original_idx in enumerate(track_indices):
-                    self.to_tracks[i].weight.data = (
-                        original_linear.weight.data[original_idx]
-                        .unsqueeze(0).clone()
-                    )
-                    self.to_tracks[i].bias.data = (
-                        original_linear.bias.data[original_idx]
-                        .unsqueeze(0).clone()
-                    )
+                    w = original_linear.weight.data[original_idx].unsqueeze(0).clone()
+                    b = original_linear.bias.data[original_idx].unsqueeze(0).clone()
+                    heads = ([self.to_tracks[g][i] for g in range(self.num_head_groups)]
+                             if self.split_heads else [self.to_tracks[i]])
+                    for head in heads:
+                        head.weight.data = w.clone()
+                        head.bias.data = b.clone()
 
         self.activation = torch.nn.Softplus()
 
-    def forward(self, x):
+    def set_head_group(self, group):
+        """Select the head set used by subsequent ``forward`` calls.
+
+        ``group`` may be an int index or one of ``head_group_names`` (typically the
+        celltype name used at training time).  No-op for shared-head checkpoints.
+        """
+        if not self.split_heads:
+            if group not in (None, 0):
+                print(f'[enformer_utils] Checkpoint has a single shared head set; '
+                      f'ignoring head group {group!r}.')
+            return self
+        if isinstance(group, str):
+            if not self.head_group_names or group not in self.head_group_names:
+                raise ValueError(f'Unknown head group {group!r}; checkpoint has '
+                                 f'{self.head_group_names}.')
+            group = self.head_group_names.index(group)
+        group = int(group)
+        if not 0 <= group < self.num_head_groups:
+            raise ValueError(f'head group {group} out of range for '
+                             f'{self.num_head_groups} groups.')
+        self.default_head_group = group
+        return self
+
+    def _project(self, embeddings, group):
+        heads = self.to_tracks[group] if self.split_heads else self.to_tracks
+        track_preds = []
+        for track_i, linear_layer in enumerate(heads):
+            track_output = linear_layer(embeddings)
+            if self.split_heads:
+                scale, bias = self.scale[group, track_i], self.bias[group, track_i]
+            else:
+                scale, bias = self.scale[track_i], self.bias[track_i]
+            track_preds.append(track_output * scale + bias)
+
+        # (batch, 896, num_selected_tracks)
+        return torch.cat(track_preds, dim=-1)
+
+    def predict_all_head_groups(self, x):
+        """Every head group's prediction from ONE trunk pass -> (B, 896, K, G).
+
+        Celltype-split heads sit on a shared trunk, and for a celltype comparison
+        the input sequence is identical across celltypes -- only the head differs.
+        Running ``forward`` once per celltype would repeat the expensive trunk
+        forward G times for identical input; this computes the embedding once and
+        projects it through every group.  For a shared-head checkpoint G == 1.
+        """
+        embeddings = self.enformer(x, return_only_embeddings=True)
+        if not self.split_heads:
+            return self.activation(self._project(embeddings, None)).unsqueeze(-1)
+        outs = [self.activation(self._project(embeddings, g))
+                for g in range(self.num_head_groups)]
+        return torch.stack(outs, dim=-1)
+
+    def forward(self, x, head_group=None):
         """Forward pass.
 
         Parameters
         ----------
         x : torch.Tensor, shape (batch, seq_len, 4)
             One-hot encoded sequence in ACGT order.
+        head_group : int or str or None
+            Head set to use for split-head checkpoints.  Defaults to
+            ``default_head_group`` (see :meth:`set_head_group`).  Ignored when the
+            checkpoint has a single shared head set.
 
         Returns
         -------
@@ -170,15 +245,13 @@ class EnformerHeadAdapterWrapper(torch.nn.Module):
         """
         embeddings = self.enformer(x, return_only_embeddings=True)
 
-        track_preds = []
-        for track_i, linear_layer in enumerate(self.to_tracks):
-            track_output = linear_layer(embeddings)
-            track_output = track_output * self.scale[track_i] + self.bias[track_i]
-            track_preds.append(track_output)
+        if not self.split_heads:
+            return self.activation(self._project(embeddings, None))
 
-        # (batch, 896, num_selected_tracks)
-        track_preds = torch.cat(track_preds, dim=-1)
-        return self.activation(track_preds)
+        group = self.default_head_group if head_group is None else head_group
+        if isinstance(group, str):
+            group = self.head_group_names.index(group)
+        return self.activation(self._project(embeddings, int(group)))
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +342,8 @@ def load_enformer_pretrained(target_tracks=None, species='human', celltype=None,
     return wrapper, resolved_names, device
 
 
-def load_enformer_from_checkpoint(checkpoint_path, device=None, enformer_tracks=None):
+def load_enformer_from_checkpoint(checkpoint_path, device=None, enformer_tracks=None,
+                                  head_celltype=None):
     """Load a fine-tuned Enformer wrapper from a hierarchical training checkpoint.
 
     The checkpoint is expected to contain a ``TrainModule`` with an ``enformer``
@@ -311,8 +385,21 @@ def load_enformer_from_checkpoint(checkpoint_path, device=None, enformer_tracks=
     if has_enformer_weights:
         enformer_state = {k[len('enformer.'):]: v for k, v in state_dict.items()
                           if k.startswith('enformer.')}
-        num_heads = sum(1 for k in enformer_state
-                        if k.startswith('to_tracks.') and k.endswith('.weight'))
+        # Head layout. Shared heads are 'to_tracks.<track>.weight' (3 dot-parts);
+        # celltype-split heads (--enformer-split-heads-by-celltype) are
+        # 'to_tracks.<group>.<track>.weight' (4 parts).
+        head_keys = [k for k in enformer_state
+                     if k.startswith('to_tracks.') and k.endswith('.weight')]
+        split_layout = any(len(k.split('.')) == 4 for k in head_keys)
+        if split_layout:
+            num_head_groups = len({k.split('.')[1] for k in head_keys})
+            num_heads = sum(1 for k in head_keys if k.split('.')[1] == '0')
+        else:
+            num_head_groups = 1
+            num_heads = len(head_keys)
+
+        head_group_names = getattr(hparams, 'enformer_head_group_names', None)
+        head_group_names = list(head_group_names) if head_group_names else None
 
         # Hierarchical checkpoints name the Enformer heads via ``enformer_tracks``;
         # standard Enformer fine-tuning checkpoints via ``output_features``.
@@ -349,10 +436,28 @@ def load_enformer_from_checkpoint(checkpoint_path, device=None, enformer_tracks=
         # count is what defines the number of heads to rebuild.
         wrapper = EnformerHeadAdapterWrapper(
             enformer, list(range(num_heads)), species=species, load_pretrained=False,
+            num_head_groups=num_head_groups, head_group_names=head_group_names,
         )
         wrapper.load_state_dict(enformer_state, strict=True)
+        if split_layout:
+            # Inference runs one celltype at a time, so pin the head set now.  Without
+            # an explicit choice fall back to group 0 and say so -- silently using
+            # another celltype's head would look like a bad model, not a wrong flag.
+            if head_celltype is not None:
+                wrapper.set_head_group(head_celltype)
+            else:
+                print(f'[enformer_utils] Checkpoint has {num_head_groups} celltype-split '
+                      f'head sets {head_group_names or list(range(num_head_groups))}; no '
+                      f'head_celltype given, defaulting to '
+                      f'{(head_group_names or [0])[0]!r}.')
+            chosen = wrapper.default_head_group
+            print(f'[enformer_utils] Using layer-1 head group {chosen}'
+                  + (f" ({head_group_names[chosen]})" if head_group_names else ''))
         wrapper.eval()
         wrapper.to(device)
+        # Stash the training hparams so callers can recover how the 1D targets
+        # were normalised (``bigwig_log_transform``) without re-reading the ckpt.
+        wrapper.checkpoint_hparams = hparams
         print(f"[enformer_utils] Loaded fine-tuned Enformer adapter directly from "
               f"`enformer.*` weights ({num_heads} heads). Tracks: {track_names}")
         if requested_track_names is not None:
@@ -396,6 +501,7 @@ def load_enformer_from_checkpoint(checkpoint_path, device=None, enformer_tracks=
 
     enformer_wrapper = module.enformer
     enformer_wrapper.eval()
+    enformer_wrapper.checkpoint_hparams = hparams
 
     print(f"[enformer_utils] Loaded {checkpoint_kind} Enformer checkpoint with tracks: {track_names}")
     if requested_track_names is not None:

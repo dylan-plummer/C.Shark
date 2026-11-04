@@ -33,7 +33,8 @@ class ChromosomeDataset(Dataset):
                  target_1d_size=512,
                  hic_log_transform=True,
                  use_aug = True,
-                 ctcf_ko=False):
+                 ctcf_ko=False,
+                 allow_missing_hic=False):
         self.use_aug = use_aug
         self.ctcf_ko = ctcf_ko
         self.res = target_res # 10kb resolution
@@ -71,7 +72,22 @@ class ChromosomeDataset(Dataset):
             self.seq2 = None
         self.genomic_features = feature_list
         self.feature_strand_pairs = self.build_strand_pair_map(self.genomic_features)
-        self.mat = data_feature.HiCFeature(path = f'{celltype_root}/hic_matrix/{chr_name}.npz')
+        # Hi-C is only opened when it is actually used.  With predict_hic=False
+        # (the trainers' --no-hic) the celltype directory does not need to contain
+        # a hic_matrix/ at all -- loading it unconditionally made --no-hic crash on
+        # 1D-only celltypes.
+        #
+        # With allow_missing_hic a celltype (or chromosome) without a Hi-C matrix
+        # is still usable for its 1D tracks: get_data_at_interval returns an
+        # all-zero matrix and ``hic_present`` tells the trainer to mask its loss.
+        hic_path = f'{celltype_root}/hic_matrix/{chr_name}.npz'
+        self.hic_present = self.predict_hic and os.path.isfile(hic_path)
+        if self.predict_hic and not self.hic_present and not allow_missing_hic:
+            raise FileNotFoundError(f'Hi-C matrix not found: {hic_path}')
+        if self.hic_present:
+            self.mat = data_feature.HiCFeature(path = hic_path)
+        else:
+            self.mat = None
 
         if self.predict_1d:
             self.target_tracks = target_track_list # Target 1D features
@@ -190,7 +206,7 @@ class ChromosomeDataset(Dataset):
             seq_r = np.flip(seq, 0).copy() # n x 5 shape
             features_r = [np.flip(item, 0).copy() for item in features] # n
             target_1d_tracks_r = [np.flip(item, 0).copy() for item in target_1d_tracks] # n
-            mat_r = np.flip(mat, [0, 1]).copy() # n x n
+            mat_r = np.flip(mat, [0, 1]).copy() if mat is not None else None # n x n
 
             features_r = self.swap_strand_specific_tracks(features_r, self.feature_strand_pairs)
             target_1d_tracks_r = self.swap_strand_specific_tracks(target_1d_tracks_r, self.target_track_strand_pairs)
@@ -228,11 +244,16 @@ class ChromosomeDataset(Dataset):
         
         # Features processing
         features = [item.get(self.chr_name, start, end) for item in self.genomic_features]
-        # Hi-C matrix processing
-        mat = self.mat.get(start, res=self.res)
-        mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
-        if self.hic_log_transform:
-            mat = np.log(mat + 1)
+        # Hi-C matrix processing (skipped entirely when predict_hic is False)
+        mat = None
+        if self.predict_hic and not self.hic_present:
+            # Placeholder so the batch still collates; the trainer masks it out.
+            mat = np.zeros((self.image_scale, self.image_scale))
+        elif self.predict_hic:
+            mat = self.mat.get(start, res=self.res)
+            mat = resize(mat, (self.image_scale, self.image_scale), anti_aliasing=True, preserve_range=True)
+            if self.hic_log_transform:
+                mat = np.log(mat + 1)
         # Target 1D track processing
         loaded_paths = [item.path for item in self.genomic_features]
         target_1d_tracks_out = []
@@ -293,12 +314,17 @@ class ChromosomeDataset(Dataset):
         return start + offset , start + offset + target_size
 
     def check_length(self):
+        # Compare against the first track that actually exists: a missing bigwig
+        # reports length 0, so checking track [0] blindly fails whenever the
+        # first-listed track is the one a celltype lacks.
+        present_inputs = [f for f in self.genomic_features if f.track_present]
+        present_targets = [f for f in self.target_tracks if f.track_present]
         # Check sequence vs first *input* feature
-        if self.genomic_features:
-             assert len(self.seq.seq) == self.genomic_features[0].length(self.chr_name), f'Sequence {len(self.seq)} and First feature {self.genomic_features[0].length(self.chr_name)} have different length.'
+        if present_inputs:
+             assert len(self.seq.seq) == present_inputs[0].length(self.chr_name), f'Sequence {len(self.seq)} and First feature {present_inputs[0].length(self.chr_name)} have different length.'
         # Check sequence vs first *target* 1D track (if applicable)
-        if self.predict_1d and self.target_tracks:
-             assert len(self.seq.seq) == self.target_tracks[0].length(self.chr_name), f'Sequence {len(self.seq)} and First target track {self.target_tracks[0].length(self.chr_name)} have different length.'
+        if self.predict_1d and present_targets:
+             assert len(self.seq.seq) == present_targets[0].length(self.chr_name), f'Sequence {len(self.seq)} and First target track {present_targets[0].length(self.chr_name)} have different length.'
         # Check Hi-C length consistency (if applicable)
         if self.predict_hic and self.mat:
              assert abs(len(self.seq) / self.res -  len(self.mat)) < 2, f'Sequence {len(self.seq) / self.res} and Hi-C {len(self.mat)} have different length.' 

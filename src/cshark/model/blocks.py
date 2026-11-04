@@ -63,16 +63,24 @@ class Encoder(nn.Module):
 class EncoderSplit(Encoder):
     def __init__(self, num_epi, hidden = 256, output_size = 256, filter_size = 5, num_blocks = 12, num_bases=5,
                  epi_filter_size=5,
-                 seq_filter_size=3):
+                 seq_filter_size=3,
+                 use_seq=True):
         super(Encoder, self).__init__()
+        # use_seq=False: the input still carries the num_bases sequence channels
+        # (so callers build it as usual) but they are dropped and only the
+        # genomic features are encoded.
+        if not use_seq and num_epi == 0:
+            raise ValueError('EncoderSplit with use_seq=False needs at least one genomic feature.')
         self.num_epi = num_epi
         self.filter_size = filter_size
         self.num_bases = num_bases
-        self.conv_start_seq = nn.Sequential(
-                                    nn.Conv1d(num_bases, 16, seq_filter_size, 2, 1),
-                                    nn.BatchNorm1d(16),
-                                    nn.ReLU(),
-                                    )
+        self.use_seq = use_seq
+        if use_seq:
+            self.conv_start_seq = nn.Sequential(
+                                        nn.Conv1d(num_bases, 16, seq_filter_size, 2, 1),
+                                        nn.BatchNorm1d(16),
+                                        nn.ReLU(),
+                                        )
         if num_epi > 0:
             self.conv_start_epi = nn.Sequential(
                                         nn.Conv1d(num_epi, 16, epi_filter_size, 2, 1),
@@ -83,17 +91,23 @@ class EncoderSplit(Encoder):
         hidden_ins = [32, 32, 32, 32, 32, 64, 64, 128, 128, 128, 128, 256]
         hiddens_half = (np.array(hiddens) / 2).astype(int)
         hidden_ins_half = (np.array(hidden_ins) / 2).astype(int)
-        if num_epi == 0:
+        if num_epi == 0 or not use_seq:
+            # A single branch fills all 256 channels of conv_end on its own.
             hiddens_half[-1] *= 2
             if num_blocks == 11:
                 hiddens_half[-2] *= 2
-        self.res_blocks_seq = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
+        if use_seq:
+            self.res_blocks_seq = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
         if num_epi > 0:
             self.res_blocks_epi = self.get_res_blocks(num_blocks, hidden_ins_half, hiddens_half)
         self.conv_end = nn.Conv1d(256, hidden, 1)
 
     def forward(self, x, return_seq_feats=False):
-        if self.num_epi > 0:
+        if not self.use_seq:
+            if return_seq_feats:
+                raise ValueError('EncoderSplit with use_seq=False has no sequence features.')
+            x = self.res_blocks_epi(self.conv_start_epi(x[:, self.num_bases:, :]))
+        elif self.num_epi > 0:
             seq = x[:, :self.num_bases, :]
             epi = x[:, self.num_bases:, :]
             seq = self.res_blocks_seq(self.conv_start_seq(seq))

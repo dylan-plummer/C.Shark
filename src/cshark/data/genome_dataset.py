@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
 from cshark.data.chromosome_dataset import ChromosomeDataset
@@ -25,9 +26,28 @@ class GenomeDataset(Dataset):
                        hic_log_transform=True,
                        use_aug = True,
                        ctcf_ko=False,
-                       conditioning_vec=None):
+                       conditioning_vec=None,
+                       celltype_index=None,
+                       return_availability=False,
+                       allow_missing_hic=False,
+                       inputs_only=False):
         print('CTCF KO:', ctcf_ko)
         self.data_root = celltype_root
+        # Index of this celltype within the trainer's --celltypes list.  When set,
+        # every sample carries it as the LAST element of the returned tuple so a
+        # model can route the sample to celltype-specific parameters after the
+        # per-celltype datasets have been ConcatDataset'ed together.  Left as None
+        # (the default) the tuple is unchanged, so existing trainers are unaffected.
+        self.celltype_index = celltype_index
+        # When set, every sample also carries a float availability vector as the
+        # very LAST element of the tuple (after celltype_index):
+        #   [input feature present x n_inputs, target track present x n_targets,
+        #    Hi-C present]
+        # so a trainer can mask the loss of whatever this celltype lacks.  A
+        # missing bigwig is otherwise indistinguishable from signal once the
+        # training augmentation has added noise to its -1 placeholder.
+        self.return_availability = return_availability
+        self.allow_missing_hic = allow_missing_hic
         self.include_sequence = include_sequence
         self.include_genomic_features = include_genomic_features
         self.predict_hic = predict_hic
@@ -44,7 +64,9 @@ class GenomeDataset(Dataset):
         if not self.include_genomic_features: print('Not using genomic features!')
         if not self.predict_hic: print('Not predicting Hi-C!')
         if not self.predict_1d: print('Not predicting 1D Tracks!')
-        if not predict_hic and not predict_1d:
+        # inputs_only: a trainer whose target is one of the input features (e.g.
+        # the layer-2 RAD21 predictor) needs neither Hi-C nor separate 1D targets.
+        if not predict_hic and not predict_1d and not inputs_only:
              raise ValueError("Must predict at least Hi-C or 1D tracks.")
         self.use_aug = use_aug
         self.ctcf_ko = ctcf_ko
@@ -123,9 +145,20 @@ class GenomeDataset(Dataset):
             ]
         if self.conditioning_vec is not None:
             outputs.append(self.conditioning_vec)
-        
+        if self.celltype_index is not None:
+            outputs.append(self.celltype_index)
+        if self.return_availability:
+            outputs.append(self.availability(chr_name))
 
         return tuple(outputs)
+
+    def availability(self, chr_name):
+        '''Presence flags for this celltype's inputs, 1D targets and Hi-C (see __init__).'''
+        hic = self.predict_hic and self.chr_data[chr_name].hic_present
+        flags = ([f.track_present for f in self.genomic_features]
+                 + [f.track_present for f in self.target_1d_features]
+                 + [hic])
+        return np.array(flags, dtype=np.float32)
 
     def __len__(self):
         return sum(self.lengths)
@@ -140,7 +173,7 @@ class GenomeDataset(Dataset):
         for chr_name in chr_names:
             omit_regions = self.centrotelo_dict[chr_name]
             chr_data_dict[chr_name] = ChromosomeDataset(self.data_root, chr_name, omit_regions, 
-                                                        genomic_features, target_features, predict_hic=True, 
+                                                        genomic_features, target_features, predict_hic=self.predict_hic, 
                                                         predict_1d=self.predict_1d, 
                                                         celltype_root2=self.data_root.replace(self.genome_assembly, self.genome_assembly2) if self.genome_assembly2 else None,
                                                         alt_assembly=self.alt_assembly,
@@ -149,7 +182,8 @@ class GenomeDataset(Dataset):
                                                         target_1d_size=self.target_1d_size,
                                                         hic_log_transform=self.hic_log_transform,
                                                         use_aug=self.use_aug,
-                                                        ctcf_ko=self.ctcf_ko)
+                                                        ctcf_ko=self.ctcf_ko,
+                                                        allow_missing_hic=self.allow_missing_hic)
             lengths.append(len(chr_data_dict[chr_name]))
         print('Chromosome datasets loaded')
         return chr_data_dict, lengths

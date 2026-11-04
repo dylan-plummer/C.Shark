@@ -3,6 +3,47 @@ import numpy as np
 import pyBigWig as pbw
 
 
+#: Whether this pyBigWig was compiled against numpy.  Only then does
+#: ``values()`` accept ``numpy=True``; a build without it rejects the keyword
+#: outright ("bigWigFile.values() takes no keyword arguments") -- which is what
+#: a pip/conda pyBigWig installed before numpy, or from a numpy-less wheel, gives.
+PYBIGWIG_HAS_NUMPY = bool(getattr(pbw, 'numpy', 0))
+
+
+def bigwig_values(bw, chrom, start, end):
+    """``end - start`` float32 values from an open pyBigWig file, NaN where uncovered.
+
+    The same array ``bw.values(chrom, start, end, numpy=True)`` returns, on
+    either kind of pyBigWig build.  Without numpy support it is rebuilt from
+    ``bw.intervals()`` rather than plain ``values()``: a bigwig stores runs of
+    constant value, so the interval list is far shorter than one Python float
+    per base pair, which is what ``values()`` would materialise (8 million of
+    them for one cache chunk).
+    """
+    start, end = int(start), int(end)
+    if PYBIGWIG_HAS_NUMPY:
+        try:
+            return bw.values(chrom, start, end, numpy=True)
+        except TypeError:      # build flag and actual signature disagree: fall through
+            pass
+    out = np.full(end - start, np.nan, dtype=np.float32)
+    ivs = bw.intervals(chrom, start, end)
+    if not ivs:
+        return out
+    iv = np.asarray(ivs, dtype=np.float64)                    # (n, 3): start, end, value
+    s = np.clip(iv[:, 0].astype(np.int64), start, end) - start
+    e = np.clip(iv[:, 1].astype(np.int64), start, end) - start
+    keep = e > s
+    s, e, v = s[keep], e[keep], iv[keep, 2].astype(np.float32)
+    # Intervals are sorted and never overlap, so the covered positions in order
+    # are exactly the intervals' values each repeated over its length.
+    cover = np.zeros(end - start + 1, dtype=np.int32)
+    np.add.at(cover, s, 1)
+    np.add.at(cover, e, -1)
+    out[np.cumsum(cover[:-1]) > 0] = np.repeat(v, e - s)
+    return out
+
+
 def knockout_peaks(signal_array, threshold=2.0, min_peak_width=5, padding_factor=3.0, background_q=0.1, increase_factor=None):
     """
     Simulates knockout of peaks in a signal array by replacing peak regions with background values.

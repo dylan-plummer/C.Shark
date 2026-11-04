@@ -88,6 +88,8 @@ def load_hierarchical_rad21_predictor(checkpoint_path, device=None, n_input_trac
         recon_1d=hparams.get('recon_1d', True),
         seq_filter_size=hparams.get('seq_filter_size', 3),
         activation_1d=None,
+        # --layer2-no-seq: same input layout, sequence channels ignored.
+        use_seq=not hparams.get('layer2_no_seq', False),
     )
 
     state_dict = checkpoint['state_dict']

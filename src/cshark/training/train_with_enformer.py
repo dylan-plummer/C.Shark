@@ -935,8 +935,8 @@ class TrainModule(pl.LightningModule):
                                     ],
                                      weight_decay = 1e-6)
 
-        import pl_bolts
-        scheduler = pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
+        from cshark.training.lr_scheduler import LinearWarmupCosineAnnealingLR
+        scheduler = LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
         scheduler.step()
         scheduler_config = {
             'scheduler': scheduler,
