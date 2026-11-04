@@ -600,6 +600,18 @@ def init_parser(return_parser=False, parser=None, extend=None):
                            'and reused; point several runs at one directory to build it once. '
                            'Default: <save_path>/layer1_cache.')
 
+  # --- Layer-2-only training ------------------------------------------------
+  parser.add_argument('--layer2-only', dest='layer2_only', action='store_true',
+                      help='Train only the layer-2 RAD21 predictor: rad21 from the measured non-rad21 '
+                           '--input-features (e.g. the 7 other tracks). No Enformer, no layer 3, no Hi-C; '
+                           '--target-features is ignored. --input-features must include rad21, and every '
+                           'celltype needs every input bigwig. Optimised at --rad21-lr; the checkpoint '
+                           'loads with load_hierarchical_rad21_predictor.')
+  parser.add_argument('--layer2-no-seq', dest='layer2_no_seq', action='store_true',
+                      help='Drop the DNA sequence from the layer-2 RAD21 predictor input: it sees only the '
+                           'non-rad21 tracks. Applies wherever layer 2 is built (with or without '
+                           '--layer2-only). Not compatible with --no-recon.')
+
 
   # Hooks for downstream trainers: add their arguments to THIS parser (so the
   # whole CLI stays in one place) and, when they drive parsing themselves, hand
@@ -668,6 +680,25 @@ def finalize_args(args):
           raise ValueError('--layer1-finetune needs at least one layer-1 track: pass '
                            '--input-features (or --enformer-tracks), e.g. --input-features atac.')
 
+  if getattr(args, 'layer2_no_seq', False) and not args.recon_1d:
+      raise ValueError('--layer2-no-seq is not compatible with --no-recon (layer 2 would predict '
+                       'from sequence features it no longer has).')
+  if getattr(args, 'layer2_only', False):
+      if getattr(args, 'layer1_finetune', False):
+          raise ValueError('--layer2-only and --layer1-finetune are mutually exclusive.')
+      if 'rad21' not in args.input_features:
+          raise ValueError(f"--layer2-only needs rad21 in --input-features (it is the target); got "
+                           f"{args.input_features}.")
+      if len(args.input_features) < 2 and getattr(args, 'layer2_no_seq', False):
+          raise ValueError('--layer2-only --layer2-no-seq needs at least one non-rad21 input track.')
+      if args.eval_celltypes:
+          raise ValueError('--layer2-only does not support --eval-celltypes/--eval-tracks.')
+      # Layer 2 alone: no Hi-C stage and no layer-3 1D targets to load.
+      if args.output_features:
+          print(f'[layer2] --layer2-only: ignoring --target-features {args.output_features}.')
+      args.predict_hic = False
+      args.output_features = None
+
   # --- Layer 1 head grouping ------------------------------------------------
   # Resolve --enformer-split-heads-by-celltype / --enformer-head-groups into two
   # derived hparams that the module and any downstream loader can rely on:
@@ -703,6 +734,8 @@ def finalize_args(args):
 def init_training(args):
     if getattr(args, 'layer1_finetune', False):
         return init_layer1_training(args)
+    if getattr(args, 'layer2_only', False):
+        return init_layer2_training(args)
 
     # Early_stopping
     early_stop_callback = callbacks.EarlyStopping(monitor='val_loss', 
@@ -894,24 +927,8 @@ class TrainModule(pl.LightningModule):
         self.enformer_tile_starts = [min(k * ENFORMER_TARGET_LEN, max_start)
                                      for k in range(num_tiles)]
 
-        model_name =  args.model_type
-        ModelClass = getattr(corigami_models, model_name)
         if self.use_rad21:
-            self.input_pred_model = ModelClass(
-                num_genomic_features=len(self.hparams.input_features) - 1, # Input features minus rad21
-                num_target_tracks=1,    # Target 1D tracks
-                conditioning_vec_size=len(self.hparams.conditioning_vec[0].split(',')) if self.hparams.conditioning_vec is not None else None,
-                mid_hidden=self.hparams.model_latent_dim,
-                predict_hic=False,
-                diploid=args.dataset_assembly2 is not None,
-                predict_1d=True,  # layer 2 always predicts the rad21 track; matches the
-                                  # inference RAD21 loader (load_hierarchical_rad21_predictor)
-                target_mat_size=args.mat_size,
-                target_1d_length=args.target_1d_size,
-                recon_1d=args.recon_1d,
-                seq_filter_size=args.seq_filter_size,
-                activation_1d=None
-            )
+            self.input_pred_model = self.get_layer2_model(args)
         else:
             self.input_pred_model = None
             print('[hierarchical] No rad21 input feature: skipping the layer-2 RAD21 '
@@ -1286,6 +1303,28 @@ class TrainModule(pl.LightningModule):
                 model_weights[key.replace('model.', '')] = model_weights.pop(key)
             model.load_state_dict(model_weights)
         return model
+
+    def get_layer2_model(self, args):
+        """Layer 2: predicts rad21 from seq + every other input track (or, with
+        --layer2-no-seq, from the other tracks alone)."""
+        ModelClass = getattr(corigami_models, args.model_type)
+        return ModelClass(
+            num_genomic_features=len(self.hparams.input_features) - 1, # Input features minus rad21
+            num_target_tracks=1,    # Target 1D tracks
+            conditioning_vec_size=len(self.hparams.conditioning_vec[0].split(',')) if self.hparams.conditioning_vec is not None else None,
+            mid_hidden=self.hparams.model_latent_dim,
+            predict_hic=False,
+            diploid=args.dataset_assembly2 is not None,
+            predict_1d=True,  # layer 2 always predicts the rad21 track; matches the
+                              # inference RAD21 loader (load_hierarchical_rad21_predictor)
+            target_mat_size=args.mat_size,
+            target_1d_length=args.target_1d_size,
+            recon_1d=args.recon_1d,
+            seq_filter_size=args.seq_filter_size,
+            activation_1d=None,
+            # The input keeps its sequence channels either way; the model drops them.
+            use_seq=not getattr(self.hparams, 'layer2_no_seq', False),
+        )
 
     def forward(self, x, conditioning_vec=None):
         return self.model(x, conditioning_vec=conditioning_vec)
@@ -2281,6 +2320,8 @@ class TrainModule(pl.LightningModule):
                                 # Read back by proc_batch / batch_availability.
                                 return_availability = self.batch_has_availability,
                                 allow_missing_hic = self.supports_missing_data,
+                                # --layer2-only: rad21 is read as an input track.
+                                inputs_only = getattr(args, 'layer2_only', False),
                                 )
 
         # Record length for printing validation image
@@ -2629,6 +2670,128 @@ def init_layer1_training(args):
         logger = WandbLogger(project='c.shark')
         logger.watch(pl_module.enformer)
     trainer = pl.Trainer(strategy='ddp_find_unused_parameters_true' if args.trainer_num_gpu > 1 else 'auto',
+                         precision='bf16-mixed',
+                         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+                         devices=args.trainer_num_gpu,
+                         gradient_clip_val=1,
+                         logger=logger,
+                         callbacks=[checkpoint_callback, early_stop_callback, lr_monitor],
+                         max_epochs=args.trainer_max_epochs)
+    trainloader = pl_module.get_dataloader(args, 'train')
+    valloader = pl_module.get_dataloader(args, 'val')
+    trainer.fit(pl_module, train_dataloaders=trainloader, val_dataloaders=valloader)
+    return trainer
+
+
+# ---------------------------------------------------------------------------
+# --layer2-only: the RAD21 predictor alone, on measured tracks
+# ---------------------------------------------------------------------------
+class Layer2OnlyModule(TrainModule):
+    """Train only layer 2: rad21 from the measured non-rad21 input tracks
+    (plus sequence, unless --layer2-no-seq).
+
+    Layers 1 and 3 are never built, so nothing upstream can fill a missing
+    track: every celltype must have every input bigwig.  The losses and metric
+    names match the hierarchical trainer's layer-2 ones (``train_loss_rad21``,
+    ``val_loss_rad21``, ``val_corr_1d_first_layer_rad21``), and the checkpoint
+    holds only ``input_pred_model.*`` weights, so it loads with
+    ``load_hierarchical_rad21_predictor``.
+    """
+
+    supports_missing_data = False
+
+    def __init__(self, args):
+        # Deliberately NOT TrainModule.__init__: that builds Enformer and layer 3.
+        # The inherited dataset/batch helpers only need the attributes set below.
+        pl.LightningModule.__init__(self)
+        self.save_hyperparameters(args)
+        self.args = args
+        self.predict_1d = False
+        self.use_rad21 = True
+        self.rad21_idx = self.hparams.input_features.index('rad21')
+        self.batch_has_availability = False
+        self.emit_celltype_index = False
+        self.eval_celltypes, self.eval_tracks = [], []
+        self._availability_report = {}
+        self.input_pred_model = self.get_layer2_model(args)
+        others = [f for f in self.hparams.input_features if f != 'rad21']
+        n_params = sum(p.numel() for p in self.input_pred_model.parameters())
+        print(f'[layer2] Training only the RAD21 predictor from {others}'
+              f'{"" if self.hparams.layer2_no_seq else " + DNA sequence"} '
+              f'({n_params:,} params, lr={self.hparams.rad21_lr:g}).')
+
+    def warn_unsupervised(self, args):
+        # Incomplete celltypes are rejected outright (supports_missing_data).
+        pass
+
+    def _rad21_step(self, batch):
+        """(prediction upsampled to (B, L), measured rad21 (B, L)), log1p space."""
+        inputs, _, _, condition_vec, _ = self.proc_batch(batch)
+        return self.predict_rad21_full(inputs, condition_vec), inputs[:, :, 5 + self.rad21_idx]
+
+    def training_step(self, batch, batch_idx):
+        # As in TrainModule.training_step: score at the model's output length
+        # against the downsampled measured track.
+        inputs, _, _, condition_vec, _ = self.proc_batch(batch)
+        abs_rad21 = 5 + self.rad21_idx
+        no_rad21 = torch.cat([inputs[:, :, :abs_rad21], inputs[:, :, abs_rad21 + 1:]], dim=2)
+        pred = self.input_pred_model(no_rad21, conditioning_vec=condition_vec).get('1d')[:, :, 0]
+        gt = F.interpolate(inputs[:, :, abs_rad21].unsqueeze(1), size=pred.shape[1],
+                           mode='linear', align_corners=True).squeeze(1).float()
+        loss = F.mse_loss(pred, gt)
+        self.log('train_loss_rad21', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        pred, gt = self._rad21_step(batch)
+        loss = F.mse_loss(pred, gt)
+        corr = safe_corr(torch.clamp(torch.expm1(pred), min=0), torch.clamp(torch.expm1(gt), min=0))
+        self.log('val_loss_rad21', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self._log_weighted('val_corr_1d_first_layer_rad21', corr, pred.shape[0],
+                           on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        return loss
+
+    def test_step(self, batch, batch_idx):
+        pred, gt = self._rad21_step(batch)
+        loss = F.mse_loss(pred, gt)
+        corr = safe_corr(torch.clamp(torch.expm1(pred), min=0), torch.clamp(torch.expm1(gt), min=0))
+        self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self._log_weighted('test_corr_1d_rad21', corr, pred.shape[0],
+                           on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(self.input_pred_model.parameters(), lr=self.hparams.rad21_lr,
+                                      weight_decay=1e-6)
+        from cshark.training.lr_scheduler import LinearWarmupCosineAnnealingLR
+        scheduler = LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
+        scheduler.step()
+        return {'optimizer': optimizer,
+                'lr_scheduler': {'scheduler': scheduler, 'interval': 'epoch', 'frequency': 1,
+                                 'monitor': 'val_loss', 'strict': True, 'name': 'WarmupCosineAnnealing'}}
+
+    def on_before_optimizer_step(self, optimizer):
+        # TrainModule's version reads self.model, which does not exist here.
+        self.log_dict(grad_norm(self.input_pred_model, norm_type=2))
+
+
+def init_layer2_training(args):
+    """``--layer2-only``: train the RAD21 predictor alone."""
+    pl.seed_everything(args.run_seed, workers=True)
+    pl_module = Layer2OnlyModule(args)
+    checkpoint_callback = callbacks.ModelCheckpoint(dirpath=f'{args.run_save_path}/models',
+                                                    save_top_k=args.trainer_save_top_n,
+                                                    monitor='val_loss', save_last=True)
+    early_stop_callback = callbacks.EarlyStopping(monitor='val_loss', mode='min', min_delta=0.0,
+                                                  patience=args.trainer_patience)
+    lr_monitor = callbacks.LearningRateMonitor(logging_interval='epoch')
+    logger = None
+    if args.use_wandb:
+        logger = WandbLogger(project='c.shark')
+        logger.watch(pl_module.input_pred_model)
+    trainer = pl.Trainer(strategy='ddp' if args.trainer_num_gpu > 1 else 'auto',
                          precision='bf16-mixed',
                          accelerator='gpu' if torch.cuda.is_available() else 'cpu',
                          devices=args.trainer_num_gpu,

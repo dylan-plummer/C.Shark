@@ -29,7 +29,8 @@ class GenomeDataset(Dataset):
                        conditioning_vec=None,
                        celltype_index=None,
                        return_availability=False,
-                       allow_missing_hic=False):
+                       allow_missing_hic=False,
+                       inputs_only=False):
         print('CTCF KO:', ctcf_ko)
         self.data_root = celltype_root
         # Index of this celltype within the trainer's --celltypes list.  When set,
@@ -63,7 +64,9 @@ class GenomeDataset(Dataset):
         if not self.include_genomic_features: print('Not using genomic features!')
         if not self.predict_hic: print('Not predicting Hi-C!')
         if not self.predict_1d: print('Not predicting 1D Tracks!')
-        if not predict_hic and not predict_1d:
+        # inputs_only: a trainer whose target is one of the input features (e.g.
+        # the layer-2 RAD21 predictor) needs neither Hi-C nor separate 1D targets.
+        if not predict_hic and not predict_1d and not inputs_only:
              raise ValueError("Must predict at least Hi-C or 1D tracks.")
         self.use_aug = use_aug
         self.ctcf_ko = ctcf_ko

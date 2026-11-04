@@ -215,8 +215,12 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
                  target_1d_length = 8192, # Expected output length for 1D tracks
                  encoder_downsample_factor = 2**7, # Total downsampling from encoder (e.g., 13 blocks * stride 2)
                  activation_1d=None,
-                 record_attn = False):
+                 record_attn = False,
+                 use_seq = True): # False: ignore the sequence channels of the input, encode only the genomic features
         super(MultiTaskConvTransModel, self).__init__()
+        if not use_seq and not recon_1d:
+            raise ValueError("use_seq=False needs recon_1d=True: without recon_1d the 1D tracks "
+                             "are predicted from the sequence features.")
 
         #print(f'Initializing MultiTaskConvTransModel with mid_hidden={mid_hidden}, predict_hic={predict_hic}, predict_1d={predict_1d}, recon_1d={recon_1d}, num_target_tracks={num_target_tracks}')
 
@@ -249,7 +253,8 @@ class MultiTaskConvTransModel(nn.Module): # Renamed for clarity
         self.encoder = blocks.EncoderSplit(num_genomic_features, hidden = mid_hidden, output_size = mid_hidden, 
                                            num_blocks = self.num_blocks, num_bases=10 if diploid else 5,
                                            epi_filter_size=epi_filter_size,
-                                           seq_filter_size=seq_filter_size,)
+                                           seq_filter_size=seq_filter_size,
+                                           use_seq=use_seq)
         # Output: [batch, mid_hidden, reduced_length]
 
         if conditioning_vec_size is not None and conditioning_vec_size > 0:
