@@ -11,7 +11,7 @@ the model is run three times; every input other than CTCF stays WT:
              by local background, the operator perturb.py and
              evaluate_ctcf_ko_rna.py use).
   * koexp -- measured depletion: the CTCF ChIP after degron depletion, put on
-             the WT input's scale (``MeasuredCtcfKO``).  Separates errors of
+             the WT input's scale (``PairedRawTrack``).  Separates errors of
              the knockout simulation from errors of the model.
 
 Windows overlap by half and only the central half of each prediction is kept.
@@ -37,13 +37,18 @@ per-chromosome 99.95th percentile (normalize_bigwig.py).  Two consequences:
 
   * RAD21 KO target: with the strongest (CTCF-site) peaks gone after depletion
     the KO divisor is smaller and the KO track sits ~4-5x above the WT one.
-    Fold changes are centred on each chromosome's median over peaks (for
+    Recommended: --wt-rad21-raw / --ko-rad21-raw, a raw pair from the same
+    pipeline put on the WT scale exactly as the CTCF pair below
+    (``PairedRawTrack``; --rad21-ko-scaling, library by default since cohesin
+    moves rather than disappears).  Fold changes are then absolute and not
+    centred unless --center-lfc.  Legacy (rad21.bw and --ko-rad21): fold
+    changes are centred on each chromosome's median over peaks (for
     experiment and prediction alike) before thresholding and correlating, and
     KO peak strengths are put on the WT scale with the same factor
     (``exp_ko_wt_scale``) before they are compared with predictions.
   * CTCF KO input: the same scheme on the depleted CTCF ChIP divides by what is
     left after depletion and inflates its background ~8x, which the model
-    would read as CTCF everywhere.  ``MeasuredCtcfKO`` instead starts from the
+    would read as CTCF everywhere.  ``PairedRawTrack`` instead starts from the
     raw tracks: the KO library is divided by the WT track's per-chromosome
     divisor (exactly what the model's WT CTCF input is) after matching the two
     libraries -- by their background (default; depletion removes peaks, not
@@ -85,8 +90,9 @@ def build_parser():
     p.add_argument('--wt-dir', default=f'{DATA}/Hsieh_CTCF_WT_5kb_norm_10',
                    help='WT celltype dir; its genomic_features/ supplies the model inputs and WT RAD21.')
     p.add_argument('--ko-dir', default=f'{DATA}/Hsieh_CTCF_KO_5kb_norm_10')
-    p.add_argument('--ko-rad21', default='exp_rad21_after_ctcf_ko_hsieh_0_10.bw',
-                   help='Experimental RAD21 after CTCF depletion, under <ko-dir>/genomic_features/.')
+    p.add_argument('--ko-rad21', default=None,
+                   help='Experimental RAD21 after CTCF depletion, under <ko-dir>/genomic_features/ (legacy '
+                        'truth, without --ko-rad21-raw). Default: exp_rad21_after_ctcf_ko_hsieh_0_10.bw.')
     p.add_argument('--seq-dir', default=None, help='Default: <wt-dir>/../dna_sequence.')
     p.add_argument('--chroms', nargs='+', default=['chr10', 'chr15'],
                    help='Default: the trainer\'s val (chr10) and test (chr15) chromosomes, never trained on.')
@@ -122,6 +128,20 @@ def build_parser():
     g.add_argument('--no-measured-ctcf', dest='measured_ctcf', action='store_false',
                    help='Skip the koexp arm.')
 
+    g = p.add_argument_group('measured RAD21 truth from a raw WT / KO pair')
+    g.add_argument('--wt-rad21-raw', default=None,
+                   help='Raw WT RAD21; replaces <wt-dir>/genomic_features/rad21.bw as the WT truth.')
+    g.add_argument('--ko-rad21-raw', default=None,
+                   help='Raw RAD21 after CTCF depletion, same pipeline as --wt-rad21-raw; replaces --ko-rad21. '
+                        'Both are put on the WT scale by the WT divisor, as for CTCF.')
+    g.add_argument('--rad21-ko-scaling', choices=['background', 'library'], default='library',
+                   help='How the KO library is matched to WT before the WT divisor: library = total coverage '
+                        '(default; cohesin moves rather than disappears); background = trimmed mean of the '
+                        'non-peak signal per chromosome.')
+    g.add_argument('--center-lfc', action='store_true',
+                   help='Centre KO/WT log2FC on each chromosome\'s median over peaks (experiment and prediction '
+                        'alike). Always on for the legacy truth, whose KO track is on its own scale.')
+
     g = p.add_argument_group('locus gallery')
     g.add_argument('--loci-per-class', type=int, default=6,
                    help='Loci drawn per category (lost/gained x hit/missed/false). Hits are a random '
@@ -145,7 +165,7 @@ def build_parser():
 
 
 # ---------------------------------------------------------------------------
-# Measured CTCF after depletion, on the model's WT input scale
+# Measured WT / KO pairs from raw tracks, on the WT track's scale
 # ---------------------------------------------------------------------------
 def _background(v):
     """Trimmed mean of the non-zero signal below its 90th percentile."""
@@ -153,17 +173,21 @@ def _background(v):
     return float(nz[nz <= np.quantile(nz, 0.9)].mean())
 
 
-class MeasuredCtcfKO:
-    """Raw KO CTCF -> the scale of the model's WT CTCF input.
+class PairedRawTrack:
+    """A raw WT / KO pair (same pipeline) -> both on the WT normalised scale.
 
-    WT input = clip(raw_WT / q, 0, 1) * 10, q = the per-chromosome 99.95th
-    percentile of the non-zero raw WT signal (normalize_bigwig.py).  The KO
-    input is clip(raw_KO * s / q, 0, 1) * 10 with the SAME q and a library
-    factor s, so CTCF that is gone after depletion reads as gone.
+    WT = clip(raw_WT / q, 0, 1) * 10, q = the per-chromosome 99.95th percentile
+    of the non-zero raw WT signal (normalize_bigwig.py).  KO = clip(raw_KO * s
+    / q, 0, 1) * 10 with the SAME q and a library factor s, so signal that is
+    gone after depletion reads as gone.  ``ref_norm`` is the normalised WT
+    track the WT divisor is checked against; ``strict``: a mismatch means the
+    KO track is on the wrong scale (a model input), otherwise only that the WT
+    truth is not the training target.
     """
 
-    def __init__(self, wt_raw, ko_raw, wt_norm, scaling):
-        self.wt_raw, self.ko_raw, self.wt_norm, self.scaling = wt_raw, ko_raw, wt_norm, scaling
+    def __init__(self, name, wt_raw, ko_raw, ref_norm, scaling, strict):
+        self.name, self.wt_raw, self.ko_raw, self.ref_norm = name, wt_raw, ko_raw, ref_norm
+        self.scaling, self.strict = scaling, strict
         self.stats = {}
         if scaling == 'library':
             with pyBigWig.open(wt_raw) as a, pyBigWig.open(ko_raw) as b:
@@ -171,36 +195,61 @@ class MeasuredCtcfKO:
 
     def factors(self, chrom):
         if chrom not in self.stats:
+            tag = f'[{self.name}-raw]'
             with pyBigWig.open(self.wt_raw) as a, pyBigWig.open(self.ko_raw) as b:
                 n = min(a.chroms(chrom), b.chroms(chrom))
                 w = np.nan_to_num(bigwig_values(a, chrom, 0, n), nan=0.0)
                 k = np.nan_to_num(bigwig_values(b, chrom, 0, n), nan=0.0)
             q = float(np.quantile(w[w != 0], 0.9995))
             s = _background(w) / _background(k) if self.scaling == 'background' else self.library
-            # The WT divisor must reproduce the model's WT CTCF input.
+            # Does the WT divisor reproduce the normalised WT track?
             mid = max(0, n // 2 - WINDOW // 2)
-            with pyBigWig.open(self.wt_norm) as c:
+            with pyBigWig.open(self.ref_norm) as c:
                 ref = np.nan_to_num(bigwig_values(c, chrom, mid, mid + WINDOW), nan=0.0)
             err = float(np.abs(np.clip(w[mid:mid + WINDOW] / q, 0, 1) * 10 - ref).max())
-            strong = w >= 0.5 * q                      # WT input >= 5: strong CTCF sites
-            st = {'wt_divisor': q, 'ko_scale': s, 'scaling': self.scaling, 'wt_reconstruction_max_err': err,
-                  'ctcf_left_at_strong_wt_sites': float(k[strong].mean() * s / w[strong].mean()),
+            strong = w >= 0.5 * q                      # WT >= 5: strong WT sites
+            st = {'wt_raw': self.wt_raw, 'ko_raw': self.ko_raw, 'wt_divisor': q, 'ko_scale': s,
+                  'scaling': self.scaling, 'wt_reconstruction_max_err': err, 'reproduces_ref': err <= 1e-3,
+                  'ko_left_at_strong_wt_sites': float(k[strong].mean() * s / w[strong].mean()),
                   'ko_over_wt_background': _background(k) * s / _background(w)}
             self.stats[chrom] = st
-            print(f'[ctcf-ko] {chrom}: WT divisor {q:.1f}, KO x{s:.3f} ({self.scaling}); CTCF left at strong '
-                  f'WT sites {st["ctcf_left_at_strong_wt_sites"]:.1%}, KO/WT background '
+            print(f'{tag} {chrom}: WT divisor {q:.4g}, KO x{s:.3f} ({self.scaling}); KO left at strong '
+                  f'WT sites {st["ko_left_at_strong_wt_sites"]:.1%}, KO/WT background '
                   f'{st["ko_over_wt_background"]:.2f}; WT reconstruction max err {err:.2g}')
             if err > 1e-3:
-                print(f'[ctcf-ko] WARNING: {self.wt_raw} does not reproduce {self.wt_norm} on {chrom} '
-                      f'(max err {err:.3g}); the measured-KO input is on the wrong scale.')
+                if self.strict:
+                    print(f'{tag} WARNING: {self.wt_raw} does not reproduce {self.ref_norm} on {chrom} '
+                          f'(max err {err:.3g}); the measured-KO input is on the wrong scale.')
+                else:
+                    print(f'{tag} NOTE: {self.wt_raw} does not reproduce {self.ref_norm} on {chrom} '
+                          f'(max err {err:.3g}); the WT truth is taken from the raw file and differs '
+                          f'from the training target.')
             del w, k
         return self.stats[chrom]['wt_divisor'], self.stats[chrom]['ko_scale']
 
-    def window(self, chrom, start, end):
+    def window(self, chrom, start, end, which='ko'):
+        """Base-pair values of [start, end) on the WT normalised scale; 0 past the raw file's end."""
         q, s = self.factors(chrom)
-        with pyBigWig.open(self.ko_raw) as b:
-            v = np.nan_to_num(bigwig_values(b, chrom, start, end), nan=0.0)
+        if which == 'wt':
+            path, s = self.wt_raw, 1.0
+        else:
+            path = self.ko_raw
+        v = np.zeros(end - start, dtype=np.float32)
+        with pyBigWig.open(path) as b:
+            e = min(end, b.chroms(chrom))
+            if e > start:
+                v[:e - start] = np.nan_to_num(bigwig_values(b, chrom, start, e), nan=0.0)
         return (np.clip(v * s / q, 0, 1) * 10).astype(np.float32)
+
+    def binned(self, chrom, n_bins, bin_bp, start_bin=0, which='ko'):
+        """Mean of ``window`` in ``n_bins`` bins of ``bin_bp`` from ``start_bin`` (clipped, then averaged)."""
+        out = np.empty(n_bins, dtype=np.float32)
+        step = (WINDOW // bin_bp) * bin_bp
+        s0 = start_bin * bin_bp
+        for s in range(0, n_bins * bin_bp, step):
+            e = min(s + step, n_bins * bin_bp)
+            out[s // bin_bp:e // bin_bp] = self.window(chrom, s0 + s, s0 + e, which).reshape(-1, bin_bp).mean(1)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +482,8 @@ def plot_log2fc(df, m, arm, label, path):
     ax.set_xlabel('Experimental log$_2$ ($\\Delta$CTCF / control) RAD21')
     ax.set_ylabel('Predicted log$_2$ ($\\Delta$CTCF / control) RAD21')
     d = m['arms'][arm]['log2fc']
-    ax.set_title(f'{label}; {ARMS[arm][1]}\nPearson {d["pearson"]:.3f}, Spearman {d["spearman"]:.3f}', fontsize=10)
+    ax.set_title(f'{label}; {ARMS[arm][1]}; log2FC {"centred" if m["lfc_centred"] else "absolute"}\n'
+                 f'Pearson {d["pearson"]:.3f}, Spearman {d["spearman"]:.3f}', fontsize=10)
     ax.legend(frameon=False, fontsize=8, loc='upper left', markerscale=3)
     despine(ax)
     fig.savefig(path + '.png', dpi=300, bbox_inches='tight')
@@ -515,6 +565,12 @@ TRACK_ROWS = [('rad21_exp', 'RAD21\nexperiment'), ('rad21_pred', 'RAD21\npredict
               ('ctcf_in', 'CTCF\nmodel input')]
 
 
+def truth_note(args):
+    if args.ko_rad21_raw:
+        return 'experimental RAD21 from the raw pair, on the control scale'
+    return 'experimental $\\Delta$CTCF RAD21 on control scale'
+
+
 def draw_tracks(axes, x, series, row_labels, legend):
     for ax, (key, row_label) in zip(axes, row_labels):
         for k, (y, c, name) in enumerate(series[key]):
@@ -554,8 +610,9 @@ def plot_locus_category(rows, store, cat, label, args, extra, bin_bp, path):
                              + f'\npeak exp {r.exp_wt:.2f}$\\to${r.exp_ko_wt_scale:.2f}, '
                              f'pred {r.pred_wt:.2f}$\\to${r.pred_ko:.2f}', fontsize=7.5)
         axes[-1, j].set_xlabel('kb from summit', fontsize=8)
-    fig.suptitle(f'{CATEGORIES[cat]} (simulated KO)  ({label})\nexperimental $\\Delta$CTCF RAD21 on control scale; '
-                 f'shaded = peak window; log2FC centred per chromosome', fontsize=10)
+    fig.suptitle(f'{CATEGORIES[cat]} (simulated KO)  ({label})\n{truth_note(args)}; '
+                 f'shaded = peak window; log2FC {"centred per chromosome" if args.center_lfc else "not centred"}',
+                 fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(path + '.png', dpi=200)
     fig.savefig(path + '.pdf')
@@ -649,7 +706,7 @@ def draw_genes(ax, layout, g0, g1, target):
         ax.spines[s].set_visible(False)
 
 
-def plot_genes(predictor, genes, table, chrom_sizes, scale_cache, args, label, out_dir, wt_rad21, ko_rad21):
+def plot_genes(predictor, genes, table, chrom_sizes, scale_cache, args, label, out_dir, exp_rad21):
     """One figure per gene: its body +/- --gene-flank-bp, predicted in one window centred on it."""
     gene_dir = os.path.join(out_dir, 'genes')
     os.makedirs(gene_dir, exist_ok=True)
@@ -667,13 +724,14 @@ def plot_genes(predictor, genes, table, chrom_sizes, scale_cache, args, label, o
             print(f'[rad21-ko] {name}: region capped at {(g1 - g0) // 1000} kb around the gene centre.')
         b0, s = predictor.region(chrom, clen, g0, g1)
         n = len(s['pred_wt'])
-        if chrom not in scale_cache:         # the KO target's per-chromosome offset
+        if args.center_lfc and chrom not in scale_cache:   # the KO target's per-chromosome offset
             nb = clen // bin_bp
-            wt, ko = binned_bigwig(wt_rad21, chrom, nb, bin_bp), binned_bigwig(ko_rad21, chrom, nb, bin_bp)
+            wt, ko = exp_rad21(chrom, nb, bin_bp)
             summits = chrom_summits(wt, ko, np.ones(nb, bool), args, bin_bp)
             scale_cache[chrom] = ko_rad21_scale(wt, ko, summits, hw, args.pseudocount)
-        s['exp_wt'] = binned_bigwig(wt_rad21, chrom, n, bin_bp, b0)
-        s['exp_ko'] = binned_bigwig(ko_rad21, chrom, n, bin_bp, b0) / scale_cache[chrom]
+        scale = scale_cache.get(chrom, 1.0)
+        s['exp_wt'], s['exp_ko'] = exp_rad21(chrom, n, bin_bp, b0)
+        s['exp_ko'] = s['exp_ko'] / scale
         x = (np.arange(b0, b0 + n) * bin_bp + bin_bp // 2) / 1000
         row_labels = TRACK_ROWS + [(k, lbl) for k, (lbl, _) in extra.items()]
         layout = gene_lanes(table, chrom, b0 * bin_bp, (b0 + n) * bin_bp, name)
@@ -692,14 +750,14 @@ def plot_genes(predictor, genes, table, chrom_sizes, scale_cache, args, label, o
         held = chrom in HELD_OUT
         fig.suptitle(f'{name}  {chrom}:{gs:,}-{ge:,} ({strand})  [{label}]\n'
                      + ('held-out chromosome' if held else 'NOTE: the model was trained on this chromosome')
-                     + '; experimental $\\Delta$CTCF RAD21 on control scale; shaded = gene body', fontsize=10)
+                     + f'; {truth_note(args)}; shaded = gene body', fontsize=10)
         fig.tight_layout(rect=(0, 0, 1, 0.95))
         fig.savefig(os.path.join(gene_dir, f'{name}.png'), dpi=200)
         fig.savefig(os.path.join(gene_dir, f'{name}.pdf'))
         plt.close(fig)
         row = {'gene': name, 'chrom': chrom, 'start': gs, 'end': ge, 'strand': strand,
                'plotted': f'{chrom}:{b0 * bin_bp}-{(b0 + n) * bin_bp}', 'held_out_chrom': held,
-               'ko_rad21_scale': scale_cache[chrom]}
+               'ko_rad21_scale': scale}
         body = slice((gs - b0 * bin_bp) // bin_bp, (ge - b0 * bin_bp) // bin_bp + 1)
         for k in ('exp_wt', 'exp_ko', *(f'pred_{a}' for a in ('wt', *ARMS) if f'pred_{a}' in s)):
             row[f'{k}_gene_body_mean'] = float(np.mean(s[k][body]))
@@ -713,6 +771,16 @@ def main():
     args = build_parser().parse_args()
     if args.genes_only and not args.genes:
         raise SystemExit('--genes-only needs --genes.')
+    if bool(args.wt_rad21_raw) != bool(args.ko_rad21_raw):
+        raise SystemExit('--wt-rad21-raw and --ko-rad21-raw go together.')
+    if args.ko_rad21_raw and args.ko_rad21:
+        raise SystemExit('--ko-rad21 is the legacy KO truth; drop it when giving --ko-rad21-raw.')
+    if not args.ko_rad21_raw:
+        args.ko_rad21 = args.ko_rad21 or 'exp_rad21_after_ctcf_ko_hsieh_0_10.bw'
+        if not args.center_lfc:
+            print('[rad21-ko] legacy RAD21 truth (no --ko-rad21-raw): its KO track is on its own scale, '
+                  'so log2FC is centred per chromosome.')
+        args.center_lfc = True
     name = os.path.splitext(os.path.basename(args.checkpoint))[0]
     label = args.label or name
     out_dir = args.out_dir or os.path.join('benchmarks', 'rad21_ctcf_ko', name)
@@ -730,33 +798,47 @@ def main():
     feat_dir = os.path.join(args.wt_dir, 'genomic_features')
     track_paths = [os.path.join(feat_dir, f'{f}.bw') for f in in_feats]
     wt_rad21 = os.path.join(feat_dir, 'rad21.bw')
-    ko_rad21 = os.path.join(args.ko_dir, 'genomic_features', args.ko_rad21)
+    if args.ko_rad21_raw:
+        rad21_raw = PairedRawTrack('rad21', args.wt_rad21_raw, args.ko_rad21_raw, wt_rad21, args.rad21_ko_scaling,
+                                   strict=False)
+
+        def exp_rad21(chrom, n_bins, bin_bp, start_bin=0):
+            return tuple(rad21_raw.binned(chrom, n_bins, bin_bp, start_bin, w) for w in ('wt', 'ko'))
+    else:
+        rad21_raw = None
+        ko_rad21 = os.path.join(args.ko_dir, 'genomic_features', args.ko_rad21)
+
+        def exp_rad21(chrom, n_bins, bin_bp, start_bin=0):
+            return (binned_bigwig(wt_rad21, chrom, n_bins, bin_bp, start_bin),
+                    binned_bigwig(ko_rad21, chrom, n_bins, bin_bp, start_bin))
     measured = None
     if args.measured_ctcf:
-        measured = MeasuredCtcfKO(args.wt_ctcf_raw, args.ko_ctcf_raw, os.path.join(feat_dir, 'ctcf.bw'),
-                                  args.ctcf_ko_scaling)
+        measured = PairedRawTrack('ctcf', args.wt_ctcf_raw, args.ko_ctcf_raw, os.path.join(feat_dir, 'ctcf.bw'),
+                                  args.ctcf_ko_scaling, strict=True)
     arms = [a for a in ARMS if a == 'ko' or measured is not None]
     predictor = Predictor(model, track_paths, in_feats.index('ctcf'), log_tracks, n_out, seq_dir, args, device,
                           measured)
     print(f'[rad21-ko] {name}: inputs {in_feats}, sequence '
           f'{"ignored" if hp.get("layer2_no_seq", False) else "used"}, {bin_bp} bp bins; KO inputs: '
           f'simulated ({args.ctcf_ko_mode!r}, peak height {args.ctcf_ko_peak_height})'
-          + (f', measured ({args.ctcf_ko_scaling} scaling)' if measured else '') + '.')
+          + (f', measured ({args.ctcf_ko_scaling} scaling)' if measured else '') + '; RAD21 truth: '
+          + (f'raw pair ({args.rad21_ko_scaling} scaling)' if rad21_raw else 'normalised tracks')
+          + f', log2FC {"centred" if args.center_lfc else "not centred"}.')
     with pyBigWig.open(wt_rad21) as bw:
         chrom_sizes = bw.chroms()
     scale_cache = {}
 
     if not args.genes_only:
-        benchmark(predictor, arms, args, label, out_dir, chrom_sizes, scale_cache, wt_rad21, ko_rad21,
-                  in_feats, hp, measured)
+        benchmark(predictor, arms, args, label, out_dir, chrom_sizes, scale_cache, exp_rad21,
+                  in_feats, hp, measured, rad21_raw)
     if args.genes:
         table = load_gene_table(args.gtf)
         plot_genes(predictor, find_genes(table, args.genes), table, chrom_sizes, scale_cache, args, label,
-                   out_dir, wt_rad21, ko_rad21)
+                   out_dir, exp_rad21)
 
 
-def benchmark(predictor, arms, args, label, out_dir, chrom_sizes, scale_cache, wt_rad21, ko_rad21,
-              in_feats, hp, measured):
+def benchmark(predictor, arms, args, label, out_dir, chrom_sizes, scale_cache, exp_rad21,
+              in_feats, hp, measured, rad21_raw):
     bin_bp = predictor.bin_bp
     hw = args.peak_half_width_bp // bin_bp
     pc = args.pseudocount
@@ -765,8 +847,7 @@ def benchmark(predictor, arms, args, label, out_dir, chrom_sizes, scale_cache, w
     for chrom in args.chroms:
         pred = predictor.chrom(chrom, chrom_sizes[chrom])
         n_bins = len(pred['pred_wt'])
-        exp_wt = binned_bigwig(wt_rad21, chrom, n_bins, bin_bp)
-        exp_ko = binned_bigwig(ko_rad21, chrom, n_bins, bin_bp)
+        exp_wt, exp_ko = exp_rad21(chrom, n_bins, bin_bp)
         covered = np.isfinite(pred['pred_wt'])
         for a in ('wt', *arms):
             bin_stats[a][0].append((exp_wt if a == 'wt' else exp_ko)[covered])
@@ -779,14 +860,15 @@ def benchmark(predictor, arms, args, label, out_dir, chrom_sizes, scale_cache, w
         for k, v in pred.items():
             d[k] = peak_strength(v, summits, hw)
         d['exp_lfc_raw'] = np.log2((d.exp_ko + pc) / (d.exp_wt + pc))
-        # Per-chromosome scaling offset of the KO target (see module docstring).
-        scale_cache[chrom] = float(2 ** d.exp_lfc_raw.median())
-        d['exp_lfc'] = d.exp_lfc_raw - d.exp_lfc_raw.median()
+        # Per-chromosome scaling offset of the KO target (see module docstring); 1 when not centred.
+        med = d.exp_lfc_raw.median() if args.center_lfc else 0.0
+        scale_cache[chrom] = float(2 ** med)
+        d['exp_lfc'] = d.exp_lfc_raw - med
         d['exp_ko_wt_scale'] = d.exp_ko / scale_cache[chrom]
         for a in arms:
             raw = np.log2((d[f'pred_{a}'] + pc) / (d.pred_wt + pc))
             d[f'pred_lfc_raw_{a}'] = raw
-            d[f'pred_lfc_{a}'] = raw - raw.median()
+            d[f'pred_lfc_{a}'] = raw - (raw.median() if args.center_lfc else 0.0)
         if args.loci_per_class > 0:      # per-bin tracks for the locus gallery
             store[chrom] = dict(pred, exp_wt=exp_wt, exp_ko=exp_ko / scale_cache[chrom])
         print(f'[rad21-ko] {chrom}: {len(d)} peaks; median raw log2 KO/WT exp {d.exp_lfc_raw.median():+.2f}, '
@@ -813,8 +895,13 @@ def benchmark(predictor, arms, args, label, out_dir, chrom_sizes, scale_cache, w
         'checkpoint': args.checkpoint, 'label': label, 'input_features': in_feats,
         'uses_sequence': not hp.get('layer2_no_seq', False), 'chroms': args.chroms, 'bin_bp': bin_bp,
         'n_peaks': int(len(df)), 'settings': {k: v for k, v in vars(args).items() if k != 'checkpoint'},
+        'lfc_centred': args.center_lfc,
+        'rad21_truth': ({'mode': 'raw', 'wt': args.wt_rad21_raw, 'ko': args.ko_rad21_raw} if rad21_raw else
+                        {'mode': 'normalised', 'wt': os.path.join(args.wt_dir, 'genomic_features', 'rad21.bw'),
+                         'ko': os.path.join(args.ko_dir, 'genomic_features', args.ko_rad21)}),
         'ko_rad21_scale': {c: scale_cache[c] for c in args.chroms},
         'measured_ctcf_ko_normalisation': measured.stats if measured else None,
+        'measured_rad21_normalisation': rad21_raw.stats if rad21_raw else None,
         'wt_bins': bins('wt'),
         'wt_peaks': corr_block(df.pred_wt.values, df.exp_wt.values),
         # The model predicting "nothing changes" -- what KO R^2 has to beat.
