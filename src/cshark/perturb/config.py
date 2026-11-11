@@ -46,6 +46,7 @@ class PerturbConfig:
     # --- inputs ---
     seq2_path: Optional[str] = None      # diploid second allele
     bigwigs: Dict[str, str] = field(default_factory=dict)
+    ko_bigwigs: Dict[str, str] = field(default_factory=dict)   # --ko-bigwig: measured KO-arm tracks
     out_file: Optional[str] = None       # full-chrom TSV output
 
     # --- perturbation ---
@@ -117,6 +118,7 @@ class PerturbConfig:
         split ``bigwigs`` into ctcf/atac/other paths and normalise ko lists.
         """
         bigwigs = dict(args.bigwigs) if getattr(args, 'bigwigs', None) else {}
+        ko_bigwigs = dict(args.ko_bigwigs) if getattr(args, 'ko_bigwigs', None) else {}
         ko_data = args.ko_data
         ko_mode = args.ko_mode
         if isinstance(ko_data, str):
@@ -134,6 +136,7 @@ class PerturbConfig:
         kwargs = {k: v for k, v in vars(args).items() if k in known}
         kwargs.update(
             bigwigs=bigwigs,
+            ko_bigwigs=ko_bigwigs,
             ko_data=ko_data,
             ko_mode=ko_mode,
             ctcf_path=bigwigs.get('ctcf'),

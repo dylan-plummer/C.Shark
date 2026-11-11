@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Path to the second allele sequence .fa.gz files')
     parser.add_argument('--bigwigs', nargs='*', required=False, action=ParseKwargs,
                         help='Paths to the bigwig files for genomic features (key=value)')
+    parser.add_argument('--ko-bigwig', dest='ko_bigwigs', nargs='*', required=False, action=ParseKwargs,
+                        help='Measured KO tracks (key=value, e.g. ctcf=ctcf_ko.bw): replace that track in the '
+                             'KO arm only, while the WT arm keeps its --bigwigs track. Each must be on the same '
+                             'scale as its WT track. A measured rad21 replaces the hierarchical RAD21 update. '
+                             'Full-chromosome mode only.')
     parser.add_argument('--plot-bigwigs', dest='plot_bigwigs', nargs='+', required=False,
                         help='Names of bigwig tracks to plot (not inputs)')
     parser.add_argument('--plot-pred-bigwigs', dest='plot_pred_bigwigs', nargs='+', required=False,
@@ -232,6 +237,9 @@ def main():
     # Reject unsupported deletion requests before any model is loaded.
     from cshark.perturb.operators.deletion import validate_deletion_request
     validate_deletion_request(cfg)
+    if cfg.ko_bigwigs and (cfg.start is not None or cfg.allele_haplotype):
+        raise SystemExit('--ko-bigwig is only supported in full-chromosome mode '
+                         '(no --start, no --allele-haplotype).')
 
     # Deferred imports: these pull in torch via cshark.inference.utils.
     if cfg.allele_haplotype:

@@ -178,6 +178,30 @@ def run_full_chrom(cfg):
             cfg.alphagenome_model_path, target_tracks=enf_target_tracks, species=_species,
             celltype=cfg.celltype, metadata_path=cfg.alphagenome_metadata_path)
 
+    # --- --ko-bigwig: measured KO-arm tracks -------------------------------------
+    # Each named track is read from its own bigwig in the KO arm only; the WT arm
+    # (and the WT copies the hierarchical delta uses) keeps the --bigwigs track.
+    # Read with the same log1p transform load_region applies to the WT tracks.
+    ko_bigwig_feats = {}
+    for name, path in (cfg.ko_bigwigs or {}).items():
+        if name not in input_track_names:
+            raise SystemExit(f'--ko-bigwig {name}: not a model input track {input_track_names}.')
+        if name in ko_data:
+            raise SystemExit(f'--ko-bigwig {name}: also given in --ko; knock it out or replace it, not both.')
+        if alt_seq_active:
+            raise SystemExit('--ko-bigwig cannot be combined with --alt-fasta.')
+        feat = GenomicFeature(path, 'log')
+        if not feat.track_present:
+            raise SystemExit(f'--ko-bigwig {name}: cannot open {path}.')
+        if feat.length(chr_name) is None:
+            raise SystemExit(f'--ko-bigwig {name}: {chr_name} not in {path}.')
+        ko_bigwig_feats[name] = feat
+        print(f'[ko-bigwig] KO-arm {name} read from {path} (WT arm keeps '
+              f'{input_track_paths[input_track_names.index(name)]}).')
+    if use_hierarchical and 'rad21' in ko_bigwig_feats:
+        print('[hierarchical] --ko-bigwig rad21: the measured KO rad21 replaces the '
+              'hierarchical update in every window.')
+
     results_hierarchical = {'chrom': [], 'start': [], 'end': []}
     if use_hierarchical:
         for col in ['rad21_WT_pred', 'rad21_KO_pred', 'rad21_delta', 'rad21_fc',
@@ -395,7 +419,18 @@ def run_full_chrom(cfg):
                 atac_region, other_regions, ko_data=ko_data, ko_channels=ko_channels,
                 channel_offset=channel_offset, ko_mode=ko_mode,
                 peak_height=args.peak_height)
-            if use_hierarchical and 'rad21' in ko_data and other_regions is not None:
+            # Measured KO tracks: rebind (never modify in place), so the WT copies
+            # taken above stay untouched.
+            for name, feat in ko_bigwig_feats.items():
+                measured = feat.get(chr_name, start, start + window)
+                if name == 'ctcf':
+                    ctcf_region = measured
+                elif name == 'atac':
+                    atac_region = measured
+                else:
+                    other_regions[input_track_names.index(name) - channel_offset] = measured
+            if use_hierarchical and ('rad21' in ko_data or 'rad21' in ko_bigwig_feats) \
+                    and other_regions is not None:
                 rad21_user_ko = other_regions[rad21_other_idx_hier].copy()
 
         if redistribute_alleles:
